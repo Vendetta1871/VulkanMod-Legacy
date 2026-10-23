@@ -1,0 +1,588 @@
+package net.vulkanmod.render;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
+import net.minecraft.entity.Entity;
+import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.minecraft.util.ResourceLocation;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+import net.minecraft.world.WorldProvider;
+import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.Drawer;
+import net.vulkanmod.vulkan.Pipeline;
+import net.vulkanmod.vulkan.VRenderSystem;
+import net.vulkanmod.vulkan.texture.VTextureSelector;
+import net.vulkanmod.vulkan.texture.VulkanImage;
+import org.joml.Matrix4f;
+import org.joml.Vector4f;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.system.MemoryUtil;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+import java.util.Random;
+
+/**
+ * Vulkan port of the 1.12.2 overworld sky (see {@code RenderGlobal.renderSky}).
+ *
+ * <p>Drawn at the head of {@code renderSky} (see RenderGlobalM) while the vanilla GL
+ * sky still executes right after (its output is never presented). All sky geometry is
+ * deterministic or CPU-side, so it is rebuilt here instead of intercepting the GL
+ * draws: the fogged sky plane, the smooth-shaded sunrise/sunset glow fan, the sun and
+ * moon quads and the star field.</p>
+ *
+ * <p>The matrices are mirrored from the live GL state exactly like the terrain does:
+ * the modelview/projection are read at the head of {@code renderSky} (where the
+ * projection is the sky-specific one set up by {@code renderWorldPass}), and the
+ * element rotations from the {@code GlStateManager.rotate} sequence inside
+ * {@code renderSky} are applied on top with joml.</p>
+ */
+public class SkyRenderer {
+
+    private static Pipeline skyPipeline;      // POSITION: flat color + fog (plane, stars)
+    private static Pipeline skyTexPipeline;   // POSITION_TEX: color * texture (sun, moon)
+    private static Pipeline skyVcolPipeline;  // POSITION_COLOR: glow fan
+
+    private static ByteBuffer skyPlaneBuffer;
+    private static ByteBuffer starBuffer;
+    private static int starVertexCount;
+    private static ByteBuffer sunBuffer;
+    private static ByteBuffer moonBuffer;
+    private static ByteBuffer fanBuffer;
+    private static int builtMoonPhase = -1;
+
+    private static VulkanImage sunTexture;
+    private static VulkanImage moonTexture;
+
+    private static final VertexFormat POSITION = DefaultVertexFormats.POSITION;
+    private static final VertexFormat POSITION_TEX = DefaultVertexFormats.POSITION_TEX;
+    private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
+
+    /** 13x13 quads, 4 vertices each (the vanilla glSkyList loop). */
+    private static final int SKY_PLANE_VERTS = 13 * 13 * 4;
+
+    private static final float PI = (float) Math.PI;
+    private static final float HALF_PI = (float) (Math.PI / 2.0);
+    private static final float TWO_PI = (float) (Math.PI * 2.0);
+
+    private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
+    private static final FloatBuffer float1 = MemoryUtil.memAllocFloat(1);
+    private static final ByteBuffer bool1 = MemoryUtil.memAlloc(1);
+
+    public static void init() {
+        skyPipeline = new Pipeline(POSITION, "sky");
+        skyTexPipeline = new Pipeline(POSITION_TEX, "sky_tex");
+        skyVcolPipeline = new Pipeline(POSITION_COLOR, "sky_vcol");
+
+        skyPlaneBuffer = MemoryUtil.memAlloc(SKY_PLANE_VERTS * 12);
+        starBuffer = buildStars();
+        sunBuffer = buildSun();
+        moonBuffer = MemoryUtil.memAlloc(4 * POSITION_TEX.getSize());
+        fanBuffer = MemoryUtil.memAlloc(18 * POSITION_COLOR.getSize());
+    }
+
+    /** Called at the head of {@code RenderGlobal.renderSky}, before the GL sky runs. */
+    public static void render(float partialTicks, int pass) {
+        Minecraft mc = Minecraft.getMinecraft();
+        World world = mc.world;
+        if (world == null || !Drawer.isActive() || Drawer.skipRendering) {
+            return;
+        }
+
+        WorldProvider provider = world.provider;
+        // Custom (modded) sky renderers and the End dimension keep their GL-only path
+        // for now; only the vanilla surface sky is ported.
+        if (provider.getSkyRenderer() != null || provider.getDimensionType().getId() == 1
+                || !provider.isSurfaceWorld()) {
+            return;
+        }
+
+        try {
+            renderSky(mc, world, partialTicks, pass);
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("sky", t);
+        } finally {
+            // The terrain pass re-snapshots every state it needs, but the blend state
+            // and the Sampler0 binding are read as-is at draw time, so restore them.
+            Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
+            TextureBridge.restoreAtlasBinding();
+        }
+    }
+
+    private static int debugTick;
+    private static boolean celestialLogPending;
+
+    private static void renderSky(Minecraft mc, World world, float partialTicks, int pass) {
+        Drawer drawer = Drawer.getInstance();
+
+        // --- state mirrored from GL at the head of renderSky ---
+        VRenderSystem.updateProjectionMatrix();
+        VRenderSystem.updateModelViewMatrix();
+        Matrix4f headMV = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
+        // Vanilla's modelview at renderSky time is the camera rotation only: the -eye
+        // translate happens later, per layer in renderBlockLayer. So the whole sky -
+        // the plane at y=16 and the celestial bodies at (0,+-100,0) - floats around
+        // the camera. Zero the (re-centered, residual) translation Kirino reports and
+        // keep every vertex in that same camera-relative space, exactly like vanilla.
+        headMV.set(0, 3, 0.0f).set(1, 3, 0.0f).set(2, 3, 0.0f);
+
+        // This head modelview is the same pure camera rotation vanilla has when it calls
+        // RenderHelper.enableStandardItemLighting() just before renderEntities, so it is
+        // the right basis to put the entity shading lights into eye space.
+        VRenderSystem.setLightDirections(headMV);
+
+        snapshotFog();
+
+        if (debugTick++ % 40 == 0) {
+            debugLog(mc, world, partialTicks, pass);
+        }
+
+        VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
+        if (boolState(GL11.GL_DEPTH_TEST)) {
+            VRenderSystem.enableDepthTest();
+        } else {
+            VRenderSystem.disableDepthTest();
+        }
+        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, (java.nio.IntBuffer) int1());
+        VRenderSystem.depthFunc(int1().get(0));
+        // Vanilla keeps GL_CULL_FACE enabled through all of renderSky (renderWorldPass
+        // enables it before the sky). That is what makes the sky plane one-sided: with
+        // the plane's front face up (+Y, see buildSkyPlane), looking up sees the culled
+        // underside, so the sky reads as the clear/fog colour overhead and only rays
+        // past the zenith catch the fogged plane top. The sun, moon, fan and star quads
+        // use vanilla's vertex order and face the camera, so mirroring the live cull
+        // state keeps them visible exactly as vanilla does.
+        if (boolState(GL11.GL_CULL_FACE)) {
+            VRenderSystem.enableCull();
+        } else {
+            VRenderSystem.disableCull();
+        }
+
+        // The sky never writes depth (vanilla sets depthMask(false) before the plane).
+        VRenderSystem.depthMask(false);
+
+        // --- sky plane (fogged sky color) ---
+        Vec3d sky = world.getSkyColor(mc.getRenderViewEntity(), partialTicks);
+        float r = (float) sky.x, g = (float) sky.y, b = (float) sky.z;
+        if (pass != 2) {
+            float[] desat = desaturate(r, g, b);
+            r = desat[0]; g = desat[1]; b = desat[2];
+        }
+        VRenderSystem.setShaderColor(r, g, b, 1.0f);
+        VRenderSystem.setShaderPipeline(skyPipeline);
+        Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
+        VRenderSystem.applyModelViewMatrix(headMV);
+        VRenderSystem.calculateMVP();
+        buildSkyPlane();
+        drawer.draw(skyPlaneBuffer, 7, POSITION, SKY_PLANE_VERTS);
+
+        // From here on the GL sky disables fog.
+        VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
+
+        // --- sunrise/sunset glow fan ---
+        float[] glow = world.provider.calcSunriseSunsetColors(
+                world.getCelestialAngle(partialTicks), partialTicks);
+        if (glow != null) {
+            float cr = glow[0], cg = glow[1], cb = glow[2];
+            if (pass != 2) {
+                float[] desat = desaturate(cr, cg, cb);
+                cr = desat[0]; cg = desat[1]; cb = desat[2];
+            }
+            // rotate(90, x) * rotate(sin(angle) < 0 ? 180 : 0, z) * rotate(90, z)
+            Matrix4f mv = new Matrix4f(headMV)
+                    .rotate(HALF_PI, 1.0f, 0.0f, 0.0f)
+                    .rotate(MathHelper.sin(world.getCelestialAngleRadians(partialTicks)) < 0.0f ? PI : 0.0f,
+                            0.0f, 0.0f, 1.0f)
+                    .rotate(HALF_PI, 0.0f, 0.0f, 1.0f);
+
+            buildFan(cr, cg, cb, glow[3], glow[0], glow[1], glow[2]);
+            VRenderSystem.setShaderPipeline(skyVcolPipeline);
+            Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE; // SRC_ALPHA / ONE_MINUS_SRC_ALPHA
+            VRenderSystem.applyModelViewMatrix(mv);
+            VRenderSystem.calculateMVP();
+            drawer.draw(fanBuffer, 6, POSITION_COLOR, 18);
+        }
+
+        // --- sun, moon, stars (one shared rotation block) ---
+        // rotate(-90, y) * rotate(celestialAngle * 2PI, x)
+        Matrix4f celestial = new Matrix4f(headMV)
+                .rotate(-HALF_PI, 0.0f, 1.0f, 0.0f)
+                .rotate(world.getCelestialAngle(partialTicks) * (TWO_PI), 1.0f, 0.0f, 0.0f);
+        VRenderSystem.applyModelViewMatrix(celestial);
+        VRenderSystem.calculateMVP();
+
+        // Forensics: where does the MVP buffer the shader will read put the sun center?
+        if (debugTick % 40 == 1 || celestialLogPending) {
+            celestialLogPending = false;
+            java.nio.FloatBuffer mvpBuf = VRenderSystem.getMVP().asFloatBuffer().position(0).limit(16);
+            float[] m = new float[16];
+            mvpBuf.get(m);
+            // Same read path as the shader's UBO: joml's FloatBuffer ctor is column-major.
+            Matrix4f mvp = new Matrix4f(VRenderSystem.getMVP().asFloatBuffer().position(0).limit(16));
+            Vector4f clip = mvp.transform(new Vector4f(0.0f, 100.0f, 0.0f, 1.0f));
+            Vector4f moonClip = mvp.transform(new Vector4f(0.0f, -100.0f, 0.0f, 1.0f));
+            Initializer.LOGGER.info(
+                    "[sky] sunClip=({},{},{},{}) ndc=({},{}) moonNdc=({},{}) w={} angle={}",
+                    clip.x, clip.y, clip.z, clip.w, clip.x / clip.w, clip.y / clip.w,
+                    moonClip.x / moonClip.w, moonClip.y / moonClip.w, moonClip.w,
+                    world.getCelestialAngle(partialTicks));
+            Initializer.LOGGER.info("[sky] rawMVP={}", raws(m));
+        }
+
+        float rainFade = 1.0f - world.getRainStrength(partialTicks);
+
+        if (ensureCelestialTextures()) {
+            VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, rainFade);
+            VRenderSystem.setShaderPipeline(skyTexPipeline);
+            // GL_SRC_ALPHA, GL_ONE: additive, like the GL sky
+            Drawer.currentBlendState = new Pipeline.BlendState(GL11.GL_SRC_ALPHA, GL11.GL_ONE,
+                    GL11.GL_ONE, GL11.GL_ZERO);
+
+            VTextureSelector.bindTexture(sunTexture);
+            drawer.draw(sunBuffer, 7, POSITION_TEX, 4);
+
+            buildMoon(world.getMoonPhase());
+            VTextureSelector.bindTexture(moonTexture);
+            drawer.draw(moonBuffer, 7, POSITION_TEX, 4);
+        }
+
+        float starBrightness = world.getStarBrightness(partialTicks) * rainFade;
+        if (starBrightness > 0.0f) {
+            VRenderSystem.setShaderColor(starBrightness, starBrightness, starBrightness, starBrightness);
+            VRenderSystem.setShaderPipeline(skyPipeline);
+            drawer.draw(starBuffer, 7, POSITION, starVertexCount);
+        }
+    }
+
+    /**
+     * Requests a precise one-shot dump of the sun/moon clip positions from inside the
+     * next renderSky frame (where the live GL matrices are the world's). AutoTest sets
+     * this right before each sky capture so the screenshot matches the prediction.
+     */
+    public static void logCelestial(Minecraft mc, float partialTicks) {
+        celestialLogPending = true;
+    }
+
+    /** Throttled dump of the inputs the sky is built from, for autotest forensics. */
+    private static void debugLog(Minecraft mc, World world, float partialTicks, int pass) {
+        try {
+            float[] rawMv = new float[16];
+            float[] rawPr = new float[16];
+            GL11.glGetFloatv(GL11.GL_MODELVIEW_MATRIX, rawMv);
+            GL11.glGetFloatv(GL11.GL_PROJECTION_MATRIX, rawPr);
+            Initializer.LOGGER.info("[sky] rawMV={} rawPR={}", raws(rawMv), raws(rawPr));
+            Vec3d sky = world.getSkyColor(mc.getRenderViewEntity(), partialTicks);
+            GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
+            float[] head = {float4.get(0), float4.get(1), float4.get(2), float4.get(3)};
+            GL11.glGetFloatv(GL11.GL_FOG_COLOR, float4);
+            float[] fogCol = {float4.get(0), float4.get(1), float4.get(2), float4.get(3)};
+            GL11.glGetFloatv(GL11.GL_FOG_START, float1);
+            float fogStart = float1.get(0);
+            GL11.glGetFloatv(GL11.GL_FOG_END, float1);
+            float fogEnd = float1.get(0);
+            Initializer.LOGGER.info(
+                    "[sky] pass={} angle={} sky=({},{},{}) headColor=({},{},{},{}) fog={} start={} end={} fogCol=({},{},{}) glow={} star={} rain={}",
+                    pass, world.getCelestialAngle(partialTicks), sky.x, sky.y, sky.z,
+                    head[0], head[1], head[2], head[3],
+                    boolState(GL11.GL_FOG), fogStart, fogEnd, fogCol[0], fogCol[1], fogCol[2],
+                    world.provider.calcSunriseSunsetColors(world.getCelestialAngle(partialTicks), partialTicks) != null,
+                    world.getStarBrightness(partialTicks), world.getRainStrength(partialTicks));
+            Matrix4f mv = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
+            Matrix4f pr = new Matrix4f(VRenderSystem.getProjectionMatrix4f());
+            Initializer.LOGGER.info("[sky] mv={} proj={}",
+                    String.format("%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f",
+                            mv.m00(), mv.m01(), mv.m02(), mv.m03(), mv.m10(), mv.m11(), mv.m12(), mv.m13(),
+                            mv.m20(), mv.m21(), mv.m22(), mv.m23(), mv.m30(), mv.m31(), mv.m32(), mv.m33()),
+                    String.format("%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f",
+                            pr.m00(), pr.m01(), pr.m02(), pr.m03(), pr.m10(), pr.m11(), pr.m12(), pr.m13(),
+                            pr.m20(), pr.m21(), pr.m22(), pr.m23(), pr.m30(), pr.m31(), pr.m32(), pr.m33()));
+        } catch (Throwable t) {
+            Initializer.LOGGER.warn("[sky] debug log failed", t);
+        }
+    }
+
+    // --- geometry builders (replicating the vanilla generators) ---
+
+    /**
+     * Refills the sky plane (vanilla glSkyList: a y=16 grid from -384 to 384). Vanilla
+     * draws it with a rotation-only modelview (the -eye translate happens later, per
+     * block layer), so the grid floats around the camera at y=+16. The head modelview
+     * here is likewise rotation-only, so the vertices stay in raw camera-relative
+     * space - no eye subtraction.
+     *
+     * The winding is chosen so the plane's front face points UP (+Y): with GL_CULL_FACE
+     * enabled (as vanilla keeps it through renderSky) the underside is culled, so
+     * looking up shows the clear/fog colour and only rays past the zenith catch the
+     * fogged plane. This is what makes the sky read as the fog colour overhead rather
+     * than a saturated sky-coloured sheet. Rebuilt every frame (the rotation changes).
+     */
+    private static void buildSkyPlane() {
+        ByteBuffer buf = skyPlaneBuffer;
+        buf.position(0);
+        for (int k = -384; k <= 384; k += 64) {
+            for (int l = -384; l <= 384; l += 64) {
+                float f = k;
+                float f1 = k + 64;
+                putPos(buf, f, 16.0f, l);
+                putPos(buf, f, 16.0f, l + 64.0f);
+                putPos(buf, f1, 16.0f, l + 64.0f);
+                putPos(buf, f1, 16.0f, l);
+            }
+        }
+        buf.position(0);
+    }
+
+    /** {@code RenderGlobal.renderStars}: 1500 deterministic star quads. */
+    private static ByteBuffer buildStars() {
+        ByteBuffer buf = MemoryUtil.memAlloc(1500 * 4 * 12);
+        Random random = new Random(10842L);
+        int verts = 0;
+
+        for (int i = 0; i < 1500; ++i) {
+            double d0 = random.nextFloat() * 2.0F - 1.0F;
+            double d1 = random.nextFloat() * 2.0F - 1.0F;
+            double d2 = random.nextFloat() * 2.0F - 1.0F;
+            double d3 = 0.15F + random.nextFloat() * 0.1F;
+            double d4 = d0 * d0 + d1 * d1 + d2 * d2;
+            if (d4 < 1.0D && d4 > 0.01D) {
+                d4 = 1.0D / Math.sqrt(d4);
+                d0 *= d4;
+                d1 *= d4;
+                d2 *= d4;
+                double d5 = d0 * 100.0D;
+                double d6 = d1 * 100.0D;
+                double d7 = d2 * 100.0D;
+                double d8 = Math.atan2(d0, d2);
+                double d9 = Math.sin(d8);
+                double d10 = Math.cos(d8);
+                double d11 = Math.atan2(Math.sqrt(d0 * d0 + d2 * d2), d1);
+                double d12 = Math.sin(d11);
+                double d13 = Math.cos(d11);
+                double d14 = random.nextDouble() * Math.PI * 2.0D;
+                double d15 = Math.sin(d14);
+                double d16 = Math.cos(d14);
+
+                for (int j = 0; j < 4; ++j) {
+                    double d18 = ((j & 2) - 1) * d3;
+                    double d19 = ((j + 1 & 2) - 1) * d3;
+                    double d21 = d18 * d16 - d19 * d15;
+                    double d22 = d19 * d16 + d18 * d15;
+                    double d24 = d21 * d12;
+                    double d25 = -d21 * d13;
+                    double d26 = d25 * d9 - d22 * d10;
+                    double d28 = d22 * d9 + d25 * d10;
+                    buf.putFloat((float) (d5 + d26));
+                    buf.putFloat((float) (d6 + d24));
+                    buf.putFloat((float) (d7 + d28));
+                    ++verts;
+                }
+            }
+        }
+
+        starVertexCount = verts;
+        buf.position(0);
+        return buf;
+    }
+
+    /** The sun quad: 30x30 at y=100, full texture. */
+    private static ByteBuffer buildSun() {
+        ByteBuffer buf = MemoryUtil.memAlloc(4 * 20);
+        putPosUv(buf, -30.0f, 100.0f, -30.0f, 0.0f, 0.0f);
+        putPosUv(buf, 30.0f, 100.0f, -30.0f, 1.0f, 0.0f);
+        putPosUv(buf, 30.0f, 100.0f, 30.0f, 1.0f, 1.0f);
+        putPosUv(buf, -30.0f, 100.0f, 30.0f, 0.0f, 1.0f);
+        buf.position(0);
+        return buf;
+    }
+
+    /** The moon quad: 20x20 at y=-100, UVs picking the current phase cell. */
+    private static void buildMoon(int moonPhase) {
+        if (moonPhase == builtMoonPhase) {
+            return;
+        }
+        builtMoonPhase = moonPhase;
+
+        int k = moonPhase % 4;
+        int l = moonPhase / 4 % 2;
+        float u0 = k / 4.0f, v0 = l / 2.0f;
+        float u1 = (k + 1) / 4.0f, v1 = (l + 1) / 2.0f;
+
+        moonBuffer.position(0);
+        putPosUv(moonBuffer, -20.0f, -100.0f, 20.0f, u1, v1);
+        putPosUv(moonBuffer, 20.0f, -100.0f, 20.0f, u0, v1);
+        putPosUv(moonBuffer, 20.0f, -100.0f, -20.0f, u0, v0);
+        putPosUv(moonBuffer, -20.0f, -100.0f, -20.0f, u1, v0);
+        moonBuffer.position(0);
+    }
+
+    /** The glow fan: center at (0,100,0) plus 17 rim vertices, rebuilt every frame. */
+    private static void buildFan(float cr, float cg, float cb, float ca,
+                                 float rimR, float rimG, float rimB) {
+        fanBuffer.position(0);
+        putPosColor(fanBuffer, 0.0f, 100.0f, 0.0f, cr, cg, cb, ca);
+        for (int l = 0; l <= 16; ++l) {
+            float angle = l * (float) (Math.PI * 2.0) / 16.0f;
+            float sin = MathHelper.sin(angle);
+            float cos = MathHelper.cos(angle);
+            // The rim keeps the raw (non-desaturated) glow color, like vanilla.
+            putPosColor(fanBuffer, sin * 120.0f, cos * 120.0f, -cos * 40.0f * ca,
+                    rimR, rimG, rimB, 0.0f);
+        }
+        fanBuffer.position(0);
+    }
+
+    // --- textures ---
+
+    private static boolean texturesFailed;
+
+    private static boolean ensureCelestialTextures() {
+        if (sunTexture != null && moonTexture != null) {
+            return true;
+        }
+        if (texturesFailed) {
+            return false;
+        }
+        try {
+            if (sunTexture == null) {
+                sunTexture = loadTexture("textures/environment/sun.png");
+            }
+            if (moonTexture == null) {
+                moonTexture = loadTexture("textures/environment/moon_phases.png");
+            }
+            Initializer.LOGGER.info("[sky] celestial textures uploaded");
+            return true;
+        } catch (Exception e) {
+            texturesFailed = true;
+            Initializer.LOGGER.error("[sky] cannot load sun/moon textures", e);
+            return false;
+        }
+    }
+
+    /**
+     * Uploads a PNG straight from the resource manager (no GL round-trip). The row
+     * order matches the GL texture: Minecraft uploads the BufferedImage rows as-is,
+     * so row 0 of both textures is the top of the image and the UVs transfer 1:1.
+     */
+    private static VulkanImage loadTexture(String path) throws Exception {
+        net.minecraft.client.resources.IResource resource = Minecraft.getMinecraft()
+                .getResourceManager().getResource(new ResourceLocation(path));
+
+        BufferedImage image;
+        try (InputStream stream = resource.getInputStream()) {
+            image = ImageIO.read(stream);
+        }
+        if (image == null) {
+            throw new java.io.IOException("cannot decode " + path);
+        }
+
+        int width = image.getWidth();
+        int height = image.getHeight();
+        ByteBuffer pixels = MemoryUtil.memAlloc(width * height * 4);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int argb = image.getRGB(x, y);
+                pixels.put((byte) (argb >> 16));
+                pixels.put((byte) (argb >> 8));
+                pixels.put((byte) argb);
+                pixels.put((byte) (argb >>> 24));
+            }
+        }
+        pixels.position(0);
+        pixels.limit(width * height * 4);
+
+        // LINEAR filtering + clamp, like the vanilla environment textures.
+        // Vanilla uploads sun/moon via SimpleTexture without mcmeta: blur=false, no mipmaps.
+        VulkanImage texture = new VulkanImage(1, width, height, 4, false, true);
+        texture.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
+        MemoryUtil.memFree(pixels);
+        return texture;
+    }
+
+    // --- helpers ---
+
+    private static float[] desaturate(float r, float g, float b) {
+        return new float[] {
+                (r * 30.0f + g * 59.0f + b * 11.0f) / 100.0f,
+                (r * 30.0f + g * 70.0f) / 100.0f,
+                (r * 30.0f + b * 70.0f) / 100.0f
+        };
+    }
+
+    private static void snapshotFog() {
+        if (!boolState(GL11.GL_FOG)) {
+            VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
+            return;
+        }
+        java.nio.IntBuffer int1 = int1();
+        GL11.glGetIntegerv(GL11.GL_FOG_MODE, int1);
+        int mode = switch (int1.get(0)) {
+            case GL11.GL_EXP -> VRenderSystem.FOG_EXP;
+            case GL11.GL_EXP2 -> VRenderSystem.FOG_EXP2;
+            default -> VRenderSystem.FOG_LINEAR;
+        };
+        VRenderSystem.setFogState(mode);
+
+        GL11.glGetFloatv(GL11.GL_FOG_COLOR, float4);
+        VRenderSystem.setFogShaderColor(float4.get(0), float4.get(1), float4.get(2), float4.get(3));
+        GL11.glGetFloatv(GL11.GL_FOG_START, float1);
+        VRenderSystem.setFogStart(float1.get(0));
+        GL11.glGetFloatv(GL11.GL_FOG_END, float1);
+        VRenderSystem.setFogEnd(float1.get(0));
+        GL11.glGetFloatv(GL11.GL_FOG_DENSITY, float1);
+        VRenderSystem.setFogDensity(float1.get(0));
+    }
+
+    private static java.nio.IntBuffer int1Buffer;
+
+    private static java.nio.IntBuffer int1() {
+        if (int1Buffer == null) {
+            int1Buffer = MemoryUtil.memAllocInt(1);
+        }
+        return int1Buffer;
+    }
+
+    private static boolean boolState(int pname) {
+        GL11.glGetBooleanv(pname, bool1);
+        return bool1.get(0) != 0;
+    }
+
+    private static String raws(float[] values) {
+        StringBuilder sb = new StringBuilder();
+        for (float v : values) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(String.format("%.4f", v));
+        }
+        return sb.toString();
+    }
+
+    private static void putPos(ByteBuffer buf, float x, float y, float z) {
+        buf.putFloat(x).putFloat(y).putFloat(z);
+    }
+
+    private static void putPosUv(ByteBuffer buf, float x, float y, float z, float u, float v) {
+        buf.putFloat(x).putFloat(y).putFloat(z).putFloat(u).putFloat(v);
+    }
+
+    private static void putPosColor(ByteBuffer buf, float x, float y, float z,
+                                    float r, float g, float b, float a) {
+        buf.putFloat(x).putFloat(y).putFloat(z);
+        buf.put((byte) (clamp01(r) * 255.0f));
+        buf.put((byte) (clamp01(g) * 255.0f));
+        buf.put((byte) (clamp01(b) * 255.0f));
+        buf.put((byte) (clamp01(a) * 255.0f));
+    }
+
+    private static float clamp01(float v) {
+        return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    }
+
+    private SkyRenderer() {
+    }
+}

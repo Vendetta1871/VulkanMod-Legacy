@@ -1,0 +1,65 @@
+package net.vulkanmod.mixin.render;
+
+import net.minecraft.client.model.ModelBox;
+import net.minecraft.client.model.ModelRenderer;
+import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.GlStateManager;
+import net.minecraft.client.renderer.Tessellator;
+import net.vulkanmod.render.EntityRenderer;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.List;
+
+/**
+ * Mob model parts are normally replayed from a GL display list ({@code glCallList}),
+ * which never routes through the {@link BufferBuilder} the Vulkan capture reads. While
+ * an entity is rendering this redirects the {@code callList} in {@code render} and
+ * {@code renderWithRotation} to rebuild the boxes into the shared BufferBuilder instead,
+ * so each quad flows through {@code WorldVertexBufferUploader.draw} and gets captured.
+ * The per-part translate/rotate the original method applies before the call is left in
+ * place, so the live GL modelview still carries the full part transform.
+ *
+ * <p>The display-list compile itself is flagged so its (recording-only) draws are not
+ * captured with the wrong matrix.</p>
+ */
+@Mixin(ModelRenderer.class)
+public class ModelRendererM {
+
+    @Shadow
+    public List<ModelBox> cubeList;
+
+    private float vulkanmod$scale;
+
+    @Inject(method = {"render(F)V", "renderWithRotation(F)V"}, at = @At("HEAD"))
+    private void vulkanmod$storeScale(float scale, CallbackInfo ci) {
+        this.vulkanmod$scale = scale;
+    }
+
+    @Redirect(method = {"render(F)V", "renderWithRotation(F)V"},
+            at = @At(value = "INVOKE", target = "net/minecraft/client/renderer/GlStateManager.callList(I)V"))
+    private void vulkanmod$rebuildOrCallList(int list) {
+        if (EntityRenderer.isEntityPass()) {
+            BufferBuilder buffer = Tessellator.getInstance().getBuffer();
+            for (ModelBox box : this.cubeList) {
+                box.render(buffer, this.vulkanmod$scale);
+            }
+        } else {
+            GlStateManager.callList(list);
+        }
+    }
+
+    @Inject(method = "compileDisplayList(F)V", at = @At("HEAD"))
+    private void vulkanmod$compileStart(float scale, CallbackInfo ci) {
+        EntityRenderer.setCompiling(true);
+    }
+
+    @Inject(method = "compileDisplayList(F)V", at = @At("RETURN"))
+    private void vulkanmod$compileEnd(float scale, CallbackInfo ci) {
+        EntityRenderer.setCompiling(false);
+    }
+}

@@ -1,0 +1,29 @@
+{
+    "UBOs": [
+        {
+            "binding": 0,
+            "type": "vertex",
+            "fields": [
+                { "name": "MVP", "type": "matrix4x4", "count": 16 },
+                { "name": "ModelViewMat", "type": "matrix4x4", "count": 16 },
+                { "name": "Light0_Direction", "type": "float", "count": 3 },
+                { "name": "Light1_Direction", "type": "float", "count": 3 }
+            ]
+        },
+        {
+            "binding": 1,
+            "type": "fragment",
+            "fields": [
+                { "name": "ColorModulator", "type": "float", "count": 4 },
+                { "name": "FogColor", "type": "float", "count": 4 },
+                { "name": "FogStart", "type": "float", "count": 1 },
+                { "name": "FogEnd", "type": "float", "count": 1 },
+                { "name": "FogMode", "type": "int", "count": 1 },
+                { "name": "FogDensity", "type": "float", "count": 1 }
+            ]
+        }
+    ],
+    "samplers": [
+        { "name": "Sampler0" }
+    ]
+}

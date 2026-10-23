@@ -1,0 +1,15 @@
+pluginManagement {
+    repositories {
+        maven {
+            url = 'https://maven.cleanroommc.com'
+        }
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id 'com.cleanroommc.cleanroomgradle.settings' version '0.22.0'
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'vulkanmod-legacy'

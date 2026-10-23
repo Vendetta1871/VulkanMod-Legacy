@@ -1,0 +1,5 @@
+{
+  "frameQueueSize": 2,
+  "vsync": false,
+  "guiOptimizations": true
+}

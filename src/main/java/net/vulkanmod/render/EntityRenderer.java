@@ -1,0 +1,259 @@
+package net.vulkanmod.render;
+
+import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
+import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.minecraft.entity.Entity;
+import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.Drawer;
+import net.vulkanmod.vulkan.Pipeline;
+import net.vulkanmod.vulkan.VRenderSystem;
+import net.vulkanmod.vulkan.texture.VTextureSelector;
+import net.vulkanmod.vulkan.texture.VulkanImage;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.system.MemoryUtil;
+
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+import java.util.HashMap;
+
+/**
+ * Vulkan port of 1.12.2 entity rendering. Vanilla builds entity geometry through the
+ * shared {@link BufferBuilder} (mob model parts are rebuilt into it every frame by
+ * {@code ModelRendererM}, bypassing the GL display lists) and draws it through
+ * {@code WorldVertexBufferUploader.draw}. This class hooks that draw: while an entity
+ * is rendering it captures the finished geometry, mirrors the live GL matrices/state
+ * and replays the batch in Vulkan with the entity's own texture.
+ *
+ * <p>Textures are downloaded from the GL on first use (the same {@code glGetTexImage}
+ * path the atlas uses) and cached by GL texture id; mob skins never change, so the
+ * cache is effectively permanent. The first pass renders mobs fullbright (directional
+ * shading and the lightmap are layered on later).</p>
+ */
+public class EntityRenderer {
+
+    private static Pipeline entityPipeline; // OLDMODEL_POSITION_TEX_NORMAL: texture + fog
+
+    private static final VertexFormat MODEL_FORMAT = DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL;
+
+    /** True between the head and return of {@code RenderManager.renderEntity}. */
+    private static boolean entityPass;
+
+    /** The entity being rendered; supplies the constant lightmap sample. */
+    private static Entity currentEntity;
+
+    private static final float[] tint = new float[3];
+
+    /** True while a model display list is compiling, so the compile-time draw is skipped. */
+    private static boolean compiling;
+
+    /** GL texture id -> uploaded Vulkan image. */
+    private static final HashMap<Integer, VulkanImage> textureCache = new HashMap<>();
+
+    private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
+    private static final ByteBuffer bool1 = MemoryUtil.memAlloc(1);
+    private static final java.nio.IntBuffer int1 = MemoryUtil.memAllocInt(1);
+
+    private static boolean loggedFirst;
+
+    public static void init() {
+        entityPipeline = new Pipeline(MODEL_FORMAT, "entity");
+    }
+
+    public static void setEntityPass(boolean value) {
+        entityPass = value;
+    }
+
+    public static boolean isEntityPass() {
+        return entityPass;
+    }
+
+    public static void setCurrentEntity(Entity entity) {
+        currentEntity = entity;
+    }
+
+    public static void setCompiling(boolean value) {
+        compiling = value;
+    }
+
+    /**
+     * Called at the head of {@code WorldVertexBufferUploader.draw}. Returns false when the
+     * batch is not an entity model draw, so the caller leaves the GL draw untouched.
+     */
+    public static boolean capture(BufferBuilder buffer) {
+        if (!entityPass || compiling || !Drawer.isActive() || Drawer.skipRendering) {
+            return false;
+        }
+        int vertexCount = buffer.getVertexCount();
+        int drawMode = buffer.getDrawMode();
+        VertexFormat format = buffer.getVertexFormat();
+        if (vertexCount <= 0 || drawMode != 7 || format != MODEL_FORMAT) {
+            return false;
+        }
+
+        try {
+            draw(buffer, vertexCount, format);
+            return true;
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("entity", t);
+            return false;
+        }
+    }
+
+    private static void draw(BufferBuilder buffer, int vertexCount, VertexFormat format) {
+        VulkanImage texture = currentEntityTexture();
+        if (texture == null) {
+            return;
+        }
+
+        Drawer drawer = Drawer.getInstance();
+
+        // --- state mirrored from GL at the entity draw ---
+        VRenderSystem.updateProjectionMatrix();
+        VRenderSystem.updateModelViewMatrix();
+        VRenderSystem.calculateMVP();
+
+        snapshotFog();
+
+        VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
+        if (boolState(GL11.GL_DEPTH_TEST)) {
+            VRenderSystem.enableDepthTest();
+        } else {
+            VRenderSystem.disableDepthTest();
+        }
+        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
+        VRenderSystem.depthFunc(int1.get(0));
+
+        // Solid entities keep back-face culling on; mirror the live state.
+        if (boolState(GL11.GL_CULL_FACE)) {
+            VRenderSystem.enableCull();
+        } else {
+            VRenderSystem.disableCull();
+        }
+
+        // The current GL colour is the entity tint (white for most mobs, the dye colour
+        // for a sheep), matching the ColorMaterial diffuse of the fixed-function path,
+        // modulated by the entity's single constant lightmap sample.
+        GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
+        tint[0] = float4.get(0);
+        tint[1] = float4.get(1);
+        tint[2] = float4.get(2);
+
+        int packed = packedLight();
+        if (packed >= 0) {
+            // RenderManager.renderEntityStatic turns the packed light into the lightmap
+            // unit's texture coordinate: block * 16 across, sky * 16 up.
+            TextureBridge.multiplyLightmap(packed % 65536 / 16, packed / 65536 / 16, tint);
+        }
+
+        VRenderSystem.setShaderColor(tint[0], tint[1], tint[2], float4.get(3));
+
+        VRenderSystem.setShaderPipeline(entityPipeline);
+        Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
+        VTextureSelector.bindTexture(texture);
+
+        ByteBuffer data = buffer.getByteBuffer();
+        int prev = data.position();
+        data.position(0);
+        drawer.draw(data, 7, format, vertexCount);
+        data.position(prev);
+
+        if (!loggedFirst) {
+            loggedFirst = true;
+            Initializer.LOGGER.info("[entity] first model draw: {} verts, tex {}", vertexCount, texture);
+        }
+    }
+
+    /**
+     * The entity's packed light exactly as {@code RenderManager.renderEntityStatic}
+     * computes it before handing the entity to its renderer.
+     */
+    private static int packedLight() {
+        if (currentEntity == null) {
+            return -1;
+        }
+        int packed = currentEntity.getBrightnessForRender();
+        if (currentEntity.isBurning()) {
+            packed = 15728880; // full block and sky light while alight
+        }
+        return packed;
+    }
+
+    /**
+     * Maps the GL texture bound on unit 0 (the entity skin, bound by
+     * {@code Render.bindEntityTexture}) to a Vulkan image, downloading and caching it on
+     * first use.
+     */
+    private static VulkanImage currentEntityTexture() {
+        int texId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        if (texId == 0) {
+            return null;
+        }
+        VulkanImage cached = textureCache.get(texId);
+        if (cached != null) {
+            return cached;
+        }
+        VulkanImage image = downloadTexture(texId);
+        if (image != null) {
+            textureCache.put(texId, image);
+        }
+        return image;
+    }
+
+    private static VulkanImage downloadTexture(int texId) {
+        int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, texId);
+        int width = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
+        int height = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
+        if (width <= 0 || height <= 0) {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevBinding);
+            return null;
+        }
+
+        ByteBuffer pixels = MemoryUtil.memAlloc(width * height * 4);
+        GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevBinding);
+        pixels.position(0);
+        pixels.limit(width * height * 4);
+
+        // NEAREST filtering, clamped addressing, single mip level - like the vanilla
+        // entity skins uploaded through SimpleTexture without an mcmeta.
+        VulkanImage image = new VulkanImage(1, width, height, 4, false, true);
+        image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
+        MemoryUtil.memFree(pixels);
+        return image;
+    }
+
+    // --- helpers (mirroring the SkyRenderer/CloudRenderer ones) ---
+
+    private static void snapshotFog() {
+        if (!boolState(GL11.GL_FOG)) {
+            VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
+            return;
+        }
+        GL11.glGetIntegerv(GL11.GL_FOG_MODE, int1);
+        int mode = switch (int1.get(0)) {
+            case GL11.GL_EXP -> VRenderSystem.FOG_EXP;
+            case GL11.GL_EXP2 -> VRenderSystem.FOG_EXP2;
+            default -> VRenderSystem.FOG_LINEAR;
+        };
+        VRenderSystem.setFogState(mode);
+
+        GL11.glGetFloatv(GL11.GL_FOG_COLOR, float4);
+        VRenderSystem.setFogShaderColor(float4.get(0), float4.get(1), float4.get(2), float4.get(3));
+        GL11.glGetFloatv(GL11.GL_FOG_START, float4);
+        VRenderSystem.setFogStart(float4.get(0));
+        GL11.glGetFloatv(GL11.GL_FOG_END, float4);
+        VRenderSystem.setFogEnd(float4.get(0));
+        GL11.glGetFloatv(GL11.GL_FOG_DENSITY, float4);
+        VRenderSystem.setFogDensity(float4.get(0));
+    }
+
+    private static boolean boolState(int pname) {
+        GL11.glGetBooleanv(pname, bool1);
+        return bool1.get(0) != 0;
+    }
+
+    private EntityRenderer() {
+    }
+}

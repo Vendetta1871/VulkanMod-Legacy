@@ -1,0 +1,29 @@
+# Build output
+build/
+.gradle/
+out/
+
+# Run directory: keep configs/scripts that matter to the autotest, drop game state
+run/client/logs/
+run/client/crash-reports/
+run/client/versions/
+run/client/cache/
+run/client/region/
+run/client/DIM-1/
+run/client/DIM1/
+run/client/stats/
+run/client/advancements/
+run/client/optionsof.txt
+run/client/usercache.json
+run/client/usernamecache.json
+run/client/*.png
+run/client/*.log
+run/client/screenshots/
+run/server/
+run/*/saves/
+run/*/options.txt
+
+# IDE
+.idea/
+*.iml
+.vscode/

@@ -1,0 +1,73 @@
+plugins {
+    id 'java'
+    id 'com.cleanroommc.cleanroomgradle'
+}
+
+group = 'net.vulkanmod'
+version = mod_version
+
+base {
+    archivesName = 'VulkanMod_1.12.2'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+dependencies {
+    implementation cleanroom.userdev(cleanroom_version)
+
+    // Vulkan bindings (pure Java, libvulkan is loaded from the system),
+    // Vulkan Memory Allocator and shaderc (GLSL -> SPIR-V at runtime).
+    // The Java side resolves against the LWJGL BOM shipped by Cleanroom.
+    implementation platform("org.lwjgl:lwjgl-bom:${lwjgl_version}")
+    implementation "org.lwjgl:lwjgl-vulkan"
+    implementation "org.lwjgl:lwjgl-vma"
+    implementation "org.lwjgl:lwjgl-shaderc"
+    // Natives for the development run (bundled into the shipped jar separately)
+    runtimeOnly "org.lwjgl:lwjgl-vma:${lwjgl_version}:natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-vma:${lwjgl_version}:natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-windows"
+}
+
+cleanroom {
+    runs {
+        client {
+            configure {
+                username = minecraft_username
+                // Dev equivalent of the mod jar. The loader's LaunchClassLoader is child-first
+                // for org.lwjgl/net.minecraft and parent-first for everything else, so the mod
+                // must NOT sit on the app classpath: it would be defined by the app loader and
+                // get a second, private LWJGL (second SDL instance -> the window handle of the
+                // loader's SDL is invalid there). Instead the classes/resources dirs and the
+                // Vulkan-related LWJGL jars are handed to the LaunchClassLoader only, through
+                // crl.dev.extrapath, and the coremod registers the mixin config early.
+                jvmArgs '-Dfml.coreMods.load=net.vulkanmod.coremod.VulkanModCore'
+                if (extra_jvm_args) {
+                    jvmArgs extra_jvm_args.tokenize()
+                }
+                def ownDirs = (sourceSets.main.output.classesDirs.files +
+                        ([sourceSets.main.output.resourcesDir] as Set)) as List
+                def ownSet = ownDirs as Set
+                doFirst {
+                    def vulkanJars = classpath.files.findAll {
+                        it.name ==~ /lwjgl-(vulkan|vma|shaderc).*\.jar/ && !it.name.contains('windows')
+                    }
+                    jvmArgs "-Dcrl.dev.extrapath=${(ownDirs + vulkanJars).join(File.pathSeparator)}"
+                    classpath = classpath.filter { !ownSet.contains(it) }
+                }
+            }
+        }
+    }
+}
+
+jar {
+    manifest {
+        attributes 'FMLCorePlugin': coremod_plugin_class,
+                'FMLCorePluginContainsFMLMod': true,
+                'ForceLoadAsMod': true
+    }
+}

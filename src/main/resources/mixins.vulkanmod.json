@@ -1,0 +1,36 @@
+{
+  "required": true,
+  "package": "net.vulkanmod.mixin",
+  "name": "vulkanmod.mixins",
+  "refmap": "mixins.vulkanmod.refmap.json",
+  "compatibilityLevel": "JAVA_21",
+  "minVersion": "0.8",
+  "mixins": [
+    "render.WindowBuilderM"
+  ],
+  "client": [
+    "render.MinecraftM",
+    "render.EntityRendererM",
+    "render.RenderGlobalM",
+    "render.RenderManagerM",
+    "render.ModelRendererM",
+    "render.WorldVertexBufferUploaderM",
+    "render.VertexBufferM",
+    "render.VboRenderListM",
+    "render.TextureMapM",
+    "render.TextureAtlasSpriteM",
+    "render.GuiIngameM",
+    "render.GuiScreenM",
+    "render.GlStateManagerAlphaM",
+    "render.TessellatorDiagM",
+    "render.GlDrawDiagM",
+    "render.GuiDiagM",
+    "render.GuiScreenDiagM"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "conformVisibility": true
+  }
+}
