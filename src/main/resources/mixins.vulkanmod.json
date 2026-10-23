@@ -23,6 +23,7 @@
     "render.GuiScreenM",
     "render.GlStateManagerAlphaM",
     "render.GlStateManagerBlendM",
+    "render.GlStateManagerImmediateM",
     "render.FramebufferM"
   ],
   "injectors": {

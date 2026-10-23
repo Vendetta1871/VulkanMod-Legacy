@@ -58,6 +58,18 @@ public class GuiRenderer {
     /** GL texture id -> uploaded Vulkan image (icons, misc, ascii, atlas, ...). */
     private static final HashMap<Integer, VulkanImage> textureCache = new HashMap<>();
 
+    // --- Immediate-mode capture ---
+    // FontRenderer draws each glyph with glBegin(GL_TRIANGLE_STRIP) / glTexCoord2f /
+    // glVertex3f / glEnd, bypassing the BufferBuilder, so the WorldVertexBufferUploader
+    // hook never sees text. These mirror that vertex stream (POSITION_TEX) while a GUI
+    // pass is active and replay it on glEnd.
+    private static boolean imActive;
+    private static int imMode;
+    private static int imCount;
+    private static float imU, imV;
+    private static ByteBuffer imBuffer;
+    private static final int IM_STRIDE = 20; // POSITION_TEX: 3 + 2 floats
+
     private static boolean loggedFirst;
     private static int errorLogs;
 
@@ -135,7 +147,30 @@ public class GuiRenderer {
 
         Drawer drawer = Drawer.getInstance();
 
-        // --- state mirrored from GL at the GUI draw ---
+        Pipeline pipeline = format == POSITION_TEX ? guiPipeline
+                : format == POSITION_COLOR ? guiColorPipeline
+                : guiTexColorPipeline;
+
+        applyGuiState(pipeline, texture);
+
+        ByteBuffer data = buffer.getByteBuffer();
+        int prev = data.position();
+        data.position(0);
+        drawer.draw(data, drawMode, format, vertexCount);
+        data.position(prev);
+
+        if (!loggedFirst) {
+            loggedFirst = true;
+            Initializer.LOGGER.info("[gui] first GUI draw: {} verts, mode {}, format {}", vertexCount, drawMode, format);
+        }
+    }
+
+    /**
+     * Mirrors the GUI render state from the live GL / tracked {@code GlStateManager}
+     * values and binds the pipeline (and texture, when {@code texture} is non-null).
+     * Shared by the BufferBuilder replay and the immediate-mode (font) replay.
+     */
+    private static void applyGuiState(Pipeline pipeline, VulkanImage texture) {
         VRenderSystem.updateProjectionMatrix();
         VRenderSystem.updateModelViewMatrix();
 
@@ -163,28 +198,76 @@ public class GuiRenderer {
         VRenderSystem.setShaderColor(VRenderSystem.trackedColorR, VRenderSystem.trackedColorG,
                 VRenderSystem.trackedColorB, VRenderSystem.trackedColorA);
 
-        Pipeline pipeline = format == POSITION_TEX ? guiPipeline
-                : format == POSITION_COLOR ? guiColorPipeline
-                : guiTexColorPipeline;
-
         VRenderSystem.setShaderPipeline(pipeline);
         // Blend mirrored from the GlStateManagerBlendM tracking (the GL query is dead
         // under Kirino). Vanilla overlays use non-standard funcs - the vignette
         // multiplies with ZERO/SRC_COLOR - so the factors must be replayed as-is.
         Drawer.currentBlendState = VRenderSystem.getBlendState();
-        if (textured) {
+        if (texture != null) {
             VTextureSelector.bindTexture(texture);
         }
+    }
 
-        ByteBuffer data = buffer.getByteBuffer();
-        int prev = data.position();
-        data.position(0);
-        drawer.draw(data, drawMode, format, vertexCount);
-        data.position(prev);
+    // --- Immediate-mode capture entry points (called by GlStateManagerImmediateM) ---
 
-        if (!loggedFirst) {
-            loggedFirst = true;
-            Initializer.LOGGER.info("[gui] first GUI draw: {} verts, mode {}, format {}", vertexCount, drawMode, format);
+    public static void immediateBegin(int mode) {
+        if (!guiPass || suppressDraw || !Drawer.isActive() || Drawer.skipRendering
+                || (mode != GL11.GL_TRIANGLE_STRIP && mode != GL11.GL_TRIANGLE_FAN && mode != GL11.GL_QUADS)) {
+            imActive = false;
+            return;
+        }
+        imActive = true;
+        imMode = mode;
+        imCount = 0;
+        if (imBuffer != null) {
+            imBuffer.clear();
+        }
+    }
+
+    public static void immediateTexCoord(float u, float v) {
+        if (imActive) {
+            imU = u;
+            imV = v;
+        }
+    }
+
+    public static void immediateVertex(float x, float y, float z) {
+        if (!imActive) {
+            return;
+        }
+        if (imBuffer == null) {
+            imBuffer = MemoryUtil.memAlloc(IM_STRIDE * 4096);
+        }
+        if ((imCount + 1) * IM_STRIDE > imBuffer.capacity()) {
+            imActive = false; // oversized primitive: drop it rather than overflow
+            return;
+        }
+        imBuffer.putFloat(x).putFloat(y).putFloat(z).putFloat(imU).putFloat(imV);
+        imCount++;
+    }
+
+    public static void immediateEnd() {
+        if (!imActive) {
+            return;
+        }
+        imActive = false;
+        int count = imCount;
+        imCount = 0;
+        if (count <= 0) {
+            return;
+        }
+        try {
+            VulkanImage texture = currentGuiTexture();
+            if (texture == null) {
+                return;
+            }
+            applyGuiState(guiPipeline, texture);
+            imBuffer.position(0);
+            Drawer.getInstance().draw(imBuffer, imMode, POSITION_TEX, count);
+        } catch (Throwable t) {
+            if (errorLogs++ < 3) {
+                Initializer.LOGGER.error("[gui] immediate draw error (mode={} verts={})", imMode, count, t);
+            }
         }
     }
 
