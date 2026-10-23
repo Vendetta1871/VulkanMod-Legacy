@@ -36,6 +36,10 @@ public class VRenderSystem {
     // GL default: the fixed-function alpha test is enabled (GREATER 0.1)
     public static boolean alphaTest = true;
 
+    // --- Current GL colour mirrored from GlStateManager.color (Kirino GL does not
+    // answer glGetFloatv(GL_CURRENT_COLOR)); consumed by the GUI pass ---
+    public static float trackedColorR = 1, trackedColorG = 1, trackedColorB = 1, trackedColorA = 1;
+
     // --- Blend state (GL defaults: disabled, ONE, ZERO) ---
     public static boolean blendEnabled = false;
     public static int blendSrcRgb = 1;   // GL_ONE

@@ -24,10 +24,6 @@ public class WorldVertexBufferUploaderM {
         if (!Initializer.isVulkanActive()) {
             return;
         }
-        if (GuiRenderer.isGuiPass() && GuiRenderer.diagHook()) {
-            Initializer.LOGGER.info("[gui] uploader hook hit: mode={} verts={} fmt={}",
-                    buffer.getDrawMode(), buffer.getVertexCount(), buffer.getVertexFormat());
-        }
         boolean captured = (EntityRenderer.isEntityPass() && EntityRenderer.capture(buffer))
                 || (GuiRenderer.isGuiPass() && GuiRenderer.capture(buffer));
         if (captured) {

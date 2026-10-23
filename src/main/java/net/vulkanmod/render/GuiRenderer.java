@@ -10,21 +10,20 @@ import net.vulkanmod.vulkan.VRenderSystem;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL14;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
-import java.nio.FloatBuffer;
 import java.util.HashMap;
 
 /**
  * Vulkan port of the 1.12.2 GUI/HUD rendering. The overlay and every {@code GuiScreen}
  * draw their quads through the shared {@link BufferBuilder} and upload them via
  * {@code WorldVertexBufferUploader.draw}, so the same capture hook the entities use
- * works here too: while a GUI pass is active (bracketed by mixins around
- * {@code GuiIngame.renderGameOverlay} and {@code GuiScreen.drawScreen}) the finished
- * geometry is replayed in Vulkan with the live GL matrices, which already carry the
- * {@code setupOverlayRendering} ortho projection and every per-element translate.
+ * works here too: while a GUI pass is active (opened by the {@code setupOverlayRendering}
+ * hook in {@code EntityRendererM}, which vanilla calls right before the HUD and before
+ * the current screen) the finished geometry is replayed in Vulkan with the live GL
+ * matrices, which already carry the {@code setupOverlayRendering} ortho projection and
+ * every per-element translate.
  *
  * <p>Three formats cover the GUI: {@code POSITION_TEX} (textured quads, icons, font
  * glyphs), {@code POSITION_COLOR} (flat rectangles) and {@code POSITION_TEX_COLOR}
@@ -47,29 +46,20 @@ public class GuiRenderer {
     private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
     private static final VertexFormat POSITION_TEX_COLOR = DefaultVertexFormats.POSITION_TEX_COLOR;
 
-    /** True between the head and return of the HUD / current screen render calls. */
+    /** True from {@code setupOverlayRendering} until the next frame starts. */
     private static boolean guiPass;
+
+    /**
+     * True while a framebuffer blit runs ({@code FramebufferM}); its full-screen
+     * composite quad must not be replayed as GUI content.
+     */
+    private static boolean suppressDraw;
 
     /** GL texture id -> uploaded Vulkan image (icons, misc, ascii, atlas, ...). */
     private static final HashMap<Integer, VulkanImage> textureCache = new HashMap<>();
 
-    private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
-    private static final ByteBuffer bool1 = MemoryUtil.memAlloc(1);
-    private static final ByteBuffer bool4 = MemoryUtil.memAlloc(4);
-    private static final java.nio.IntBuffer int1 = MemoryUtil.memAllocInt(1);
-
     private static boolean loggedFirst;
-
-    /** TEMP diagnostics: one line per distinct GUI-pass draw shape. */
-    private static final java.util.HashSet<String> seenShapes = new java.util.HashSet<>();
-
-    private static void logCapture(String tag, BufferBuilder buffer) {
-        String shape = tag + " mode=" + buffer.getDrawMode() + " verts=" + buffer.getVertexCount()
-                + " fmt=" + buffer.getVertexFormat();
-        if (seenShapes.add(shape)) {
-            Initializer.LOGGER.info("[gui] {}", shape);
-        }
-    }
+    private static int errorLogs;
 
     public static void init() {
         guiPipeline = new Pipeline(POSITION_TEX, "gui");
@@ -78,62 +68,27 @@ public class GuiRenderer {
     }
 
     public static void setGuiPass(boolean value) {
-        if (value && !guiPass) {
-                // TEMP diagnostics: log the first draws of each GUI pass.
-                diagTess = 0;
-                diagHookCount = 0;
-                diagGlDrawCount = 0;
-                diagGuiHelperCount = 0;
-        }
         guiPass = value;
-    }
-
-    private static int passTransitions;
-    private static int diagHookCount;
-
-    /** TEMP diagnostics: allow the first few uploader-hook hits per pass to be logged. */
-    public static boolean diagHook() {
-        return diagHookCount++ < 6;
-    }
-
-    private static int diagTess;
-
-    public static boolean diagTess() {
-        return diagTess++ < 6;
-    }
-
-    private static boolean firstTessLogged;
-
-    public static boolean firstTess() {
-        return !firstTessLogged && !(firstTessLogged = true);
-    }
-
-    private static int diagStackCount;
-
-    public static boolean diagStack() {
-        return diagStackCount++ < 2;
-    }
-
-    private static int diagGlDrawCount;
-
-    public static boolean diagGlDraw() {
-        return diagGlDrawCount++ < 3;
-    }
-
-    private static int diagAlwaysCount;
-
-    public static boolean diagAlways() {
-        return diagAlwaysCount++ < 3;
-    }
-
-    private static int diagGuiHelperCount;
-
-    public static boolean diagGuiHelper() {
-        return diagGuiHelperCount++ < 4;
     }
 
     public static boolean isGuiPass() {
         return guiPass;
+    }
+
+    public static void setSuppressDraw(boolean value) {
+        suppressDraw = value;
+    }
+
+    private static long renderedFrames;
+
+    /** Counts rendered frames ({@code updateCameraAndRender} entries); the autotest
+     *  gates the title capture on this so it waits for the menu to actually render. */
+    public static void recordFrameBegin() {
+        renderedFrames++;
+    }
+
+    public static long getRenderedFrames() {
+        return renderedFrames;
     }
 
     /**
@@ -142,18 +97,16 @@ public class GuiRenderer {
      * the draw alone instead of silently dropping it.
      */
     public static boolean capture(BufferBuilder buffer) {
-        if (!guiPass || !Drawer.isActive() || Drawer.skipRendering) {
+        if (!guiPass || suppressDraw || !Drawer.isActive() || Drawer.skipRendering) {
             return false;
         }
         int vertexCount = buffer.getVertexCount();
         int drawMode = buffer.getDrawMode();
         VertexFormat format = buffer.getVertexFormat();
         if (vertexCount <= 0 || (drawMode != 7 && drawMode != 6 && drawMode != 5)) {
-            logCapture("skipped mode", buffer);
             return false;
         }
         if (format != POSITION_TEX && format != POSITION_COLOR && format != POSITION_TEX_COLOR) {
-            logCapture("skipped format", buffer);
             return false;
         }
 
@@ -161,6 +114,9 @@ public class GuiRenderer {
             draw(buffer, drawMode, vertexCount, format);
             return true;
         } catch (Throwable t) {
+            if (errorLogs++ < 3) {
+                Initializer.LOGGER.error("[gui] draw error (mode={} verts={} fmt={})", drawMode, vertexCount, format, t);
+            }
             TerrainRenderer.reportOnce("gui", t);
             return false;
         }
@@ -183,13 +139,12 @@ public class GuiRenderer {
         VRenderSystem.updateProjectionMatrix();
         VRenderSystem.updateModelViewMatrix();
 
-        // The overlay is drawn with fog disabled; mirror the enable bit only (no fog
-        // parameters are snapshotted, so an enabled fog would read stale terrain values).
-        boolean fog = boolState(GL11.GL_FOG);
-        VRenderSystem.setFogState(fog ? VRenderSystem.FOG_LINEAR : VRenderSystem.FOG_NONE);
+        // The overlay is drawn with fog disabled and the Kirino GL layer does not
+        // answer the fog query, so the GUI never fogs (matching vanilla's look).
+        VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
 
-        // The alpha test state is mirrored by the GlStateManagerAlphaM mixin (the GL
-        // query for it is not reliable under the Kirino layer).
+        // The alpha/blend/colour states are mirrored by the GlStateManagerAlphaM and
+        // GlStateManagerBlendM mixins (GL state queries are not reliable under Kirino).
 
         // See the class doc: the GL depth clear before the GUI has no Vulkan counterpart,
         // so the GUI must not test against the world's depth attachment.
@@ -197,40 +152,25 @@ public class GuiRenderer {
         VRenderSystem.depthMask(false);
         VRenderSystem.depthFunc(GL11.GL_ALWAYS);
 
-        if (boolState(GL11.GL_CULL_FACE)) {
-            VRenderSystem.enableCull();
-        } else {
-            VRenderSystem.disableCull();
-        }
+        // The GUI is two-sided; the cull query is not reliable, and vanilla leaves
+        // culling disabled for the overlay anyway.
+        VRenderSystem.disableCull();
 
-        GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, bool4);
-        VRenderSystem.colorMask(bool4.get(0) != 0, bool4.get(1) != 0, bool4.get(2) != 0, bool4.get(3) != 0);
+        VRenderSystem.colorMask(true, true, true, true);
 
-        if (boolState(GL11.GL_BLEND)) {
-            VRenderSystem.enableBlend();
-            GL11.glGetIntegerv(GL14.GL_BLEND_SRC_RGB, int1);
-            int srcRgb = int1.get(0);
-            GL11.glGetIntegerv(GL14.GL_BLEND_DST_RGB, int1);
-            int dstRgb = int1.get(0);
-            GL11.glGetIntegerv(GL14.GL_BLEND_SRC_ALPHA, int1);
-            int srcAlpha = int1.get(0);
-            GL11.glGetIntegerv(GL14.GL_BLEND_DST_ALPHA, int1);
-            int dstAlpha = int1.get(0);
-            VRenderSystem.tryBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
-        } else {
-            VRenderSystem.disableBlend();
-        }
-
-        // The current GL colour is the GUI tint (text colour, icon redness, the
-        // gradient rect's ambient multiply), feeding the ColorModulator UBO field.
-        GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
-        VRenderSystem.setShaderColor(float4.get(0), float4.get(1), float4.get(2), float4.get(3));
+        // The tracked current GL colour is the GUI tint (text colour, icon redness,
+        // the gradient rect's ambient multiply), feeding the ColorModulator UBO field.
+        VRenderSystem.setShaderColor(VRenderSystem.trackedColorR, VRenderSystem.trackedColorG,
+                VRenderSystem.trackedColorB, VRenderSystem.trackedColorA);
 
         Pipeline pipeline = format == POSITION_TEX ? guiPipeline
                 : format == POSITION_COLOR ? guiColorPipeline
                 : guiTexColorPipeline;
 
         VRenderSystem.setShaderPipeline(pipeline);
+        // Blend mirrored from the GlStateManagerBlendM tracking (the GL query is dead
+        // under Kirino). Vanilla overlays use non-standard funcs - the vignette
+        // multiplies with ZERO/SRC_COLOR - so the factors must be replayed as-is.
         Drawer.currentBlendState = VRenderSystem.getBlendState();
         if (textured) {
             VTextureSelector.bindTexture(texture);
@@ -290,11 +230,6 @@ public class GuiRenderer {
         image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         MemoryUtil.memFree(pixels);
         return image;
-    }
-
-    private static boolean boolState(int pname) {
-        GL11.glGetBooleanv(pname, bool1);
-        return bool1.get(0) != 0;
     }
 
     private GuiRenderer() {

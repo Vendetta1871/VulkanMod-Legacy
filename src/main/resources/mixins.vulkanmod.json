@@ -22,10 +22,8 @@
     "render.GuiIngameM",
     "render.GuiScreenM",
     "render.GlStateManagerAlphaM",
-    "render.TessellatorDiagM",
-    "render.GlDrawDiagM",
-    "render.GuiDiagM",
-    "render.GuiScreenDiagM"
+    "render.GlStateManagerBlendM",
+    "render.FramebufferM"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -61,17 +61,24 @@ public class AutoTest {
         switch (stage) {
             case 0 -> {
                 if (mc.currentScreen instanceof GuiMainMenu) {
-                    if (!titleCaptured) {
+                    // The long startup makes the timer accumulate a batch of ticks that all
+                    // run inside the very first runGameLoop iteration, before its render
+                    // section. Gating the launch on ticks alone would start the world before
+                    // the menu ever renders a frame, so wait for the title to actually render
+                    // a few frames (updateCameraAndRender calls) before capturing and leaving.
+                    if (!titleCaptured && net.vulkanmod.render.GuiRenderer.getRenderedFrames() >= 3) {
                         titleCaptured = true;
                         capture(mc, "title");
                     }
-                    mc.gameSettings.pauseOnLostFocus = false;
-                    WorldSettings settings = new WorldSettings(0x5EEDL, GameType.CREATIVE,
-                            false, false, WorldType.DEFAULT);
-                    settings.enableCommands();
-                    Initializer.LOGGER.info("[autotest] launching integrated world");
-                    mc.launchIntegratedServer("vm_autotest", "vm_autotest", settings);
-                    stage = 1;
+                    if (titleCaptured && ++titleTicks >= 3) {
+                        mc.gameSettings.pauseOnLostFocus = false;
+                        WorldSettings settings = new WorldSettings(0x5EEDL, GameType.CREATIVE,
+                                false, false, WorldType.DEFAULT);
+                        settings.enableCommands();
+                        Initializer.LOGGER.info("[autotest] launching integrated world");
+                        mc.launchIntegratedServer("vm_autotest", "vm_autotest", settings);
+                        stage = 1;
+                    }
                 }
             }
             case 1 -> {
@@ -315,6 +322,7 @@ public class AutoTest {
         }
     }
 
+    private static int titleTicks;
     private static boolean titleCaptured;
     private static double cloudAnchorX;
 
