@@ -107,12 +107,34 @@ public class GuiRenderer {
     }
 
     /**
+     * Makes sure a Vulkan render pass is recording before GUI geometry is replayed.
+     *
+     * <p>Ordinary frames open the pass in {@code EntityRendererM} at
+     * {@code updateCameraAndRender} HEAD, so for them this is a no-op. The world-loading
+     * screen is the exception: {@code LoadingScreenRenderer} renders in a synchronous loop
+     * driven by {@code Minecraft.launchIntegratedServer} and presents through its own
+     * {@code updateDisplay} call, entirely outside that lifecycle. The menu's pass has
+     * already been closed by then, so its quads and glyphs would be dropped and the screen
+     * would show nothing but the clear colour. Opening the pass here lets those draws record
+     * into a frame which that same {@code updateDisplay} then presents - the draws and the
+     * present are paired one-for-one inside the loader's own 100 ms throttle, so a pass is
+     * never left open without a matching present.</p>
+     */
+    private static boolean ensureRenderPass() {
+        if (Drawer.isActive()) {
+            return true;
+        }
+        Initializer.beginFrame();
+        return Drawer.isActive();
+    }
+
+    /**
      * Called at the head of {@code WorldVertexBufferUploader.draw} during a GUI pass.
      * Returns false for formats the GUI pipelines do not cover, so the caller leaves
      * the draw alone instead of silently dropping it.
      */
     public static boolean capture(BufferBuilder buffer) {
-        if (!guiPass || suppressDraw || !Drawer.isActive() || Drawer.skipRendering) {
+        if (!guiPass || suppressDraw || Drawer.skipRendering) {
             return false;
         }
         int vertexCount = buffer.getVertexCount();
@@ -122,6 +144,10 @@ public class GuiRenderer {
             return false;
         }
         if (format != POSITION_TEX && format != POSITION_COLOR && format != POSITION_TEX_COLOR) {
+            return false;
+        }
+        // Only after the cheap rejections, so a draw we would not replay never opens a frame.
+        if (!ensureRenderPass()) {
             return false;
         }
 
@@ -214,8 +240,10 @@ public class GuiRenderer {
     // --- Immediate-mode capture entry points (called by GlStateManagerImmediateM) ---
 
     public static void immediateBegin(int mode) {
-        if (!guiPass || suppressDraw || !Drawer.isActive() || Drawer.skipRendering
-                || (mode != GL11.GL_TRIANGLE_STRIP && mode != GL11.GL_TRIANGLE_FAN && mode != GL11.GL_QUADS)) {
+        // ensureRenderPass() last: an unsupported mode must not open a frame.
+        if (!guiPass || suppressDraw || Drawer.skipRendering
+                || (mode != GL11.GL_TRIANGLE_STRIP && mode != GL11.GL_TRIANGLE_FAN && mode != GL11.GL_QUADS)
+                || !ensureRenderPass()) {
             imActive = false;
             return;
         }

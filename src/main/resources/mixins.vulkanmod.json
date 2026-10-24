@@ -22,6 +22,7 @@
     "render.GuiIngameM",
     "render.GuiScreenM",
     "render.GuiMainMenuM",
+    "render.LoadingScreenRendererM",
     "render.GlStateManagerAlphaM",
     "render.GlStateManagerBlendM",
     "render.GlStateManagerImmediateM",
