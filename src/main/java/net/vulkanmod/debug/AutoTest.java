@@ -108,6 +108,8 @@ public class AutoTest {
     private static int stage;
     private static int ticks;
     private static int warmupTicks;
+    private static boolean measuring;
+    private static int measureStart;
 
     // Input activity counters, sampled every tick and reported (then reset) by
     // focusState(). Instantaneous key state alone misses short presses, and the
@@ -755,7 +757,9 @@ public class AutoTest {
 
         // Optional: spawn client-side mobs in front of the camera (added to loadedEntityList
         // only, never to the world/chunk save) so the entity render path can be inspected.
-        if (tick == settle - 10 && System.getenv("VULKANMOD_AUTOTEST_SPAWN") != null) {
+        // Spawns a minute before settling so the one-time costs (new pipeline creation, the
+        // atlas texture download) are paid well before the capture and the FPS window.
+        if (tick == settle - 60 && System.getenv("VULKANMOD_AUTOTEST_SPAWN") != null) {
             spawnTestMobs(mc, envInt("VULKANMOD_AUTOTEST_SPAWN", 4));
         }
 
@@ -769,7 +773,21 @@ public class AutoTest {
             net.vulkanmod.render.TerrainRenderer.armMatrixDump();
         }
 
-        if (tick > settle && tick <= settle + measure) {
+        // Measurement window. Without a settle-time capture it opens right after settling
+        // (same as before). The capture stalls the game loop for a second+ and its catch-up
+        // update zeroes debugFPS (fpsCounter had no frames in that second), while client
+        // ticks freeze during the stall - a fixed tick offset would sample the dead zone
+        // right after the stall. So wait for the FPS counter to come back, with a hard
+        // fallback so the run always terminates even if it never does.
+        if (tick > settle && !measuring
+                && (Minecraft.getDebugFPS() > 0 || tick > settle + 120)) {
+            measuring = true;
+            // Two more seconds after the counter comes back: its first post-stall value is
+            // the frame count of the stall second, the second one can still be a partial
+            // boundary; only the third reflects the steady rate.
+            measureStart = tick + 40;
+        }
+        if (measuring && tick > measureStart && tick <= measureStart + measure) {
             int fps = Minecraft.getDebugFPS();
             if (fps > 0) {
                 fpsSamples++;
@@ -778,7 +796,7 @@ public class AutoTest {
                 if (fps > fpsMax) fpsMax = fps;
             }
         }
-        if (tick == settle + measure + 3) {
+        if (measuring && tick == measureStart + measure + 3) {
             double avg = fpsSamples == 0 ? 0 : (double) fpsSum / fpsSamples;
             Initializer.LOGGER.info("[autotest] FPS RESULT avg={} min={} max={} samples={} res={}x{} fs={} pos={},{},{}",
                     String.format("%.1f", avg), fpsMin == Long.MAX_VALUE ? 0 : fpsMin, fpsMax,
@@ -896,21 +914,67 @@ public class AutoTest {
             return;
         }
         double yaw = Math.toRadians(mc.player.rotationYaw);
-        double dx = -Math.sin(yaw), dz = Math.cos(yaw);
         for (int i = 0; i < n; ++i) {
             net.minecraft.entity.passive.EntityCow cow = new net.minecraft.entity.passive.EntityCow(mc.world);
-            double dist = 3.0 + i * 1.7;
-            double x = mc.player.posX + dx * dist;
-            double z = mc.player.posZ + dz * dist;
-            double y = mc.player.posY;
-            cow.setPosition(x, y, z);
-            cow.prevPosX = x; cow.prevPosY = y; cow.prevPosZ = z;
-            cow.lastTickPosX = x; cow.lastTickPosY = y; cow.lastTickPosZ = z;
-            cow.rotationYaw = mc.player.rotationYaw + 180.0f;
-            cow.rotationPitch = 0.0f;
-            mc.world.loadedEntityList.add(cow);
+            placeInFront(mc, cow, 3.0 + i * 1.7, 0.0);
         }
         Initializer.LOGGER.info("[autotest] spawned {} client-side cows", n);
+
+        // Extra coverage for the entity-layer passes: a hurt cow (red overlay), an
+        // enderman (additive eye pass on a second texture) and a dropped sword
+        // (ITEM-format model drawn from the atlas).
+        net.minecraft.entity.passive.EntityCow hurtCow = new net.minecraft.entity.passive.EntityCow(mc.world);
+        placeInFront(mc, hurtCow, 4.5, -2.5);
+        hurtCow.hurtTime = 1000; // stays >0 through the capture window
+
+        net.minecraft.entity.monster.EntityEnderman enderman = new net.minecraft.entity.monster.EntityEnderman(mc.world);
+        placeInFront(mc, enderman, 4.5, 2.5);
+
+        net.minecraft.item.Item sword = net.minecraft.item.Item.REGISTRY
+                .getObject(new net.minecraft.util.ResourceLocation("minecraft:diamond_sword"));
+        if (sword != null) {
+            double ix = mc.player.posX - Math.sin(yaw) * 2.2;
+            double iz = mc.player.posZ + Math.cos(yaw) * 2.2;
+            int swordY = (int) groundY(mc, ix, iz);
+            net.minecraft.entity.item.EntityItem item = new net.minecraft.entity.item.EntityItem(
+                    mc.world, ix, swordY + 0.2, iz, new net.minecraft.item.ItemStack(sword));
+            item.setNoGravity(true);
+            item.lifespan = 6000;
+            mc.world.loadedEntityList.add(item);
+        }
+        Initializer.LOGGER.info("[autotest] spawned hurt cow, enderman and dropped sword");
+    }
+
+    /** Puts a client-side entity on the ground in the player's view (dist ahead, lateral right). */
+    private static void placeInFront(Minecraft mc, net.minecraft.entity.Entity entity, double dist, double lateral) {
+        double yaw = Math.toRadians(mc.player.rotationYaw);
+        double x = mc.player.posX - Math.sin(yaw) * dist + Math.cos(yaw) * lateral;
+        double z = mc.player.posZ + Math.cos(yaw) * dist + Math.sin(yaw) * lateral;
+        // Drop onto the ground: scan down from just above the player until a block that
+        // stops movement; otherwise the entity hangs at the player's eye-level Y (the
+        // pinned camera can be well above the terrain in front).
+        double y = groundY(mc, x, z);
+        entity.setPosition(x, y, z);
+        entity.prevPosX = x; entity.prevPosY = y; entity.prevPosZ = z;
+        entity.lastTickPosX = x; entity.lastTickPosY = y; entity.lastTickPosZ = z;
+        entity.rotationYaw = mc.player.rotationYaw + 180.0f;
+        entity.rotationPitch = 0.0f;
+        if (entity instanceof net.minecraft.entity.EntityLivingBase living) {
+            // Face the camera head-on (the head yaw is what the model renders).
+            living.rotationYawHead = entity.rotationYaw;
+            living.renderYawOffset = entity.rotationYaw;
+            living.prevRenderYawOffset = entity.rotationYaw;
+        }
+        mc.world.loadedEntityList.add(entity);
+    }
+
+    /** Y of the surface to stand on: scan down from above the player to the first solid block. */
+    private static double groundY(Minecraft mc, double x, double z) {
+        int y = (int) mc.player.posY + 2;
+        while (y > 0 && !mc.world.getBlockState(new net.minecraft.util.math.BlockPos(x, y, z)).getMaterial().blocksMovement()) {
+            y--;
+        }
+        return y + 1;
     }
 
     private static void capture(Minecraft mc, String name) {
@@ -930,12 +994,17 @@ public class AutoTest {
             Initializer.LOGGER.info("[autotest] capture requested -> {}", out);
         }
 
-        // Reference: what the vanilla GL pipeline renders into the main framebuffer
-        try {
-            net.minecraft.util.ScreenShotHelper.saveScreenshot(mc.gameDir, "vm_gl_" + name + ".png",
-                    mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
-        } catch (Exception e) {
-            Initializer.LOGGER.warn("[autotest] GL reference failed", e);
+        // Reference: what the vanilla GL pipeline renders into the main framebuffer. In
+        // Vulkan mode this readback (plus the PNG encode) is a ~1s stall and the frame it
+        // captures is never presented anyway - the proper reference comes from a
+        // VULKANMOD_DISABLE=1 run. Kept behind a knob for the crack-detector workflow.
+        if (!Initializer.isVulkanActive() || System.getenv("VULKANMOD_AUTOTEST_GLREF") != null) {
+            try {
+                net.minecraft.util.ScreenShotHelper.saveScreenshot(mc.gameDir, "vm_gl_" + name + ".png",
+                        mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
+            } catch (Exception e) {
+                Initializer.LOGGER.warn("[autotest] GL reference failed", e);
+            }
         }
     }
 

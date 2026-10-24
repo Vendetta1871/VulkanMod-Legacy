@@ -37,8 +37,10 @@ public class GlStateManagerAlphaM {
         if (!Initializer.isVulkanActive()) {
             return;
         }
-        // The shaders hardcode GREATER 0.1; anything else (ALWAYS, or a ref that
-        // discards everything) turns the discard off.
+        // The GUI shaders hardcode GREATER 0.1; anything else (ALWAYS, or a ref that
+        // discards everything) turns the discard off. The entity shaders consume the
+        // live func/ref through getAlphaRef() instead.
+        VRenderSystem.setAlphaFunc(func, ref);
         VRenderSystem.setAlphaTest(func == 516 && ref <= 0.1f);
     }
 }

@@ -1,8 +1,9 @@
 #version 450
 
 // Entity fragments: the entity skin modulated by the entity tint (ColorModulator) and
-// the two-light directional shading computed per vertex, with the fixed-function alpha
-// test (GREATER 0.1) of the entity cutout and the same fog as the terrain.
+// the two-light directional shading computed per vertex, with the live fixed-function
+// alpha test (AlphaRef) and the Cleanroom hurt/death red overlay (RedOverlay), plus the
+// same fog as the terrain.
 //
 // The lightmap is still missing: vanilla multiplies a single constant lightmap sample
 // (the entity's block/sky light) into the result. In daylight that sample saturates to
@@ -16,6 +17,8 @@ layout(binding = 1) uniform UniformBufferObject {
     float FogEnd;
     int FogMode;
     float FogDensity;
+    float AlphaRef;
+    float RedOverlay;
 };
 
 layout(binding = 2) uniform sampler2D Sampler0;
@@ -29,11 +32,17 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     vec4 color = ColorModulator * texture(Sampler0, texCoord0);
 
-    if (color.a < 0.1) {
+    // Fixed-function alpha test: AlphaRef carries the live alphaFunc reference (0.1 for
+    // the model pass, TRANSPARENT_MODEL's 1/255 for see-through mobs, 0 when the test is
+    // disabled - e.g. the additive eye pass, where the dark texels must not be discarded).
+    if (color.a < AlphaRef) {
         discard;
     }
 
     color.rgb *= lightAccum;
+
+    // Cleanroom's hurt/death overlay: a 30% red mix over the shaded model, before fog.
+    color.rgb = mix(color.rgb, vec3(1.0, 0.0, 0.0), RedOverlay);
 
     if (FogMode == 1) {
         float f = clamp((FogEnd - vertexDistance) / (FogEnd - FogStart), 0.0, 1.0);

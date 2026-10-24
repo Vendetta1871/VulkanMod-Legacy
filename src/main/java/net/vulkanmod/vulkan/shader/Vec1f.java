@@ -21,6 +21,8 @@ public class Vec1f extends Field {
             case "FogDensity" -> this.set = VRenderSystem::getFogDensity;
             case "LineWidth" -> this.set = VRenderSystem::getShaderLineWidth;
             case "GameTime" -> this.set = VRenderSystem::getShaderGameTime;
+            case "AlphaRef" -> this.set = VRenderSystem::getAlphaRef;
+            case "RedOverlay" -> this.set = net.vulkanmod.render.EntityRenderer::getRedOverlay;
         }
     }
 

@@ -39,6 +39,17 @@ public class GlStateManagerBlendM {
         }
     }
 
+    /**
+     * {@code blendFunc(II)} sets the RGB and alpha factors together and does not route
+     * through {@code tryBlendFuncSeparate}; the enderman eye pass (ONE, ONE) uses it.
+     */
+    @Inject(method = "blendFunc(II)V", at = @At("HEAD"))
+    private static void vulkanmod$blendFunc2(int srcRgb, int dstRgb, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.tryBlendFuncSeparate(srcRgb, dstRgb, srcRgb, dstRgb);
+        }
+    }
+
     @Inject(method = "color(FFF)V", at = @At("HEAD"))
     private static void vulkanmod$color3(float r, float g, float b, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {

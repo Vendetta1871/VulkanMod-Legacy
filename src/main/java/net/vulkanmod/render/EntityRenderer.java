@@ -32,9 +32,15 @@ import java.util.HashMap;
  */
 public class EntityRenderer {
 
-    private static Pipeline entityPipeline; // OLDMODEL_POSITION_TEX_NORMAL: texture + fog
+    private static Pipeline entityPipeline;   // OLDMODEL_POSITION_TEX_NORMAL: texture + fog
+    private static Pipeline itemPipeline;     // ITEM: dropped-item models (atlas, vertex colour)
+    private static Pipeline shadowPipeline;   // POSITION_TEX_COLOR: entity drop shadow
+    private static Pipeline flatPipeline;     // POSITION_TEX: burning fire / map / glint quads
 
     private static final VertexFormat MODEL_FORMAT = DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL;
+    private static final VertexFormat ITEM_FORMAT = DefaultVertexFormats.ITEM;
+    private static final VertexFormat SHADOW_FORMAT = DefaultVertexFormats.POSITION_TEX_COLOR;
+    private static final VertexFormat FLAT_FORMAT = DefaultVertexFormats.POSITION_TEX;
 
     /** True between the head and return of {@code RenderManager.renderEntity}. */
     private static boolean entityPass;
@@ -60,8 +66,16 @@ public class EntityRenderer {
      */
     private static boolean frameStateCached;
 
-    /** The entity skin resolves to the same image for every model part; cached per entity. */
+    /** The entity skin resolves to the same image for every model part; cached per binding. */
     private static VulkanImage cachedEntityTexture;
+    private static int cachedTextureId = -1;
+
+    /**
+     * The Cleanroom hurt/death overlay (RenderLivingBase sets a red constant through the
+     * fixed-function combiner around the model draw). Mirrored as a shader-side red mix;
+     * only the model pipeline applies it (shadows and overlays never get the tint).
+     */
+    private static boolean redOverlayActive;
 
     /**
      * Per-part batching: while a model part's boxes are being rebuilt, each quad would
@@ -82,6 +96,9 @@ public class EntityRenderer {
 
     public static void init() {
         entityPipeline = new Pipeline(MODEL_FORMAT, "entity");
+        itemPipeline = new Pipeline(ITEM_FORMAT, "entity_item");
+        shadowPipeline = new Pipeline(SHADOW_FORMAT, "entity_shadow");
+        flatPipeline = new Pipeline(FLAT_FORMAT, "entity_flat");
     }
 
     public static void setEntityPass(boolean value) {
@@ -95,6 +112,7 @@ public class EntityRenderer {
     public static void setCurrentEntity(Entity entity) {
         currentEntity = entity;
         cachedEntityTexture = null;
+        cachedTextureId = -1;
     }
 
     /** Called once per frame before the world render; forces a fresh fog/projection snapshot. */
@@ -117,18 +135,19 @@ public class EntityRenderer {
         int vertexCount = buffer.getVertexCount();
         int drawMode = buffer.getDrawMode();
         VertexFormat format = buffer.getVertexFormat();
-        if (vertexCount <= 0 || drawMode != 7 || format != MODEL_FORMAT) {
+        Pipeline pipeline = pipelineFor(format);
+        if (vertexCount <= 0 || drawMode != 7 || pipeline == null) {
             return false;
         }
 
         try {
-            if (accumulating) {
+            if (accumulating && format == MODEL_FORMAT) {
                 accumulate(buffer, vertexCount);
             } else {
                 ByteBuffer data = buffer.getByteBuffer();
                 int prev = data.position();
                 data.position(0);
-                submit(data, vertexCount);
+                submit(data, vertexCount, format, pipeline);
                 data.position(prev);
             }
             return true;
@@ -136,6 +155,28 @@ public class EntityRenderer {
             TerrainRenderer.reportOnce("entity", t);
             return false;
         }
+    }
+
+    /**
+     * The pipeline for a captured entity-pass format: mob models, dropped-item models
+     * (ITEM, drawn from the atlas by RenderItem), the drop shadow (POSITION_TEX_COLOR)
+     * and flat overlay quads like burning fire and maps (POSITION_TEX). Anything else
+     * (e.g. the enderman's held BLOCK) is left to the GL path.
+     */
+    private static Pipeline pipelineFor(VertexFormat format) {
+        if (format == MODEL_FORMAT) {
+            return entityPipeline;
+        }
+        if (format == ITEM_FORMAT) {
+            return itemPipeline;
+        }
+        if (format == SHADOW_FORMAT) {
+            return shadowPipeline;
+        }
+        if (format == FLAT_FORMAT) {
+            return flatPipeline;
+        }
+        return null;
     }
 
     /** Appends one captured quad to the per-part staging buffer (no draw yet). */
@@ -172,11 +213,11 @@ public class EntityRenderer {
         stagingVerts = 0;
         staging.position(0);
         staging.limit(n * MODEL_FORMAT.getSize());
-        submit(staging, n);
+        submit(staging, n, MODEL_FORMAT, entityPipeline);
     }
 
-    /** Replays {@code data} (position 0, {@code vertexCount} MODEL_FORMAT verts) in Vulkan. */
-    private static void submit(ByteBuffer data, int vertexCount) {
+    /** Replays {@code data} (position 0, {@code vertexCount} verts of {@code format}) in Vulkan. */
+    private static void submit(ByteBuffer data, int vertexCount, VertexFormat format, Pipeline pipeline) {
         net.vulkanmod.debug.FrameProfiler.entityVerts(vertexCount);
         net.vulkanmod.debug.FrameProfiler.entityDrawBegin();
         VulkanImage texture = entityTexture();
@@ -232,11 +273,19 @@ public class EntityRenderer {
 
         VRenderSystem.setShaderColor(tint[0], tint[1], tint[2], float4.get(3));
 
-        VRenderSystem.setShaderPipeline(entityPipeline);
-        Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
+        // The Cleanroom hurt/death overlay tints the model red (the fixed-function
+        // combiner constant RenderLivingBase sets around the model draw); only the
+        // model pipeline carries the tint, matching vanilla's scope.
+        redOverlayActive = pipeline == entityPipeline && isHurtOrDying();
+
+        VRenderSystem.setShaderPipeline(pipeline);
+        // Mirror the live blend state instead of forcing NO_BLEND: the eye pass blends
+        // additively (ONE, ONE), items/shadows/see-through models with SRC_ALPHA, and the
+        // plain model pass has blending off - all flow through GlStateManagerBlendM.
+        Drawer.currentBlendState = VRenderSystem.getBlendState();
         VTextureSelector.bindTexture(texture);
 
-        drawer.draw(data, 7, MODEL_FORMAT, vertexCount);
+        drawer.draw(data, 7, format, vertexCount);
 
         if (!loggedFirst) {
             loggedFirst = true;
@@ -261,39 +310,44 @@ public class EntityRenderer {
     }
 
     /**
-     * Resolves the entity skin once per entity and reuses it for every model part (the skin
-     * binding is constant across an entity's parts), avoiding a GL texture-binding query per part.
+     * Resolves the texture bound on unit 0 for this draw. The skin is constant across an
+     * entity's model parts, but later passes rebind (the enderman eye texture, the atlas
+     * for items, shadow.png for the shadow), so the cache is keyed by the GL binding id
+     * rather than held for the whole entity.
      */
     private static VulkanImage entityTexture() {
-        if (cachedEntityTexture != null) {
-            return cachedEntityTexture;
-        }
-        VulkanImage image = currentEntityTexture();
-        if (image != null) {
-            cachedEntityTexture = image;
-        }
-        return image;
-    }
-
-    /**
-     * Maps the GL texture bound on unit 0 (the entity skin, bound by
-     * {@code Render.bindEntityTexture}) to a Vulkan image, downloading and caching it on
-     * first use.
-     */
-    private static VulkanImage currentEntityTexture() {
         int texId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         if (texId == 0) {
             return null;
         }
-        VulkanImage cached = textureCache.get(texId);
-        if (cached != null) {
-            return cached;
+        if (cachedEntityTexture != null && texId == cachedTextureId) {
+            return cachedEntityTexture;
         }
-        VulkanImage image = downloadTexture(texId);
+        VulkanImage image = textureCache.get(texId);
+        if (image == null) {
+            image = downloadTexture(texId);
+            if (image != null) {
+                textureCache.put(texId, image);
+            }
+        }
         if (image != null) {
-            textureCache.put(texId, image);
+            cachedEntityTexture = image;
+            cachedTextureId = texId;
         }
         return image;
+    }
+
+    /** True while RenderLivingBase would have the red hurt/death combiner overlay active. */
+    private static boolean isHurtOrDying() {
+        if (!(currentEntity instanceof net.minecraft.entity.EntityLivingBase living)) {
+            return false;
+        }
+        return living.hurtTime > 0 || living.deathTime > 0;
+    }
+
+    /** UBO source for the {@code RedOverlay} field (0.3 matches the combiner constant). */
+    public static float getRedOverlay() {
+        return redOverlayActive ? 0.3f : 0.0f;
     }
 
     private static VulkanImage downloadTexture(int texId) {

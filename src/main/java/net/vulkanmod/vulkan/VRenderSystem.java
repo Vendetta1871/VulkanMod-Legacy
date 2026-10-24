@@ -35,6 +35,8 @@ public class VRenderSystem {
 
     // GL default: the fixed-function alpha test is enabled (GREATER 0.1)
     public static boolean alphaTest = true;
+    public static int alphaTestFunc = 516; // GL_GREATER
+    public static float alphaTestRef = 0.1f;
 
     // --- Current GL colour mirrored from GlStateManager.color (Kirino GL does not
     // answer glGetFloatv(GL_CURRENT_COLOR)); consumed by the GUI pass ---
@@ -316,6 +318,16 @@ public class VRenderSystem {
     public static void setAlphaTest(boolean enabled) { alphaTest = enabled; }
     public static int getAlphaTest() { return alphaTest ? 1 : 0; }
 
+    public static void setAlphaFunc(int func, float ref) { alphaTestFunc = func; alphaTestRef = ref; }
+
+    /**
+     * The discard threshold for the shaders: the live alphaFunc reference while the test
+     * is enabled with GREATER, 0 (never discard) otherwise. Passes that disable the test
+     * (enderman eyes, the death fade) or use TRANSPARENT_MODEL's tiny reference need the
+     * real value, not the hardcoded 0.1.
+     */
+    public static float getAlphaRef() { return alphaTest && alphaTestFunc == 516 ? alphaTestRef : 0.0f; }
+
     public static void setFogStart(float v) { fogStart = v; }
     public static float getFogStart() { return fogStart; }
     public static float getShaderFogStart() { return fogStart; }
@@ -463,6 +475,8 @@ public class VRenderSystem {
         blendDstRgb = 0;
         blendSrcAlpha = 1;
         blendDstAlpha = 0;
+        alphaTestFunc = 516;
+        alphaTestRef = 0.1f;
         logicOpEnabled = false;
         fogState = FOG_LINEAR;
         fogStart = 0.95f;

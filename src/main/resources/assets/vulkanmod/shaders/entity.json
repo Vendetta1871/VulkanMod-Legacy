@@ -19,7 +19,9 @@
                 { "name": "FogStart", "type": "float", "count": 1 },
                 { "name": "FogEnd", "type": "float", "count": 1 },
                 { "name": "FogMode", "type": "int", "count": 1 },
-                { "name": "FogDensity", "type": "float", "count": 1 }
+                { "name": "FogDensity", "type": "float", "count": 1 },
+                { "name": "AlphaRef", "type": "float", "count": 1 },
+                { "name": "RedOverlay", "type": "float", "count": 1 }
             ]
         }
     ],
