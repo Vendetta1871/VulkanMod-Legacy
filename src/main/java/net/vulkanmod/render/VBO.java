@@ -37,6 +37,8 @@ public class VBO {
             return;
         }
 
+        TerrainRenderer.checkVertexRange(data, vertexCount, format.getSize());
+
         try {
             // Uploads outside the Vulkan frame window (rare; e.g. immediate chunk updates
             // issued between frames) must not overwrite staging regions still in flight.
@@ -74,6 +76,7 @@ public class VBO {
             // inside renderWorldPass), and the modelview carries the chunk offset.
             VRenderSystem.updateModelViewMatrix();
             VRenderSystem.updateProjectionMatrix();
+            TerrainRenderer.checkModelviewUnique(TerrainRenderer.currentLayer, vertexCount);
 
             Drawer drawer = Drawer.getInstance();
             AutoIndexBuffer autoIndexBuffer = drawer.getQuadsIndexBuffer();

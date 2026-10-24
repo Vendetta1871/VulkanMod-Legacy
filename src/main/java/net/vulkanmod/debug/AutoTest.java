@@ -67,6 +67,23 @@ public class AutoTest {
     /** Player position captured on the first burst tick, to pin the camera still. */
     private static double[] pinPos;
 
+    /**
+     * Plant-placement repro: with {@code VULKANMOD_AUTOTEST_PLANT=1} a deterministic scene is
+     * built next to the player (a stone pillar with a flower on top, a flower on a glass block
+     * and a flower at the edge of a dug pit) and framed from the side, to measure whether
+     * cross-model plants (grass/flowers) render at the top of their block or float above it.
+     */
+    private static final boolean PLANT_MODE = System.getenv("VULKANMOD_AUTOTEST_PLANT") != null;
+
+    /**
+     * Coordinate-driven repro: {@code VULKANMOD_AUTOTEST_GOTO="x y z"} teleports the camera a
+     * few blocks from that block and looks at it, to reproduce a reported misplacement at a
+     * known world position (the user reports grass floating one block up at specific blocks).
+     */
+    private static final String GOTO_SPEC = System.getenv("VULKANMOD_AUTOTEST_GOTO");
+
+    private static int plantX, plantY, plantZ;
+
     private static boolean waterFound;
     private static int waterX, waterY, waterZ;
 
@@ -166,7 +183,7 @@ public class AutoTest {
                         mc.player.posY = pinPos[1];
                         mc.player.posZ = pinPos[2];
                         mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
-                        mc.player.rotationPitch = 0; // look at the horizon
+                        mc.player.rotationPitch = 22; // look down at the shore: pits + plants
                     }
                     if (ticks >= 25 && ticks % 20 == 5 && ticks <= 85) {
                         capture(mc, "burst" + (ticks / 20 + 1));
@@ -180,6 +197,36 @@ public class AutoTest {
                 if (warmupTicks < WARMUP) {
                     if (++warmupTicks % 40 == 0) {
                         Initializer.LOGGER.info("[autotest] warmup fps {} | {}", Minecraft.getDebugFPS(), focusState(mc));
+                    }
+                    return;
+                }
+
+                if (GOTO_SPEC != null) {
+                    if (++ticks == 5) {
+                        gotoTarget(mc);
+                    } else if (ticks >= 30 && ticks <= 270 && ticks % 15 == 0) {
+                        // Static camera at a fluid-rich spot: the flowing fluid keeps
+                        // re-meshing nearby chunks, which intermittently corrupts the cutout
+                        // layer. Frequent captures let us diff consecutive frames to catch a
+                        // ghost and correlate it with the modelview/range detectors.
+                        capture(mc, "watch" + (ticks / 15));
+                    } else if (ticks == 290 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
+                if (PLANT_MODE) {
+                    if (++ticks == 5) {
+                        buildPlantScene(mc);
+                    } else if (ticks == 40) {
+                        framePlant(mc);
+                    } else if (ticks == 90) {
+                        capture(mc, "plant");
+                    } else if (ticks == 100 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
                     }
                     return;
                 }
@@ -499,6 +546,123 @@ public class AutoTest {
         Initializer.LOGGER.info("[autotest] WATER_MODE framing water at {},{},{} yaw={} pitch={}",
                 waterX, waterY, waterZ, String.format("%.1f", mc.player.rotationYaw),
                 String.format("%.1f", mc.player.rotationPitch));
+    }
+
+    /**
+     * Builds a deterministic plant test row on the server: a 3-tall stone pillar with a red
+     * flower on top, a glass block with a red flower on top (transparent, so the flower's base
+     * is visible against the glass edge), tall grass on the ground, and a 2-deep pit with a
+     * flower on its rim. All at a logged anchor so {@link #framePlant} can aim at it.
+     */
+    private static void buildPlantScene(Minecraft mc) {
+        IntegratedServer server = mc.getIntegratedServer();
+        if (server == null) {
+            return;
+        }
+        double px = mc.player.posX, pz = mc.player.posZ;
+        server.addScheduledTask(() -> {
+            net.minecraft.world.World world = server.getWorld(0);
+            if (world == null) {
+                return;
+            }
+            int bx = (int) Math.floor(px) + 3, bz = (int) Math.floor(pz) + 6;
+            BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+            int sy = -1;
+            for (int y = 90; y >= 40; y--) {
+                net.minecraft.block.material.Material m =
+                        world.getBlockState(c.setPos(bx, y, bz)).getMaterial();
+                if (m == net.minecraft.block.material.Material.GROUND
+                        || m == net.minecraft.block.material.Material.ROCK
+                        || m == net.minecraft.block.material.Material.SAND) {
+                    sy = y;
+                    break;
+                }
+            }
+            if (sy < 0) {
+                Initializer.LOGGER.warn("[autotest] PLANT_MODE no ground surface found");
+                return;
+            }
+            // Clear the build volume so foliage/terrain never overlaps the test blocks.
+            for (int dx = -1; dx <= 7; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    for (int dy = 1; dy <= 8; dy++) {
+                        world.setBlockState(c.setPos(bx + dx, sy + dy, bz + dz), Blocks.AIR.getDefaultState());
+                    }
+                }
+            }
+            // Pillar (top face at sy+4) + flower: the flower base must sit exactly on sy+4.
+            for (int dy = 1; dy <= 3; dy++) {
+                world.setBlockState(c.setPos(bx, sy + dy, bz), Blocks.STONE.getDefaultState());
+            }
+            world.setBlockState(c.setPos(bx, sy + 4, bz), Blocks.RED_FLOWER.getDefaultState());
+            // Glass (top face at sy+2) + flower: transparent support, base clearly readable.
+            world.setBlockState(c.setPos(bx + 2, sy + 1, bz), Blocks.GLASS.getDefaultState());
+            world.setBlockState(c.setPos(bx + 2, sy + 2, bz), Blocks.RED_FLOWER.getDefaultState());
+            // Tall grass straight on the ground.
+            world.setBlockState(c.setPos(bx + 4, sy + 1, bz), Blocks.TALLGRASS.getDefaultState());
+            // A 2-deep pit with a flower on the near rim: a vertical offset makes it float.
+            world.setBlockState(c.setPos(bx + 6, sy, bz), Blocks.AIR.getDefaultState());
+            world.setBlockState(c.setPos(bx + 6, sy + 1, bz), Blocks.AIR.getDefaultState());
+            world.setBlockState(c.setPos(bx + 5, sy + 1, bz), Blocks.RED_FLOWER.getDefaultState());
+            plantX = bx;
+            plantY = sy;
+            plantZ = bz;
+            Initializer.LOGGER.info("[autotest] PLANT_MODE built scene at {},{},{}", bx, sy, bz);
+        });
+    }
+
+    /** Aims the camera horizontally along the plant row from a few blocks in front of it. */
+    private static void framePlant(Minecraft mc) {
+        if (plantY < 0) {
+            Initializer.LOGGER.warn("[autotest] PLANT_MODE nothing to frame");
+            return;
+        }
+        double tx = plantX + 3.0, ty = plantY + 2.5, tz = plantZ + 0.5;
+        mc.player.capabilities.isFlying = true;
+        mc.player.setPosition(plantX + 3.0, plantY + 3.0, plantZ - 8.0);
+        double dx = tx - mc.player.posX;
+        double dy = ty - (mc.player.posY + mc.player.getEyeHeight());
+        double dz = tz - mc.player.posZ;
+        double xz = Math.sqrt(dx * dx + dz * dz);
+        mc.player.rotationYaw = (float) ((-Math.atan2(-dx, -dz) - Math.PI) * 180.0 / Math.PI);
+        mc.player.rotationPitch = (float) (Math.atan2(-dy, xz) * 180.0 / Math.PI);
+        Initializer.LOGGER.info("[autotest] PLANT_MODE framing at {},{},{} yaw={} pitch={}",
+                plantX, plantY, plantZ, String.format("%.1f", mc.player.rotationYaw),
+                String.format("%.1f", mc.player.rotationPitch));
+    }
+
+    /**
+     * Teleports the camera a few blocks from the {@code VULKANMOD_AUTOTEST_GOTO} block and
+     * points it at that block, logging the block and the block above it (the plant) so the
+     * capture can be correlated with the reported misplacement.
+     */
+    private static void gotoTarget(Minecraft mc) {
+        String[] parts = GOTO_SPEC.trim().split("\\s+");
+        if (parts.length < 3) {
+            Initializer.LOGGER.warn("[autotest] GOTO needs \"x y z\", got: {}", GOTO_SPEC);
+            return;
+        }
+        int tx = Integer.parseInt(parts[0]);
+        int ty = Integer.parseInt(parts[1]);
+        int tz = Integer.parseInt(parts[2]);
+        mc.player.capabilities.isFlying = true;
+        mc.player.capabilities.allowFlying = true;
+        // Stand 4 blocks to the +Z side, a little above the block, look back at its top face.
+        mc.player.setPosition(tx + 0.5, ty + 1.6, tz + 4.5);
+        double dx = (tx + 0.5) - mc.player.posX;
+        double dy = (ty + 0.5) - (mc.player.posY + mc.player.getEyeHeight());
+        double dz = (tz + 0.5) - mc.player.posZ;
+        double xz = Math.sqrt(dx * dx + dz * dz);
+        mc.player.rotationYaw = (float) ((-Math.atan2(-dx, -dz) - Math.PI) * 180.0 / Math.PI);
+        mc.player.rotationPitch = (float) (Math.atan2(-dy, xz) * 180.0 / Math.PI);
+        net.minecraft.util.math.BlockPos p = new net.minecraft.util.math.BlockPos(tx, ty, tz);
+        Initializer.LOGGER.info(
+                "[autotest] GOTO to {},{},{} yaw={} pitch={} | block={} above={} chunk={}{}",
+                tx, ty, tz, String.format("%.1f", mc.player.rotationYaw),
+                String.format("%.1f", mc.player.rotationPitch),
+                mc.world.getBlockState(p).getBlock().getLocalizedName(),
+                mc.world.getBlockState(p.up()).getBlock().getLocalizedName(),
+                tx >> 4, tz >> 4);
     }
 
     /** Dumps the inputs the cloud layer is built from, for autotest forensics. */

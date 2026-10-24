@@ -72,6 +72,85 @@ public class TerrainRenderer {
                 oldCount, layer, currentLayer);
     }
 
+    /**
+     * Diagnostic for the "floating plant" bug: within a single chunk-layer pass every chunk is
+     * drawn once with its own modelview, so two draws can never share the same modelview
+     * translation. A repeated translation within one pass means the modelview query returned a
+     * stale value (Kirino GL) and that buffer is being drawn at another chunk's position.
+     */
+    private static final java.util.EnumMap<BlockRenderLayer, java.util.HashSet<Long>> mvKeys =
+            new java.util.EnumMap<>(BlockRenderLayer.class);
+    private static long lastStaleLog;
+
+    /** Clears the per-pass modelview set; called from {@link #onChunkLayerStart}. */
+    public static void beginLayer(BlockRenderLayer layer) {
+        if (LOG_STATS) {
+            mvKeys.computeIfAbsent(layer, k -> new java.util.HashSet<>()).clear();
+        }
+    }
+
+    /** Called from {@link VBO#draw} right after the modelview is read. */
+    public static void checkModelviewUnique(BlockRenderLayer layer, int vertexCount) {
+        if (!LOG_STATS || layer == null) {
+            return;
+        }
+        java.nio.FloatBuffer fb = VRenderSystem.modelViewMatrix.asFloatBuffer().position(0).limit(16);
+        long key = pack(fb.get(12)) * 1000003L + pack(fb.get(13)) * 8191L + pack(fb.get(14));
+        if (!mvKeys.computeIfAbsent(layer, k -> new java.util.HashSet<>()).add(key)) {
+            long now = System.currentTimeMillis();
+            if (now - lastStaleLog > 150L) {
+                lastStaleLog = now;
+                Initializer.LOGGER.info(
+                        "[terrain] STALE MODELVIEW dup layer={} verts={} tx={} ty={} tz={}",
+                        layer, vertexCount, fb.get(12), fb.get(13), fb.get(14));
+            }
+        }
+    }
+
+    private static long pack(float f) {
+        return (long) (f * 64.0); // ~0.016 resolution; distinct chunks differ by >= 16
+    }
+
+    private static long lastRangeLog;
+
+    /**
+     * Diagnostic: chunk vertices are baked in coordinates local to the chunk (block position
+     * minus the chunk origin), so every position must lie in [0, 16]. A vertex outside that
+     * range means the uploaded mesh is corrupt and the block would render displaced. Scans the
+     * position attribute (three floats at offset 0, stride {@code stride}) of one upload.
+     */
+    public static void checkVertexRange(java.nio.ByteBuffer data, int vertexCount, int stride) {
+        // Only chunk meshes use the BLOCK format (stride 36); the sky/star VBOs share this
+        // upload path with a position-only format and legitimately span +/-384.
+        if (!LOG_STATS || data == null || vertexCount <= 0 || stride != 36) {
+            return;
+        }
+        java.nio.FloatBuffer fb = data.duplicate().position(0)
+                .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer();
+        float min = Float.MAX_VALUE, max = -Float.MAX_VALUE;
+        int badAxis = -1;
+        for (int v = 0; v < vertexCount; v++) {
+            int base = v * (stride / 4);
+            for (int a = 0; a < 3; a++) {
+                float p = fb.get(base + a);
+                if (p < min) { min = p; }
+                if (p > max) { max = p; }
+                if ((p < -0.5f || p > 16.5f) && badAxis < 0) {
+                    badAxis = a;
+                }
+            }
+        }
+        if (badAxis >= 0) {
+            long now = System.currentTimeMillis();
+            if (now - lastRangeLog > 150L) {
+                lastRangeLog = now;
+                Initializer.LOGGER.info(
+                        "[terrain] OUT-OF-RANGE vertex layer={} verts={} axis={} min={} max={}",
+                        currentLayer, vertexCount, badAxis, min, max);
+            }
+        }
+    }
+
     private static void logStats() {
         if (!LOG_STATS) {
             return;
@@ -140,6 +219,7 @@ public class TerrainRenderer {
     public static void onChunkLayerStart(BlockRenderLayer layer) {
         currentLayer = layer;
         logStats();
+        beginLayer(layer);
         if (terrainPipeline == null) {
             return;
         }
