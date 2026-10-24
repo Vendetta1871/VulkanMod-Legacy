@@ -48,6 +48,34 @@ public class TerrainRenderer {
     /** Diagnostic: VULKANMOD_NO_TERRAIN=1 skips the whole chunk pass (to bound terrain cost). */
     public static final boolean NO_TERRAIN = System.getenv("VULKANMOD_NO_TERRAIN") != null;
 
+    /** Throwaway diagnostic: VULKANMOD_NOQUERY=1 skips the per-chunk matrix query (cost probe). */
+    public static final boolean NOQUERY = System.getenv("VULKANMOD_NOQUERY") != null;
+
+    // Batched per-section matrix derivation: camera matrices captured at layer start, and the
+    // section origin + camera position stashed by ChunkRenderContainerM.preRenderChunk.
+    private static final org.joml.Matrix4f batchCameraMV = new org.joml.Matrix4f();
+    private static final org.joml.Matrix4f batchProjRemap = new org.joml.Matrix4f();
+    private static double batchCamX, batchCamY, batchCamZ;
+    private static int pendingX, pendingY, pendingZ;
+
+    /** Records the current section's origin and the camera position (called from preRenderChunk). */
+    public static void stashChunkTransform(int x, int y, int z, double camX, double camY, double camZ) {
+        pendingX = x;
+        pendingY = y;
+        pendingZ = z;
+        batchCamX = camX;
+        batchCamY = camY;
+        batchCamZ = camZ;
+    }
+
+    /** Builds the current section's model-view/MVP from the stashed origin (camera-relative). */
+    public static void applyCurrentSectionMatrix() {
+        VRenderSystem.applySectionModelView(batchCameraMV, batchProjRemap,
+                (float) (pendingX - batchCamX),
+                (float) (pendingY - batchCamY),
+                (float) (pendingZ - batchCamZ));
+    }
+
     /** Debug knob: VULKANMOD_LOG_BLEND=1 logs the mirrored blend state per chunk layer. */
     private static final boolean LOG_BLEND = System.getenv("VULKANMOD_LOG_BLEND") != null;
     private static BlockRenderLayer lastLoggedLayer;
@@ -251,6 +279,11 @@ public class TerrainRenderer {
             VRenderSystem.setShaderPipeline(terrainPipeline);
             snapshotState();
             TextureBridge.updateTextures();
+            if (BATCH) {
+                // Capture the camera model-view + projection once for the whole layer; each
+                // section's matrix is then derived on the CPU (see applyCurrentSectionMatrix).
+                VRenderSystem.captureCameraMatrices(batchCameraMV, batchProjRemap);
+            }
             logLayerState(layer);
             if (LOG_BLEND && layer != lastLoggedLayer) {
                 lastLoggedLayer = layer;

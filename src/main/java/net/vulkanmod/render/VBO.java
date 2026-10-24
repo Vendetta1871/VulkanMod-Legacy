@@ -186,10 +186,14 @@ public class VBO {
             return;
         }
         try {
-            // Read the projection first, then the per-chunk modelview; updateModelViewMatrix
-            // recomputes MVP from the two, and MVP is what the batched shader reads per slot.
-            VRenderSystem.updateProjectionMatrix();
-            VRenderSystem.updateModelViewMatrix();
+            // Derive this section's MVP on the CPU from the layer's camera matrices and the
+            // stashed section origin (no per-section GL matrix query).
+            if (TerrainRenderer.NOQUERY) {
+                VRenderSystem.updateProjectionMatrix();
+                VRenderSystem.updateModelViewMatrix();
+            } else {
+                TerrainRenderer.applyCurrentSectionMatrix();
+            }
 
             TerrainRenderer.countDraw(TerrainRenderer.currentLayer, vertexCount);
             ChunkBatcher.record(slot, arenaOffset / ChunkBatcher.STRIDE, vertexCount);

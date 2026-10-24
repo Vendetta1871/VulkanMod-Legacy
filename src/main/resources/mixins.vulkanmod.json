@@ -17,6 +17,7 @@
     "render.WorldVertexBufferUploaderM",
     "render.VertexBufferM",
     "render.VboRenderListM",
+    "render.ChunkRenderContainerM",
     "render.TextureMapM",
     "render.TextureAtlasSpriteM",
     "render.GuiIngameM",

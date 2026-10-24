@@ -702,7 +702,8 @@ public class AutoTest {
         if (tick == 1) {
             // Fullscreen for a representative, compositor-free measurement (the user's
             // requirement): do it before the settle window so the swapchain resize settles.
-            if (!mc.isFullScreen()) {
+            // VULKANMOD_AUTOTEST_NOFULLSCREEN keeps the small window (resolution probe).
+            if (!mc.isFullScreen() && System.getenv("VULKANMOD_AUTOTEST_NOFULLSCREEN") == null) {
                 mc.toggleFullscreen();
             }
             mc.gameSettings.pauseOnLostFocus = false;

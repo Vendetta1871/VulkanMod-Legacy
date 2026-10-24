@@ -164,22 +164,61 @@ public class VRenderSystem {
         mat.get(projectionMatrix);
     }
 
-    public static void calculateMVP() {
-        org.joml.Matrix4f MV = new org.joml.Matrix4f(modelViewMatrix.asFloatBuffer().position(0));
-        org.joml.Matrix4f P = new org.joml.Matrix4f(projectionMatrix.asFloatBuffer().position(0));
+    // Scratch matrices for calculateMVP (client-thread only) - avoids ~4 allocations per
+    // chunk draw, which was measurable GC pressure at hundreds of chunks per frame.
+    private static final org.joml.Matrix4f SCRATCH_MV = new org.joml.Matrix4f();
+    private static final org.joml.Matrix4f SCRATCH_P = new org.joml.Matrix4f();
+    private static final org.joml.Matrix4f SCRATCH_T1 = new org.joml.Matrix4f();
+    private static final org.joml.Matrix4f SCRATCH_T2 = new org.joml.Matrix4f();
 
-        // GL projections map depth to [-1, 1]; Vulkan's clip volume is [0, w].
-        // Remap z' = 0.5z + 0.5w before multiplying (also fixes near-plane clipping).
-        // NOTE: joml's ctor takes column-major args (m00, m01, m02, m03, m10, ...),
-        // so the 0.5 that adds w into z belongs in column 3, not column 2.
-        org.joml.Matrix4f Z = new org.joml.Matrix4f(
-                1, 0, 0, 0,
-                0, 1, 0, 0,
-                0, 0, 0.5f, 0f,
-                0, 0, 0.5f, 1f);
+    // GL projections map depth to [-1, 1]; Vulkan's clip volume is [0, w].
+    // Remap z' = 0.5z + 0.5w before multiplying (also fixes near-plane clipping).
+    // NOTE: joml's ctor takes column-major args (m00, m01, m02, m03, m10, ...),
+    // so the 0.5 that adds w into z belongs in column 3, not column 2.
+    private static final org.joml.Matrix4f DEPTH_REMAP = new org.joml.Matrix4f(
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 0.5f, 0f,
+            0, 0, 0.5f, 1f);
+
+    public static void calculateMVP() {
+        SCRATCH_MV.set(modelViewMatrix.asFloatBuffer().position(0));
+        SCRATCH_P.set(projectionMatrix.asFloatBuffer().position(0));
+
+        DEPTH_REMAP.mul(SCRATCH_P, SCRATCH_T1).mul(SCRATCH_MV, SCRATCH_T2);
 
         MVP.position(0);
-        Z.mul(P).mul(MV).get(MVP);
+        SCRATCH_T2.get(MVP);
+    }
+
+    /**
+     * Captures the camera model-view and the combined depth-remapped projection at the head of
+     * a chunk layer pass (before any per-section translate). The batched path then derives each
+     * section's matrices from these plus its origin, avoiding a GL matrix query per section.
+     */
+    public static void captureCameraMatrices(org.joml.Matrix4f outModelView, org.joml.Matrix4f outProjRemap) {
+        updateProjectionMatrix();
+        updateModelViewMatrix();
+        outModelView.set(modelViewMatrix.asFloatBuffer().position(0));
+        SCRATCH_P.set(projectionMatrix.asFloatBuffer().position(0));
+        DEPTH_REMAP.mul(SCRATCH_P, outProjRemap);
+    }
+
+    /**
+     * Builds one section's model-view and MVP from the captured camera matrices and the
+     * section's camera-relative offset, writing them into {@link #modelViewMatrix} / {@link #MVP}.
+     * Equivalent to vanilla's {@code translate(origin - camera)} applied over the camera matrix
+     * (the negligible scale-about-8 z-fighting nudge is omitted).
+     */
+    public static void applySectionModelView(org.joml.Matrix4f cameraModelView, org.joml.Matrix4f projRemap,
+                                             float dx, float dy, float dz) {
+        SCRATCH_MV.set(cameraModelView).translate(dx, dy, dz);
+        modelViewMatrix.position(0);
+        SCRATCH_MV.get(modelViewMatrix);
+
+        projRemap.mul(SCRATCH_MV, SCRATCH_T2);
+        MVP.position(0);
+        SCRATCH_T2.get(MVP);
     }
 
     /*
