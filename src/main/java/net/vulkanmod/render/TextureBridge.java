@@ -27,6 +27,8 @@ import java.nio.ByteBuffer;
 public class TextureBridge {
 
     private static VulkanImage atlasImage;
+    /** GL texture id the mirrored {@link #atlasImage} was uploaded from (restitch changes it). */
+    private static int atlasGlId = -1;
     private static VulkanImage lightmapImage;
 
     private static boolean atlasDirty = true;
@@ -181,6 +183,7 @@ public class TextureBridge {
 
         atlasImage.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         MemoryUtil.memFree(pixels);
+        atlasGlId = texId;
 
         VTextureSelector.bindTexture(atlasImage);
         atlasDirty = false;
@@ -283,6 +286,20 @@ public class TextureBridge {
         if (atlasImage != null) {
             VTextureSelector.bindTexture(atlasImage);
         }
+    }
+
+    /**
+     * The mirrored block atlas and the GL id it mirrors. Item draws (dropped items, the
+     * first-person hand, GUI icons) bind the atlas too; binding the mirror avoids both a
+     * 16 MB {@code glGetTexImage} snapshot and a VRAM duplicate, and keeps animated item
+     * tiles (water, lava, portals) animating.
+     */
+    public static VulkanImage getAtlasImage() {
+        return atlasImage;
+    }
+
+    public static int getAtlasGlId() {
+        return atlasGlId;
     }
 
     private static DynamicTexture getLightmapTexture() {

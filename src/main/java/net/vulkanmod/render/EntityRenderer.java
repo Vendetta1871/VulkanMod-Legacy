@@ -36,14 +36,22 @@ public class EntityRenderer {
     private static Pipeline itemPipeline;     // ITEM: dropped-item models (atlas, vertex colour)
     private static Pipeline shadowPipeline;   // POSITION_TEX_COLOR: entity drop shadow
     private static Pipeline flatPipeline;     // POSITION_TEX: burning fire / map / glint quads
+    private static Pipeline particlePipeline; // PARTICLE_POSITION_TEX_COLOR_LMAP: billboards
 
     private static final VertexFormat MODEL_FORMAT = DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL;
     private static final VertexFormat ITEM_FORMAT = DefaultVertexFormats.ITEM;
     private static final VertexFormat SHADOW_FORMAT = DefaultVertexFormats.POSITION_TEX_COLOR;
     private static final VertexFormat FLAT_FORMAT = DefaultVertexFormats.POSITION_TEX;
+    private static final VertexFormat PARTICLE_FORMAT = DefaultVertexFormats.PARTICLE_POSITION_TEX_COLOR_LMAP;
 
     /** True between the head and return of {@code RenderManager.renderEntity}. */
     private static boolean entityPass;
+
+    /** True between the head and return of {@code EntityRenderer.renderHand} (first person). */
+    private static boolean handPass;
+
+    /** True between the head and return of {@code ParticleManager.renderParticles}. */
+    private static boolean particlePass;
 
     /** The entity being rendered; supplies the constant lightmap sample. */
     private static Entity currentEntity;
@@ -99,6 +107,7 @@ public class EntityRenderer {
         itemPipeline = new Pipeline(ITEM_FORMAT, "entity_item");
         shadowPipeline = new Pipeline(SHADOW_FORMAT, "entity_shadow");
         flatPipeline = new Pipeline(FLAT_FORMAT, "entity_flat");
+        particlePipeline = new Pipeline(PARTICLE_FORMAT, "entity_particle");
     }
 
     public static void setEntityPass(boolean value) {
@@ -107,6 +116,29 @@ public class EntityRenderer {
 
     public static boolean isEntityPass() {
         return entityPass;
+    }
+
+    public static void setHandPass(boolean value) {
+        handPass = value;
+    }
+
+    public static void setParticlePass(boolean value) {
+        particlePass = value;
+    }
+
+    /** True while any pass whose draws this class replays is running. */
+    public static boolean isActive() {
+        return entityPass || handPass || particlePass;
+    }
+
+    /** The ITEM-format pipeline, shared with the GUI pass for item icons. */
+    public static Pipeline getItemPipeline() {
+        return itemPipeline;
+    }
+
+    /** Clears the hurt/death tint state; GUI item draws must never inherit a stale one. */
+    public static void clearRedOverlay() {
+        redOverlayActive = false;
     }
 
     public static void setCurrentEntity(Entity entity) {
@@ -118,6 +150,9 @@ public class EntityRenderer {
     /** Called once per frame before the world render; forces a fresh fog/projection snapshot. */
     public static void onFrameBegin() {
         frameStateCached = false;
+        // Safety reset: a throw between a pass's head and return must not leak the flag.
+        handPass = false;
+        particlePass = false;
     }
 
     public static void setCompiling(boolean value) {
@@ -129,7 +164,7 @@ public class EntityRenderer {
      * batch is not an entity model draw, so the caller leaves the GL draw untouched.
      */
     public static boolean capture(BufferBuilder buffer) {
-        if (!entityPass || compiling || !Drawer.isActive() || Drawer.skipRendering) {
+        if (!isActive() || compiling || !Drawer.isActive() || Drawer.skipRendering) {
             return false;
         }
         int vertexCount = buffer.getVertexCount();
@@ -158,23 +193,27 @@ public class EntityRenderer {
     }
 
     /**
-     * The pipeline for a captured entity-pass format: mob models, dropped-item models
-     * (ITEM, drawn from the atlas by RenderItem), the drop shadow (POSITION_TEX_COLOR)
-     * and flat overlay quads like burning fire and maps (POSITION_TEX). Anything else
-     * (e.g. the enderman's held BLOCK) is left to the GL path.
+     * The pipeline for a captured draw's format, gated by the active pass: mob models,
+     * shadows and flat overlay quads only inside the entity pass; item models (ITEM)
+     * inside the entity pass (dropped items) and the hand pass (first-person items and
+     * held blocks, both re-emitted as ITEM); particle billboards only inside the
+     * particle pass. Anything else (e.g. the enderman's held BLOCK) is left to the GL path.
      */
     private static Pipeline pipelineFor(VertexFormat format) {
         if (format == MODEL_FORMAT) {
-            return entityPipeline;
+            return entityPass ? entityPipeline : null;
         }
         if (format == ITEM_FORMAT) {
-            return itemPipeline;
+            return entityPass || handPass ? itemPipeline : null;
         }
         if (format == SHADOW_FORMAT) {
-            return shadowPipeline;
+            return entityPass ? shadowPipeline : null;
         }
         if (format == FLAT_FORMAT) {
-            return flatPipeline;
+            return entityPass ? flatPipeline : null;
+        }
+        if (format == PARTICLE_FORMAT) {
+            return particlePass ? particlePipeline : null;
         }
         return null;
     }
@@ -321,6 +360,13 @@ public class EntityRenderer {
             return null;
         }
         if (cachedEntityTexture != null && texId == cachedTextureId) {
+            return cachedEntityTexture;
+        }
+        // The block atlas is already mirrored for the terrain (tile-by-tile, animated);
+        // binding the mirror beats a 16 MB snapshot that also freezes animated tiles.
+        if (texId == TextureBridge.getAtlasGlId() && TextureBridge.getAtlasImage() != null) {
+            cachedEntityTexture = TextureBridge.getAtlasImage();
+            cachedTextureId = texId;
             return cachedEntityTexture;
         }
         VulkanImage image = textureCache.get(texId);

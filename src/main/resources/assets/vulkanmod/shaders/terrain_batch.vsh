@@ -45,6 +45,13 @@ void main() {
     vertexColor = Color;
     texCoord0 = UV0;
 
-    // Vanilla 1.12.2 samples the lightmap at uv/256 clamped to the texel centers.
-    lightCoord = clamp(vec2(UV2) / 256.0, vec2(0.001953126), vec2(0.96875));
+    // Lightmap sampling. Vanilla never sets a texture filter on the lightmap, so on
+    // real hardware it samples with the GL default NEAREST at uv/256. The Kirino GL
+    // translation layer (the reference renderer) samples it LINEAR with the texel
+    // position taken as coord*size (no -0.5 texel correction), so a whole light level
+    // lands on the texel center instead of its left edge. Shift by +0.5 texel to
+    // reproduce that: both conventions agree on flat regions (whole light levels),
+    // they only differ on smooth-lighting gradients where this stays smooth like the
+    // reference.
+    lightCoord = clamp(vec2(UV2) / 256.0, vec2(0.001953126), vec2(0.96875)) + vec2(0.03125);
 }

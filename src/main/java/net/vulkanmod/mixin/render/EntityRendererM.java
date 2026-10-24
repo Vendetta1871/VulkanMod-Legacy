@@ -37,6 +37,20 @@ public class EntityRendererM {
         FrameProfiler.syncEnd();
     }
 
+    @Inject(method = "renderHand(FI)V", at = @At("HEAD"))
+    private void vulkanmod$beginHand(float partialTicks, int pass, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            net.vulkanmod.render.EntityRenderer.setHandPass(true);
+        }
+    }
+
+    @Inject(method = "renderHand(FI)V", at = @At("RETURN"))
+    private void vulkanmod$endHand(float partialTicks, int pass, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            net.vulkanmod.render.EntityRenderer.setHandPass(false);
+        }
+    }
+
     @Inject(method = "updateCameraAndRender", at = @At("TAIL"))
     private void vulkanmod$endFrame(float partialTicks, long finishTimeNano, CallbackInfo ci) {
         FrameProfiler.renderEnd();

@@ -233,6 +233,27 @@ public class VRenderSystem {
     private static final org.joml.Vector3f LIGHT0_DIR = new org.joml.Vector3f(0.2f, 1.0f, -0.7f).normalize();
     private static final org.joml.Vector3f LIGHT1_DIR = new org.joml.Vector3f(-0.2f, 1.0f, 0.7f).normalize();
 
+    /**
+     * Mirrors {@code glLight(light, GL_POSITION, params)} into the shader light buffers.
+     * GL stores the light direction transformed by the modelview current at call time,
+     * and Kirino tracks the matrix stack, so querying it here is exact. The GUI item
+     * pass (enableGUIStandardItemLighting rotates -30 deg first) and the first-person
+     * hand (rotateX/rotateY applied) position the lights with their own transforms on
+     * the stack, where the camera-rotation default would shade them wrong.
+     */
+    public static void mirrorLightPosition(int light, java.nio.FloatBuffer params) {
+        org.joml.Vector3f dir = new org.joml.Vector3f(params.get(0), params.get(1), params.get(2));
+        if (params.get(3) != 0.0f || dir.lengthSquared() == 0.0f) {
+            return; // positional or zero light: the item paths only use directional ones
+        }
+        updateModelViewMatrix();
+        LIGHT_SCRATCH_MV.set(modelViewMatrix.asFloatBuffer().position(0));
+        LIGHT_SCRATCH_MV.transformDirection(dir.normalize());
+        writeDirection(light == 16384 ? lightDirection0 : lightDirection1, dir);
+    }
+
+    private static final Matrix4f LIGHT_SCRATCH_MV = new Matrix4f();
+
     /** Stores the entity shading lights in eye space for {@code Light0/1_Direction}. */
     public static void setLightDirections(Matrix4f cameraRot) {
         org.joml.Vector3f light0 = new org.joml.Vector3f(LIGHT0_DIR);

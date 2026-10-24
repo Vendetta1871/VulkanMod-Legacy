@@ -143,7 +143,8 @@ public class GuiRenderer {
         if (vertexCount <= 0 || (drawMode != 7 && drawMode != 6 && drawMode != 5)) {
             return false;
         }
-        if (format != POSITION_TEX && format != POSITION_COLOR && format != POSITION_TEX_COLOR) {
+        if (format != POSITION_TEX && format != POSITION_COLOR && format != POSITION_TEX_COLOR
+                && format != DefaultVertexFormats.ITEM) {
             return false;
         }
         // Only after the cheap rejections, so a draw we would not replay never opens a frame.
@@ -176,11 +177,27 @@ public class GuiRenderer {
 
         Drawer drawer = Drawer.getInstance();
 
-        Pipeline pipeline = format == POSITION_TEX ? guiPipeline
+        boolean item = format == DefaultVertexFormats.ITEM;
+        Pipeline pipeline = item ? EntityRenderer.getItemPipeline()
+                : format == POSITION_TEX ? guiPipeline
                 : format == POSITION_COLOR ? guiColorPipeline
                 : guiTexColorPipeline;
 
         applyGuiState(pipeline, texture);
+
+        if (item) {
+            // Item models are solid 3D geometry: vanilla leaves back-face culling on from
+            // the world pass, and without it the far faces of a GUI block icon paint over
+            // the near ones. The GUI forces culling off for its flat quads, so restore the
+            // live state (the cull query is one Kirino does answer). The hurt tint must
+            // never leak from the last entity draw into an icon.
+            EntityRenderer.clearRedOverlay();
+            if (GL11.glGetBoolean(GL11.GL_CULL_FACE)) {
+                VRenderSystem.enableCull();
+            } else {
+                VRenderSystem.disableCull();
+            }
+        }
 
         ByteBuffer data = buffer.getByteBuffer();
         int prev = data.position();
@@ -321,6 +338,11 @@ public class GuiRenderer {
         int texId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         if (texId == 0) {
             return null;
+        }
+        // Item icons bind the block atlas: use the terrain's live mirror instead of a
+        // 16 MB snapshot (which would also freeze animated tiles).
+        if (texId == TextureBridge.getAtlasGlId() && TextureBridge.getAtlasImage() != null) {
+            return TextureBridge.getAtlasImage();
         }
         VulkanImage cached = textureCache.get(texId);
         if (cached != null) {

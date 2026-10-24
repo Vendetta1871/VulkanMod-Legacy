@@ -24,7 +24,7 @@ public class WorldVertexBufferUploaderM {
         if (!Initializer.isVulkanActive()) {
             return;
         }
-        boolean captured = (EntityRenderer.isEntityPass() && EntityRenderer.capture(buffer))
+        boolean captured = (EntityRenderer.isActive() && EntityRenderer.capture(buffer))
                 || (GuiRenderer.isGuiPass() && GuiRenderer.capture(buffer));
         if (captured) {
             buffer.reset();

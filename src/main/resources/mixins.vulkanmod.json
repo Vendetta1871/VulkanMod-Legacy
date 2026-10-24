@@ -26,7 +26,9 @@
     "render.LoadingScreenRendererM",
     "render.GlStateManagerAlphaM",
     "render.GlStateManagerBlendM",
+    "render.GlStateManagerLightM",
     "render.GlStateManagerImmediateM",
+    "render.ParticleManagerM",
     "render.FramebufferM"
   ],
   "injectors": {
