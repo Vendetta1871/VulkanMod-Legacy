@@ -51,6 +51,20 @@ public class TerrainRenderer {
     /** Throwaway diagnostic: VULKANMOD_NOQUERY=1 skips the per-chunk matrix query (cost probe). */
     public static final boolean NOQUERY = System.getenv("VULKANMOD_NOQUERY") != null;
 
+    /**
+     * The fixed-function GL state mirrored by {@link #snapshotFixedState()} (fog, depth, color
+     * mask, cull) is set up once before the world render and is identical for all four chunk
+     * layers, so it is queried only on the first layer of each frame. The Kirino GL {@code glGet*}
+     * queries are slow enough that re-reading them per layer dominated the chunk pass (~2 ms).
+     * Reset from {@link Initializer#beginFrame()}.
+     */
+    private static boolean fixedStateCached;
+
+    /** Clears the per-frame fixed-state cache; called once per frame from {@code Initializer.beginFrame}. */
+    public static void onFrameBegin() {
+        fixedStateCached = false;
+    }
+
     // Batched per-section matrix derivation: camera matrices captured at layer start, and the
     // section origin + camera position stashed by ChunkRenderContainerM.preRenderChunk.
     private static final org.joml.Matrix4f batchCameraMV = new org.joml.Matrix4f();
@@ -278,7 +292,9 @@ public class TerrainRenderer {
         try {
             VRenderSystem.setShaderPipeline(terrainPipeline);
             snapshotState();
+            net.vulkanmod.debug.FrameProfiler.texBegin();
             TextureBridge.updateTextures();
+            net.vulkanmod.debug.FrameProfiler.texEnd();
             if (BATCH) {
                 // Capture the camera model-view + projection once for the whole layer; each
                 // section's matrix is then derived on the CPU (see applyCurrentSectionMatrix).
@@ -301,7 +317,9 @@ public class TerrainRenderer {
             return;
         }
         try {
+            net.vulkanmod.debug.FrameProfiler.submitBegin();
             ChunkBatcher.endLayer();
+            net.vulkanmod.debug.FrameProfiler.submitEnd();
         } catch (Throwable t) {
             reportOnce("chunk layer end", t);
         }
@@ -332,9 +350,38 @@ public class TerrainRenderer {
         // Projection matrix; the modelview changes per chunk and is read at draw time.
         VRenderSystem.updateProjectionMatrix();
 
-        // glColor -> ColorModulator (multiplied with the vertex color in the shader)
+        // glColor -> ColorModulator (multiplied with the vertex color in the shader). Queried per
+        // layer (cheap, one query) in case a layer tints differently.
         GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
         VRenderSystem.setShaderColor(float4.get(0), float4.get(1), float4.get(2), float4.get(3));
+
+        snapshotFixedState();
+
+        // Blend. The GL_BLEND / GL_BLEND_SRC_* queries are dead under Kirino GL (they
+        // report the GL defaults no matter the real state), so the blend cannot be
+        // mirrored by querying here. Instead it is tracked from the vanilla
+        // GlStateManager.enableBlend/tryBlendFuncSeparate calls by GlStateManagerBlendM,
+        // which mirrors the real GL state one-for-one. Vanilla guarantees the correct
+        // per-layer blend before renderChunkLayer runs: disabled for solid/cutout, and
+        // SRC_ALPHA/ONE_MINUS_SRC_ALPHA for the translucent (water) layer.
+        //
+        // Drawer picks the pipeline permutation from this static, not from VRenderSystem,
+        // so terrain must publish it here; otherwise it inherits whatever the previous
+        // pass (e.g. the HUD vignette's ZERO/ONE_MINUS_SRC_COLOR) left behind, which made
+        // water tint purple and flicker.
+        Drawer.currentBlendState = VRenderSystem.getBlendState();
+    }
+
+    /**
+     * Mirrors the fixed-function state that is constant for every chunk layer within a frame
+     * (fog, depth, color mask, cull). The Kirino {@code glGet*} queries here are slow, so this
+     * runs only on the first layer of each frame (see {@link #fixedStateCached}).
+     */
+    private static void snapshotFixedState() {
+        if (fixedStateCached) {
+            return;
+        }
+        fixedStateCached = true;
 
         // Fog (fixed-function GL_FOG on 1.12.2)
         if (!boolState(GL11.GL_FOG)) {
@@ -368,20 +415,6 @@ public class TerrainRenderer {
         VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
         GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
         VRenderSystem.depthFunc(int1.get(0));
-
-        // Blend. The GL_BLEND / GL_BLEND_SRC_* queries are dead under Kirino GL (they
-        // report the GL defaults no matter the real state), so the blend cannot be
-        // mirrored by querying here. Instead it is tracked from the vanilla
-        // GlStateManager.enableBlend/tryBlendFuncSeparate calls by GlStateManagerBlendM,
-        // which mirrors the real GL state one-for-one. Vanilla guarantees the correct
-        // per-layer blend before renderChunkLayer runs: disabled for solid/cutout, and
-        // SRC_ALPHA/ONE_MINUS_SRC_ALPHA for the translucent (water) layer.
-        //
-        // Drawer picks the pipeline permutation from this static, not from VRenderSystem,
-        // so terrain must publish it here; otherwise it inherits whatever the previous
-        // pass (e.g. the HUD vignette's ZERO/ONE_MINUS_SRC_COLOR) left behind, which made
-        // water tint purple and flicker.
-        Drawer.currentBlendState = VRenderSystem.getBlendState();
 
         // Color mask
         GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, bool4);

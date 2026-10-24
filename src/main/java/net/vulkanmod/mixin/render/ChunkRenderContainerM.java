@@ -1,6 +1,7 @@
 package net.vulkanmod.mixin.render;
 
 import net.minecraft.client.renderer.ChunkRenderContainer;
+import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.chunk.RenderChunk;
 import net.minecraft.util.math.BlockPos;
 import net.vulkanmod.render.TerrainRenderer;
@@ -8,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
@@ -30,5 +32,16 @@ public class ChunkRenderContainerM {
         BlockPos pos = renderChunk.getPosition();
         TerrainRenderer.stashChunkTransform(pos.getX(), pos.getY(), pos.getZ(),
                 viewEntityX, viewEntityY, viewEntityZ);
+    }
+
+    // preRenderChunk is just GlStateManager.translate(sectionOrigin - camera). The batched draw
+    // derives the section matrix from the stash above, never the GL matrix stack, so skip the
+    // translate (the stash hook reads the position/camera fields directly, not this call).
+    @Redirect(method = "preRenderChunk",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GlStateManager;translate(FFF)V"))
+    private void vulkanmod$skipTranslate(float x, float y, float z) {
+        if (!TerrainRenderer.BATCH) {
+            GlStateManager.translate(x, y, z);
+        }
     }
 }
