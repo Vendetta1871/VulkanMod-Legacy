@@ -3,10 +3,10 @@ package net.vulkanmod.render;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.util.BlockRenderLayer;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.Drawer;
 import net.vulkanmod.vulkan.Pipeline;
 import net.vulkanmod.vulkan.VRenderSystem;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL14;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
@@ -38,6 +38,10 @@ public class TerrainRenderer {
     /** Debug knob: VULKANMOD_NO_TRANSLUCENT=1 skips the translucent (water) layer. */
     public static final boolean NO_TRANSLUCENT = System.getenv("VULKANMOD_NO_TRANSLUCENT") != null;
 
+    /** Debug knob: VULKANMOD_LOG_BLEND=1 logs the mirrored blend state per chunk layer. */
+    private static final boolean LOG_BLEND = System.getenv("VULKANMOD_LOG_BLEND") != null;
+    private static BlockRenderLayer lastLoggedLayer;
+
     public static void init() {
         // VULKANMOD_SHADER allows swapping in diagnostic shader variants
         String shader = System.getenv().getOrDefault("VULKANMOD_SHADER", "terrain");
@@ -57,6 +61,11 @@ public class TerrainRenderer {
             VRenderSystem.setShaderPipeline(terrainPipeline);
             snapshotState();
             TextureBridge.updateTextures();
+            if (LOG_BLEND && layer != lastLoggedLayer) {
+                lastLoggedLayer = layer;
+                Initializer.LOGGER.info("[terrain] blend({}) enabled={} srcRgb={} dstRgb={} (GL: 770=SRC_ALPHA 771=ONE_MINUS_SRC_ALPHA 1=ONE 0=ZERO)",
+                        layer, VRenderSystem.blendEnabled, VRenderSystem.blendSrcRgb, VRenderSystem.blendDstRgb);
+            }
         } catch (Throwable t) {
             reportOnce("chunk layer start", t);
         }
@@ -124,21 +133,19 @@ public class TerrainRenderer {
         GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
         VRenderSystem.depthFunc(int1.get(0));
 
-        // Blend
-        if (boolState(GL11.GL_BLEND)) {
-            VRenderSystem.enableBlend();
-            GL11.glGetIntegerv(GL14.GL_BLEND_SRC_RGB, int1);
-            int srcRgb = int1.get(0);
-            GL11.glGetIntegerv(GL14.GL_BLEND_DST_RGB, int1);
-            int dstRgb = int1.get(0);
-            GL11.glGetIntegerv(GL14.GL_BLEND_SRC_ALPHA, int1);
-            int srcAlpha = int1.get(0);
-            GL11.glGetIntegerv(GL14.GL_BLEND_DST_ALPHA, int1);
-            int dstAlpha = int1.get(0);
-            VRenderSystem.tryBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
-        } else {
-            VRenderSystem.disableBlend();
-        }
+        // Blend. The GL_BLEND / GL_BLEND_SRC_* queries are dead under Kirino GL (they
+        // report the GL defaults no matter the real state), so the blend cannot be
+        // mirrored by querying here. Instead it is tracked from the vanilla
+        // GlStateManager.enableBlend/tryBlendFuncSeparate calls by GlStateManagerBlendM,
+        // which mirrors the real GL state one-for-one. Vanilla guarantees the correct
+        // per-layer blend before renderChunkLayer runs: disabled for solid/cutout, and
+        // SRC_ALPHA/ONE_MINUS_SRC_ALPHA for the translucent (water) layer.
+        //
+        // Drawer picks the pipeline permutation from this static, not from VRenderSystem,
+        // so terrain must publish it here; otherwise it inherits whatever the previous
+        // pass (e.g. the HUD vignette's ZERO/ONE_MINUS_SRC_COLOR) left behind, which made
+        // water tint purple and flicker.
+        Drawer.currentBlendState = VRenderSystem.getBlendState();
 
         // Color mask
         GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, bool4);
