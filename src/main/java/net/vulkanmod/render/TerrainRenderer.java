@@ -43,7 +43,13 @@ public class TerrainRenderer {
      * (shared vertex arena + per-section matrix SSBO + one indirect draw per layer) instead of
      * one draw call per section. See {@link ChunkBatcher}.
      */
-    public static final boolean BATCH = System.getenv("VULKANMOD_BATCH") != null;
+    public static final boolean BATCH = isEnvOn("VULKANMOD_BATCH");
+
+    /** Env knob parsing: set to a value starting with "0" to explicitly switch it off. */
+    private static boolean isEnvOn(String name) {
+        String v = System.getenv(name);
+        return v != null && !v.isEmpty() && v.charAt(0) != '0';
+    }
 
     /** Diagnostic: VULKANMOD_NO_TERRAIN=1 skips the whole chunk pass (to bound terrain cost). */
     public static final boolean NO_TERRAIN = System.getenv("VULKANMOD_NO_TERRAIN") != null;
@@ -63,12 +69,20 @@ public class TerrainRenderer {
     /** Clears the per-frame fixed-state cache; called once per frame from {@code Initializer.beginFrame}. */
     public static void onFrameBegin() {
         fixedStateCached = false;
+        ++frameCounter;
+        // Arm the matrix dump for exactly the frame after armMatrixDump() was called
+        // (onFrameBegin runs before the frame renders, so latch through a pending flag).
+        dumpFramesLeft = dumpPending ? 1 : 0;
+        dumpPending = false;
     }
+
+    private static long frameCounter;
 
     // Batched per-section matrix derivation: camera matrices captured at layer start, and the
     // section origin + camera position stashed by ChunkRenderContainerM.preRenderChunk.
     private static final org.joml.Matrix4f batchCameraMV = new org.joml.Matrix4f();
     private static final org.joml.Matrix4f batchProjRemap = new org.joml.Matrix4f();
+    private static long lastCaptureFrame = -1;
     private static double batchCamX, batchCamY, batchCamZ;
     private static int pendingX, pendingY, pendingZ;
 
@@ -88,6 +102,52 @@ public class TerrainRenderer {
                 (float) (pendingX - batchCamX),
                 (float) (pendingY - batchCamY),
                 (float) (pendingZ - batchCamZ));
+    }
+
+    /**
+     * Diagnostic knob: VULKANMOD_DUMP_MVP=1 dumps every section's slot, origin, camera and the
+     * exact MVP matrix written to the SSBO for one frame (armed by the autotest at capture
+     * time) to {@code vm_mvp_dump.txt}, so section-boundary seams can be checked offline.
+     */
+    public static final boolean DUMP_MVP = System.getenv("VULKANMOD_DUMP_MVP") != null;
+    public static volatile int dumpFramesLeft;
+    private static volatile boolean dumpPending;
+    private static java.io.PrintWriter dumpOut;
+
+    /** Requests the matrix dump for the next rendered frame. */
+    public static void armMatrixDump() {
+        dumpPending = true;
+    }
+
+    /** Called from the batched draw path once per recorded section. */
+    public static void dumpSectionMatrix(int slot) {
+        try {
+            if (dumpOut == null) {
+                java.io.File f = new java.io.File(
+                        net.minecraft.client.Minecraft.getMinecraft().gameDir, "vm_mvp_dump.txt");
+                dumpOut = new java.io.PrintWriter(new java.io.FileWriter(f));
+            }
+            java.nio.ByteBuffer mvp = VRenderSystem.MVP;
+            StringBuilder sb = new StringBuilder(256);
+            sb.append(slot).append(' ').append(pendingX).append(' ').append(pendingY).append(' ')
+              .append(pendingZ).append(' ').append(batchCamX).append(' ').append(batchCamY)
+              .append(' ').append(batchCamZ).append(' ').append(currentLayer);
+            // Live GL state at record time: tells whether the GL projection/modelview drift
+            // between layers (P11 = projection m11, M5 = modelview m11, should be constant).
+            float[] glP = new float[16];
+            float[] glM = new float[16];
+            org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_PROJECTION_MATRIX, glP);
+            org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_MODELVIEW_MATRIX, glM);
+            sb.append(" glP=").append(glP[5]).append(" glM=").append(glM[5])
+              .append(" cam=").append(batchProjRemap.m11());
+            for (int k = 0; k < 16; ++k) {
+                sb.append(' ').append(Float.toString(mvp.getFloat(k * 4)));
+            }
+            dumpOut.println(sb);
+            dumpOut.flush();
+        } catch (Throwable t) {
+            Initializer.LOGGER.warn("[terrain] matrix dump failed", t);
+        }
     }
 
     /** Debug knob: VULKANMOD_LOG_BLEND=1 logs the mirrored blend state per chunk layer. */
@@ -270,7 +330,9 @@ public class TerrainRenderer {
             // The batched pipeline reads per-section matrices from an SSBO indexed by a
             // per-vertex slot attribute; it shares the fragment shader and binding layout with
             // the plain terrain pipeline, but uses the BLOCK+slot vertex format.
-            Pipeline batched = new Pipeline(ChunkBatcher.FORMAT, "terrain_batch");
+            // The same VULKANMOD_SHADER knob selects batched variants as "terrain_batch_<name>".
+            String batchShader = shader.equals("terrain") ? "terrain_batch" : "terrain_batch_" + shader;
+            Pipeline batched = new Pipeline(ChunkBatcher.FORMAT, batchShader);
             int freeDelay = net.vulkanmod.vulkan.Vulkan.getSwapChainImages().size() + 1;
             ChunkArena arena = new ChunkArena(128 * 1024 * 1024, freeDelay, ChunkBatcher.STRIDE);
             ChunkBatcher.init(arena, batched);
@@ -296,9 +358,25 @@ public class TerrainRenderer {
             TextureBridge.updateTextures();
             net.vulkanmod.debug.FrameProfiler.texEnd();
             if (BATCH) {
-                // Capture the camera model-view + projection once for the whole layer; each
-                // section's matrix is then derived on the CPU (see applyCurrentSectionMatrix).
-                VRenderSystem.captureCameraMatrices(batchCameraMV, batchProjRemap);
+                // Capture the camera model-view + projection once per frame, at the first
+                // chunk layer pass. The stack is clean there (setupCameraTransform just
+                // loadIdentity'd and rotated it), matching what vanilla's per-chunk draws
+                // see for every layer. Do NOT re-capture per layer: Kirino nudges the
+                // modelview by ~(1+2^-20) per chunk draw, and because the batched path
+                // skips the per-chunk push/pop that nudge is never discarded - re-querying
+                // per layer would bake a growing scale into the later layers and open
+                // sub-pixel cracks where two render layers of the same section meet
+                // (e.g. solid dirt vs cutout_mipped grass sides).
+                if (lastCaptureFrame != frameCounter) {
+                    VRenderSystem.captureCameraMatrices(batchCameraMV, batchProjRemap);
+                    lastCaptureFrame = frameCounter;
+                    if (DUMP_MVP && dumpFramesLeft > 0) {
+                        float[] mv = new float[16];
+                        org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_MODELVIEW_MATRIX, mv);
+                        Initializer.LOGGER.info("[dump] frame={} layer={} P00={} P11={} glM11={}",
+                                frameCounter, layer, batchProjRemap.m00(), batchProjRemap.m11(), mv[5]);
+                    }
+                }
             }
             logLayerState(layer);
             if (LOG_BLEND && layer != lastLoggedLayer) {

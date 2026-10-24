@@ -34,6 +34,9 @@ public class Initializer {
     private static boolean initGaveUp;
     private static int initAttempts;
 
+    /** Diagnostic knob: VULKANMOD_DISABLE=1 keeps the game on the vanilla GL renderer. */
+    private static final boolean DISABLED = System.getenv("VULKANMOD_DISABLE") != null;
+
     /** Thrown while the game window has not been created yet; initialization is retried. */
     private static class WindowNotReady extends Exception {
     }
@@ -61,6 +64,11 @@ public class Initializer {
      */
     public static void initVulkan() {
         if (vulkanActive || initGaveUp) {
+            return;
+        }
+        if (DISABLED) {
+            initGaveUp = true;
+            LOGGER.info("Vulkan renderer disabled via VULKANMOD_DISABLE, staying on the vanilla GL renderer");
             return;
         }
 

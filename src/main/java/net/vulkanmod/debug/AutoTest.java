@@ -146,7 +146,9 @@ public class AutoTest {
                     // section. Gating the launch on ticks alone would start the world before
                     // the menu ever renders a frame, so wait for the title to actually render
                     // a few frames (updateCameraAndRender calls) before capturing and leaving.
-                    if (!titleCaptured && net.vulkanmod.render.GuiRenderer.getRenderedFrames() >= 3) {
+                    if (!titleCaptured && (Initializer.isVulkanActive()
+                            ? net.vulkanmod.render.GuiRenderer.getRenderedFrames() >= 3
+                            : ++titleTicks >= 3)) {
                         titleCaptured = true;
                         capture(mc, "title");
                     }
@@ -762,6 +764,10 @@ public class AutoTest {
         if (tick == settle && System.getenv("VULKANMOD_AUTOTEST_FPS_CAPTURE") != null) {
             capture(mc, "fps_fullscreen");
         }
+        // Dump the exact per-section MVP matrices of the frame right after settling.
+        if (tick == settle && net.vulkanmod.render.TerrainRenderer.DUMP_MVP) {
+            net.vulkanmod.render.TerrainRenderer.armMatrixDump();
+        }
 
         if (tick > settle && tick <= settle + measure) {
             int fps = Minecraft.getDebugFPS();
@@ -912,15 +918,17 @@ public class AutoTest {
                 mc.world == null ? -1 : mc.world.getWorldTime() % 24000L,
                 mc.player == null ? 0 : mc.player.rotationYaw,
                 mc.player == null ? 0 : mc.player.rotationPitch);
-        net.vulkanmod.render.TerrainRenderer.logState(name);
-        try {
-            net.vulkanmod.render.TextureBridge.dumpDebug(mc.gameDir);
-        } catch (Throwable t) {
-            Initializer.LOGGER.warn("[autotest] texture dump failed", t);
+        if (Initializer.isVulkanActive()) {
+            net.vulkanmod.render.TerrainRenderer.logState(name);
+            try {
+                net.vulkanmod.render.TextureBridge.dumpDebug(mc.gameDir);
+            } catch (Throwable t) {
+                Initializer.LOGGER.warn("[autotest] texture dump failed", t);
+            }
+            File out = new File(mc.gameDir, "vm_autotest_" + name + ".png");
+            Drawer.requestCapture(out);
+            Initializer.LOGGER.info("[autotest] capture requested -> {}", out);
         }
-        File out = new File(mc.gameDir, "vm_autotest_" + name + ".png");
-        Drawer.requestCapture(out);
-        Initializer.LOGGER.info("[autotest] capture requested -> {}", out);
 
         // Reference: what the vanilla GL pipeline renders into the main framebuffer
         try {

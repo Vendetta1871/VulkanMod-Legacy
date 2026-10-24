@@ -199,6 +199,9 @@ public class VBO {
 
             TerrainRenderer.countDraw(TerrainRenderer.currentLayer, vertexCount);
             ChunkBatcher.record(slot, arenaOffset / ChunkBatcher.STRIDE, vertexCount);
+            if (TerrainRenderer.DUMP_MVP && TerrainRenderer.dumpFramesLeft > 0) {
+                TerrainRenderer.dumpSectionMatrix(slot);
+            }
         } catch (Throwable t) {
             TerrainRenderer.reportOnce("chunk batch record", t);
         }
