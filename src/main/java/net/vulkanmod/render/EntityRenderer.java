@@ -50,6 +50,30 @@ public class EntityRenderer {
     /** GL texture id -> uploaded Vulkan image. */
     private static final HashMap<Integer, VulkanImage> textureCache = new HashMap<>();
 
+    /** A/B knob: VULKANMOD_NO_ENTBATCH=1 falls back to the old per-quad entity draw. */
+    public static final boolean BATCH_PARTS = System.getenv("VULKANMOD_NO_ENTBATCH") == null;
+
+    /**
+     * Fog and projection are set up once per world render and never change across the entity
+     * pass, so they are snapshotted on the first model-part draw of a frame and reused. The
+     * model-view still updates per part (it carries the per-part translate/rotate).
+     */
+    private static boolean frameStateCached;
+
+    /** The entity skin resolves to the same image for every model part; cached per entity. */
+    private static VulkanImage cachedEntityTexture;
+
+    /**
+     * Per-part batching: while a model part's boxes are being rebuilt, each quad would
+     * otherwise flush as its own draw (6 per cube). All of a part's quads share the part's
+     * model-view, texture and tint, so they are accumulated into {@link #staging} and issued
+     * as a single draw when the part finishes. {@code ModelRendererM} brackets the rebuild
+     * with {@link #beginPart()} / {@link #endPart()}.
+     */
+    private static boolean accumulating;
+    private static ByteBuffer staging = MemoryUtil.memAlloc(1 << 14);
+    private static int stagingVerts;
+
     private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
     private static final ByteBuffer bool1 = MemoryUtil.memAlloc(1);
     private static final java.nio.IntBuffer int1 = MemoryUtil.memAllocInt(1);
@@ -70,6 +94,12 @@ public class EntityRenderer {
 
     public static void setCurrentEntity(Entity entity) {
         currentEntity = entity;
+        cachedEntityTexture = null;
+    }
+
+    /** Called once per frame before the world render; forces a fresh fog/projection snapshot. */
+    public static void onFrameBegin() {
+        frameStateCached = false;
     }
 
     public static void setCompiling(boolean value) {
@@ -92,7 +122,15 @@ public class EntityRenderer {
         }
 
         try {
-            draw(buffer, vertexCount, format);
+            if (accumulating) {
+                accumulate(buffer, vertexCount);
+            } else {
+                ByteBuffer data = buffer.getByteBuffer();
+                int prev = data.position();
+                data.position(0);
+                submit(data, vertexCount);
+                data.position(prev);
+            }
             return true;
         } catch (Throwable t) {
             TerrainRenderer.reportOnce("entity", t);
@@ -100,20 +138,66 @@ public class EntityRenderer {
         }
     }
 
-    private static void draw(BufferBuilder buffer, int vertexCount, VertexFormat format) {
-        VulkanImage texture = currentEntityTexture();
+    /** Appends one captured quad to the per-part staging buffer (no draw yet). */
+    private static void accumulate(BufferBuilder buffer, int vertexCount) {
+        int stride = MODEL_FORMAT.getSize();
+        int bytes = vertexCount * stride;
+        int off = stagingVerts * stride;
+        int need = off + bytes;
+        if (staging.capacity() < need) {
+            MemoryUtil.memFree(staging);
+            staging = MemoryUtil.memAlloc(Math.max(need * 2, 1 << 14));
+        }
+        ByteBuffer src = buffer.getByteBuffer().duplicate();
+        src.position(0);
+        src.limit(bytes);
+        staging.position(off);
+        staging.put(src);
+        stagingVerts += vertexCount;
+    }
+
+    /** Opens a per-part accumulation window (called before the box rebuild). */
+    public static void beginPart() {
+        accumulating = true;
+        stagingVerts = 0;
+    }
+
+    /** Closes the accumulation window and issues the part as one draw (its model-view). */
+    public static void endPart() {
+        accumulating = false;
+        if (stagingVerts <= 0) {
+            return;
+        }
+        int n = stagingVerts;
+        stagingVerts = 0;
+        staging.position(0);
+        staging.limit(n * MODEL_FORMAT.getSize());
+        submit(staging, n);
+    }
+
+    /** Replays {@code data} (position 0, {@code vertexCount} MODEL_FORMAT verts) in Vulkan. */
+    private static void submit(ByteBuffer data, int vertexCount) {
+        net.vulkanmod.debug.FrameProfiler.entityVerts(vertexCount);
+        net.vulkanmod.debug.FrameProfiler.entityDrawBegin();
+        VulkanImage texture = entityTexture();
         if (texture == null) {
+            net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
             return;
         }
 
         Drawer drawer = Drawer.getInstance();
 
         // --- state mirrored from GL at the entity draw ---
-        VRenderSystem.updateProjectionMatrix();
+        // Projection and fog are frame-constants (set up once per world render): snapshot on
+        // the first model part of the frame, reuse for the rest. The model-view carries the
+        // per-part translate/rotate, so it (and MVP) must update every part.
+        if (!frameStateCached) {
+            VRenderSystem.updateProjectionMatrix();
+            snapshotFog();
+            frameStateCached = true;
+        }
         VRenderSystem.updateModelViewMatrix();
         VRenderSystem.calculateMVP();
-
-        snapshotFog();
 
         VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
         if (boolState(GL11.GL_DEPTH_TEST)) {
@@ -152,16 +236,13 @@ public class EntityRenderer {
         Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
         VTextureSelector.bindTexture(texture);
 
-        ByteBuffer data = buffer.getByteBuffer();
-        int prev = data.position();
-        data.position(0);
-        drawer.draw(data, 7, format, vertexCount);
-        data.position(prev);
+        drawer.draw(data, 7, MODEL_FORMAT, vertexCount);
 
         if (!loggedFirst) {
             loggedFirst = true;
             Initializer.LOGGER.info("[entity] first model draw: {} verts, tex {}", vertexCount, texture);
         }
+        net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
     }
 
     /**
@@ -177,6 +258,21 @@ public class EntityRenderer {
             packed = 15728880; // full block and sky light while alight
         }
         return packed;
+    }
+
+    /**
+     * Resolves the entity skin once per entity and reuses it for every model part (the skin
+     * binding is constant across an entity's parts), avoiding a GL texture-binding query per part.
+     */
+    private static VulkanImage entityTexture() {
+        if (cachedEntityTexture != null) {
+            return cachedEntityTexture;
+        }
+        VulkanImage image = currentEntityTexture();
+        if (image != null) {
+            cachedEntityTexture = image;
+        }
+        return image;
     }
 
     /**

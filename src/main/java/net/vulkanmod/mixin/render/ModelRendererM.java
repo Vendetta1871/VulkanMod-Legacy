@@ -44,10 +44,21 @@ public class ModelRendererM {
             at = @At(value = "INVOKE", target = "net/minecraft/client/renderer/GlStateManager.callList(I)V"))
     private void vulkanmod$rebuildOrCallList(int list) {
         if (EntityRenderer.isEntityPass()) {
+            net.vulkanmod.debug.FrameProfiler.entityRebuildBegin();
+            // Accumulate the part's quads (each box.render flushes one quad) and issue them
+            // as a single draw - they all share this part's model-view, texture and tint.
+            boolean batch = EntityRenderer.BATCH_PARTS;
+            if (batch) {
+                EntityRenderer.beginPart();
+            }
             BufferBuilder buffer = Tessellator.getInstance().getBuffer();
             for (ModelBox box : this.cubeList) {
                 box.render(buffer, this.vulkanmod$scale);
             }
+            if (batch) {
+                EntityRenderer.endPart();
+            }
+            net.vulkanmod.debug.FrameProfiler.entityRebuildEnd();
         } else {
             GlStateManager.callList(list);
         }
