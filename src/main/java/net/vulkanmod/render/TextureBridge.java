@@ -63,6 +63,13 @@ public class TextureBridge {
             // The atlas is only re-downloaded when an animation advanced or it was restitched.
             if (atlasDirty) {
                 updateAtlas();
+            } else {
+                // The entity, sky and cloud passes rebind Sampler0 to their own textures, and
+                // the translucent (water) chunk layer runs right after the entity pass. The
+                // terrain pipeline reads the currently bound image when its descriptor set is
+                // written, so every layer pass must restore the atlas even when its pixels are
+                // unchanged; otherwise water sampled the last entity's skin and rendered black.
+                restoreAtlasBinding();
             }
         } catch (Exception | LinkageError e) {
             Initializer.LOGGER.error("Failed to update Vulkan textures", e);
@@ -109,7 +116,8 @@ public class TextureBridge {
         atlasDirty = false;
         if (!atlasLogged) {
             atlasLogged = true;
-            Initializer.LOGGER.info("[texture] atlas uploaded: glId={} {}x{}", texId, width, height);
+            Initializer.LOGGER.info("[texture] atlas uploaded: glId={} {}x{} id={}", texId, width, height,
+                    System.identityHashCode(atlasImage));
         }
     }
 

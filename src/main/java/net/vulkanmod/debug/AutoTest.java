@@ -50,6 +50,23 @@ public class AutoTest {
      */
     private static final boolean GUI_MODE = System.getenv("VULKANMOD_AUTOTEST_GUI") != null;
 
+    /**
+     * Save folder to open instead of generating {@code vm_autotest}. Point it at a copy of a
+     * real save to reproduce bugs that only show up in that terrain.
+     */
+    private static final String WORLD_NAME =
+            System.getenv().getOrDefault("VULKANMOD_AUTOTEST_WORLD", "vm_autotest");
+
+    /**
+     * Time-series repro: with {@code VULKANMOD_AUTOTEST_BURST=1} the world is entered exactly
+     * as saved (time of day untouched) and a capture is taken roughly every second for five
+     * seconds, to pin down when a rendering state changes after spawn.
+     */
+    private static final boolean BURST_MODE = System.getenv("VULKANMOD_AUTOTEST_BURST") != null;
+
+    /** Player position captured on the first burst tick, to pin the camera still. */
+    private static double[] pinPos;
+
     private static boolean waterFound;
     private static int waterX, waterY, waterZ;
 
@@ -103,22 +120,24 @@ public class AutoTest {
                         WorldSettings settings = new WorldSettings(0x5EEDL, GameType.CREATIVE,
                                 false, false, WorldType.DEFAULT);
                         settings.enableCommands();
-                        Initializer.LOGGER.info("[autotest] launching integrated world");
-                        mc.launchIntegratedServer("vm_autotest", "vm_autotest", settings);
+                        Initializer.LOGGER.info("[autotest] launching integrated world {}", WORLD_NAME);
+                        mc.launchIntegratedServer(WORLD_NAME, WORLD_NAME, settings);
                         stage = 1;
                     }
                 }
             }
             case 1 -> {
                 if (mc.player != null && mc.world != null && mc.currentScreen == null && ++ticks > 40) {
-                    IntegratedServer server = mc.getIntegratedServer();
-                    if (server != null) {
-                        server.addScheduledTask(() -> {
-                            net.minecraft.world.World world = server.getWorld(0);
-                            if (world != null) {
-                                world.setWorldTime(6000); // noon (angle 0)
-                            }
-                        });
+                    if (!BURST_MODE) {
+                        IntegratedServer server = mc.getIntegratedServer();
+                        if (server != null) {
+                            server.addScheduledTask(() -> {
+                                net.minecraft.world.World world = server.getWorld(0);
+                                if (world != null) {
+                                    world.setWorldTime(6000); // noon (angle 0)
+                                }
+                            });
+                        }
                     }
                     Initializer.LOGGER.info("[autotest] in world, warming up {} ticks", WARMUP);
                     stage = 2;
@@ -128,6 +147,34 @@ public class AutoTest {
             case 2 -> {
                 if (mc.player == null) {
                     mc.shutdown();
+                    return;
+                }
+                if (BURST_MODE) {
+                    // Let the world load and the player settle for ~1.2 s, then pin the camera
+                    // still at eye level: without this the player falls through the
+                    // still-loading terrain and sweeps the view, so frames cannot be compared.
+                    if (++ticks >= 25 && pinPos == null) {
+                        // Drop the camera to just above the water/terrain surface at the
+                        // player's column: the saved spawn can be high in the air while the
+                        // chunks around it are still building.
+                        BlockPos top = mc.world.getTopSolidOrLiquidBlock(
+                                new BlockPos(mc.player.posX, 0, mc.player.posZ));
+                        pinPos = new double[]{mc.player.posX, top.getY() + 2.0, mc.player.posZ};
+                    }
+                    if (pinPos != null) {
+                        mc.player.posX = pinPos[0];
+                        mc.player.posY = pinPos[1];
+                        mc.player.posZ = pinPos[2];
+                        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+                        mc.player.rotationPitch = 0; // look at the horizon
+                    }
+                    if (ticks >= 25 && ticks % 20 == 5 && ticks <= 85) {
+                        capture(mc, "burst" + (ticks / 20 + 1));
+                    }
+                    if (ticks >= 95 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
                     return;
                 }
                 if (warmupTicks < WARMUP) {

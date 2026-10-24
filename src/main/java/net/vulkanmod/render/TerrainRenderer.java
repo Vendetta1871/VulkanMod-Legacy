@@ -42,6 +42,92 @@ public class TerrainRenderer {
     private static final boolean LOG_BLEND = System.getenv("VULKANMOD_LOG_BLEND") != null;
     private static BlockRenderLayer lastLoggedLayer;
 
+    /**
+     * Debug knob: VULKANMOD_LOG_WATER=1 logs, once a second, how many chunk buffers each
+     * render layer actually submitted and how many vertices that was, plus every case where
+     * a layer buffer went from non-empty to empty. Distinguishes "the water geometry is
+     * gone" from "it is drawn but invisible".
+     */
+    private static final boolean LOG_STATS = System.getenv("VULKANMOD_LOG_WATER") != null;
+    private static final java.util.EnumMap<BlockRenderLayer, int[]> layerStats =
+            new java.util.EnumMap<>(BlockRenderLayer.class);
+    private static long lastStatsLog;
+
+    /** Records one submitted chunk buffer; called from {@link VBO#draw()}. */
+    public static void countDraw(BlockRenderLayer layer, int vertexCount) {
+        if (!LOG_STATS || layer == null) {
+            return;
+        }
+        int[] s = layerStats.computeIfAbsent(layer, k -> new int[2]);
+        s[0]++;
+        s[1] += vertexCount;
+    }
+
+    /** Records one chunk-layer buffer upload; called from {@link VBO#upload}. */
+    public static void countUpload(BlockRenderLayer layer, int oldCount, int newCount) {
+        if (!LOG_STATS || oldCount <= 0 || newCount > 0) {
+            return;
+        }
+        Initializer.LOGGER.info("[terrain] layer buffer EMPTIED ({} -> 0 verts) layer={} (current={})",
+                oldCount, layer, currentLayer);
+    }
+
+    private static void logStats() {
+        if (!LOG_STATS) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastStatsLog < 1000L) {
+            return;
+        }
+        lastStatsLog = now;
+        StringBuilder sb = new StringBuilder("[terrain] draws/s:");
+        for (BlockRenderLayer l : BlockRenderLayer.values()) {
+            int[] s = layerStats.remove(l);
+            sb.append(' ').append(l).append('=')
+                    .append(s == null ? "0d/0v" : s[0] + "d/" + s[1] + "v");
+        }
+        Initializer.LOGGER.info(sb.toString());
+    }
+
+    private static long lastSolidStateLog, lastTranslucentStateLog;
+
+    /**
+     * Logs the state that multiplies/discards the fragment for the two layers that matter:
+     * Solid (renders correctly, the reference) and Translucent (the disappearing water). A
+     * layer that submits geometry but renders black or invisible shows up here.
+     */
+    private static void logLayerState(BlockRenderLayer layer) {
+        if (!LOG_STATS) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (layer == BlockRenderLayer.SOLID) {
+            if (now - lastSolidStateLog < 1000L) {
+                return;
+            }
+            lastSolidStateLog = now;
+        } else if (layer == BlockRenderLayer.TRANSLUCENT) {
+            if (now - lastTranslucentStateLog < 1000L) {
+                return;
+            }
+            lastTranslucentStateLog = now;
+        } else {
+            return;
+        }
+        float[] cm = VRenderSystem.getShaderColor();
+        Initializer.LOGGER.info(
+                "[terrain] state({}) colorMod=({},{},{},{}) colorMask={} depthFun={} depthMask={} fog={} blend={} src={} dst={} tex={} light={}",
+                layer,
+                String.format("%.2f", cm[0]), String.format("%.2f", cm[1]),
+                String.format("%.2f", cm[2]), String.format("%.2f", cm[3]),
+                VRenderSystem.colorMask, VRenderSystem.depthFun,
+                VRenderSystem.depthMask, VRenderSystem.isFogEnabled(), VRenderSystem.blendEnabled,
+                VRenderSystem.blendSrcRgb, VRenderSystem.blendDstRgb,
+                System.identityHashCode(net.vulkanmod.vulkan.texture.VTextureSelector.getBoundTexture()),
+                System.identityHashCode(net.vulkanmod.vulkan.texture.VTextureSelector.getLightTexture()));
+    }
+
     public static void init() {
         // VULKANMOD_SHADER allows swapping in diagnostic shader variants
         String shader = System.getenv().getOrDefault("VULKANMOD_SHADER", "terrain");
@@ -53,6 +139,7 @@ public class TerrainRenderer {
     /** Called at the start of every chunk layer pass (see VboRenderListM). */
     public static void onChunkLayerStart(BlockRenderLayer layer) {
         currentLayer = layer;
+        logStats();
         if (terrainPipeline == null) {
             return;
         }
@@ -61,6 +148,7 @@ public class TerrainRenderer {
             VRenderSystem.setShaderPipeline(terrainPipeline);
             snapshotState();
             TextureBridge.updateTextures();
+            logLayerState(layer);
             if (LOG_BLEND && layer != lastLoggedLayer) {
                 lastLoggedLayer = layer;
                 Initializer.LOGGER.info("[terrain] blend({}) enabled={} srcRgb={} dstRgb={} (GL: 770=SRC_ALPHA 771=ONE_MINUS_SRC_ALPHA 1=ONE 0=ZERO)",
