@@ -23,6 +23,7 @@ public class RenderManagerM {
                                        float yaw, float partialTicks, boolean renderOutlines,
                                        CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            net.vulkanmod.debug.FrameProfiler.entity();
             EntityRenderer.setEntityPass(true);
             EntityRenderer.setCurrentEntity(entity);
         }

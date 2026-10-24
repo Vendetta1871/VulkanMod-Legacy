@@ -2,6 +2,7 @@ package net.vulkanmod.mixin.render;
 
 import net.minecraft.client.renderer.VboRenderList;
 import net.minecraft.util.BlockRenderLayer;
+import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.TerrainRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -22,12 +23,14 @@ public class VboRenderListM {
             ci.cancel();
             return;
         }
+        FrameProfiler.terrainBegin();
         TerrainRenderer.onChunkLayerStart(layer);
     }
 
     @Inject(method = "renderChunkLayer", at = @At("TAIL"))
     private void vulkanmod$onChunkLayerEnd(BlockRenderLayer layer, CallbackInfo ci) {
         TerrainRenderer.onChunkLayerEnd(layer);
+        FrameProfiler.terrainEnd();
     }
 
     /**

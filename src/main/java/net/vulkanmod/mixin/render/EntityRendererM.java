@@ -1,6 +1,7 @@
 package net.vulkanmod.mixin.render;
 
 import net.vulkanmod.Initializer;
+import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.GuiRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -27,9 +28,28 @@ public class EntityRendererM {
 
     @Inject(method = "updateCameraAndRender", at = @At("HEAD"))
     private void vulkanmod$beginFrame(float partialTicks, long finishTimeNano, CallbackInfo ci) {
+        FrameProfiler.renderBegin();
         GuiRenderer.recordFrameBegin();
         GuiRenderer.setGuiPass(false);
+        net.vulkanmod.render.EntityRenderer.onFrameBegin();
+        FrameProfiler.syncBegin();
         Initializer.beginFrame();
+        FrameProfiler.syncEnd();
+    }
+
+    @Inject(method = "updateCameraAndRender", at = @At("TAIL"))
+    private void vulkanmod$endFrame(float partialTicks, long finishTimeNano, CallbackInfo ci) {
+        FrameProfiler.renderEnd();
+    }
+
+    @Inject(method = "renderWorld", at = @At("HEAD"))
+    private void vulkanmod$worldBegin(float partialTicks, long finishTimeNano, CallbackInfo ci) {
+        FrameProfiler.worldBegin();
+    }
+
+    @Inject(method = "renderWorld", at = @At("TAIL"))
+    private void vulkanmod$worldEnd(float partialTicks, long finishTimeNano, CallbackInfo ci) {
+        FrameProfiler.worldEnd();
     }
 
     @Redirect(method = "updateCameraAndRender",

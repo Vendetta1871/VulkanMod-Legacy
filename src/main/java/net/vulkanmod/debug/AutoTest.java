@@ -747,6 +747,18 @@ public class AutoTest {
             mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
         }
 
+        // Optional: spawn client-side mobs in front of the camera (added to loadedEntityList
+        // only, never to the world/chunk save) so the entity render path can be inspected.
+        if (tick == settle - 10 && System.getenv("VULKANMOD_AUTOTEST_SPAWN") != null) {
+            spawnTestMobs(mc, envInt("VULKANMOD_AUTOTEST_SPAWN", 4));
+        }
+
+        // One-shot capture in the settled, fullscreen state so the benchmark view can be
+        // inspected for missing chunks (the swapchain capture works at any resolution).
+        if (tick == settle && System.getenv("VULKANMOD_AUTOTEST_FPS_CAPTURE") != null) {
+            capture(mc, "fps_fullscreen");
+        }
+
         if (tick > settle && tick <= settle + measure) {
             int fps = Minecraft.getDebugFPS();
             if (fps > 0) {
@@ -856,6 +868,33 @@ public class AutoTest {
     private static int titleTicks;
     private static boolean titleCaptured;
     private static double cloudAnchorX;
+
+    /**
+     * Spawns client-side-only cows in front of the camera for entity-render inspection. They
+     * are added to {@code loadedEntityList} (so RenderGlobal draws them) but never to the
+     * chunk entity lists or the save, so they vanish on reload and cannot corrupt the world.
+     */
+    private static void spawnTestMobs(Minecraft mc, int n) {
+        if (mc.world == null || mc.player == null) {
+            return;
+        }
+        double yaw = Math.toRadians(mc.player.rotationYaw);
+        double dx = -Math.sin(yaw), dz = Math.cos(yaw);
+        for (int i = 0; i < n; ++i) {
+            net.minecraft.entity.passive.EntityCow cow = new net.minecraft.entity.passive.EntityCow(mc.world);
+            double dist = 3.0 + i * 1.7;
+            double x = mc.player.posX + dx * dist;
+            double z = mc.player.posZ + dz * dist;
+            double y = mc.player.posY;
+            cow.setPosition(x, y, z);
+            cow.prevPosX = x; cow.prevPosY = y; cow.prevPosZ = z;
+            cow.lastTickPosX = x; cow.lastTickPosY = y; cow.lastTickPosZ = z;
+            cow.rotationYaw = mc.player.rotationYaw + 180.0f;
+            cow.rotationPitch = 0.0f;
+            mc.world.loadedEntityList.add(cow);
+        }
+        Initializer.LOGGER.info("[autotest] spawned {} client-side cows", n);
+    }
 
     private static void capture(Minecraft mc, String name) {
         Initializer.LOGGER.info("[autotest] capture {} clientTime={} yaw={} pitch={}", name,

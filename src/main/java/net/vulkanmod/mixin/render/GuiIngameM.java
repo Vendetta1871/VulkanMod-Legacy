@@ -2,6 +2,7 @@ package net.vulkanmod.mixin.render;
 
 import net.minecraft.client.gui.GuiIngame;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.GuiRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -19,6 +20,7 @@ public class GuiIngameM {
 
     @Inject(method = "renderGameOverlay(F)V", at = @At("HEAD"))
     private void vulkanmod$beginGui(float partialTicks, CallbackInfo ci) {
+        FrameProfiler.guiBegin();
         if (Initializer.isVulkanActive()) {
             GuiRenderer.setGuiPass(true);
         }
@@ -26,6 +28,7 @@ public class GuiIngameM {
 
     @Inject(method = "renderGameOverlay(F)V", at = @At("RETURN"))
     private void vulkanmod$endGui(float partialTicks, CallbackInfo ci) {
+        FrameProfiler.guiEnd();
         if (Initializer.isVulkanActive()) {
             GuiRenderer.setGuiPass(false);
         }
