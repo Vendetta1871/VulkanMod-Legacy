@@ -40,6 +40,13 @@ public class VRenderSystem {
     // answer glGetFloatv(GL_CURRENT_COLOR)); consumed by the GUI pass ---
     public static float trackedColorR = 1, trackedColorG = 1, trackedColorB = 1, trackedColorA = 1;
 
+    // --- Fixed-function texturing enable bit mirrored from GlStateManager.enableTexture2D/
+    // disableTexture2D (GL default: enabled). Some GUI rectangles (GuiSlot's scrollbar and
+    // its top/bottom fades) are drawn with texturing OFF so that only the vertex colour
+    // shows; the Vulkan pipelines always sample, so those draws bind a white image instead
+    // to reproduce "colour only". ---
+    public static boolean textureEnabled = true;
+
     // --- Blend state (GL defaults: disabled, ONE, ZERO) ---
     public static boolean blendEnabled = false;
     public static int blendSrcRgb = 1;   // GL_ONE

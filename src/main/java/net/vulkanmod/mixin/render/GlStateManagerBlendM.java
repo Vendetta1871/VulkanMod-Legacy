@@ -58,4 +58,18 @@ public class GlStateManagerBlendM {
             VRenderSystem.trackedColorA = a;
         }
     }
+
+    @Inject(method = "enableTexture2D", at = @At("HEAD"))
+    private static void vulkanmod$enableTexture2D(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.textureEnabled = true;
+        }
+    }
+
+    @Inject(method = "disableTexture2D", at = @At("HEAD"))
+    private static void vulkanmod$disableTexture2D(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.textureEnabled = false;
+        }
+    }
 }

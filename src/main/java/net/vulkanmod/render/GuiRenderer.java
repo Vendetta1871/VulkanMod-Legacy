@@ -58,6 +58,9 @@ public class GuiRenderer {
     /** GL texture id -> uploaded Vulkan image (icons, misc, ascii, atlas, ...). */
     private static final HashMap<Integer, VulkanImage> textureCache = new HashMap<>();
 
+    /** Stand-in bound in place of the real texture while texturing is disabled. */
+    private static VulkanImage whiteTexture;
+
     // --- Immediate-mode capture ---
     // FontRenderer draws each glyph with glBegin(GL_TRIANGLE_STRIP) / glTexCoord2f /
     // glVertex3f / glEnd, bypassing the BufferBuilder, so the WorldVertexBufferUploader
@@ -274,8 +277,19 @@ public class GuiRenderer {
     /**
      * Maps the GL texture bound on the active unit (icons, misc, the font, the block
      * atlas for hotbar items) to a Vulkan image, downloading and caching on first use.
+     *
+     * <p>When fixed-function texturing is disabled (vanilla draws GuiSlot's scrollbar and
+     * its top/bottom fades with {@code disableTexture2D} so only the vertex colour shows)
+     * a white image is returned instead: the Vulkan pipelines always sample, so multiplying
+     * by white reproduces vanilla's "colour only" result exactly.</p>
      */
     private static VulkanImage currentGuiTexture() {
+        if (!VRenderSystem.textureEnabled) {
+            if (whiteTexture == null) {
+                whiteTexture = VulkanImage.createWhiteTexture();
+            }
+            return whiteTexture;
+        }
         int texId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         if (texId == 0) {
             return null;
@@ -307,9 +321,12 @@ public class GuiRenderer {
         pixels.position(0);
         pixels.limit(width * height * 4);
 
-        // NEAREST filtering, clamped addressing: SimpleTexture without an mcmeta
-        // (icons, misc, ascii) defaults to GL_NEAREST, matching the vanilla look.
-        VulkanImage image = new VulkanImage(1, width, height, 4, false, true);
+        // NEAREST filtering, REPEAT addressing: SimpleTexture without an mcmeta defaults
+        // to GL_NEAREST, and GL's default wrap is GL_REPEAT - which the tiled dirt options
+        // background relies on (its UVs run past 1.0). Clamping there stretched the edge
+        // texel into solid bands; REPEAT tiles it like vanilla. Icons and glyphs use UVs
+        // inside [0,1], where REPEAT and CLAMP are indistinguishable.
+        VulkanImage image = new VulkanImage(1, width, height, 4, false, false);
         image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         MemoryUtil.memFree(pixels);
         return image;
