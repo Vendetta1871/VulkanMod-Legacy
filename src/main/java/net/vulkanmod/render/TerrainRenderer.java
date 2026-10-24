@@ -38,6 +38,13 @@ public class TerrainRenderer {
     /** Debug knob: VULKANMOD_NO_TRANSLUCENT=1 skips the translucent (water) layer. */
     public static final boolean NO_TRANSLUCENT = System.getenv("VULKANMOD_NO_TRANSLUCENT") != null;
 
+    /**
+     * Performance knob: VULKANMOD_BATCH=1 renders chunk sections through the batched path
+     * (shared vertex arena + per-section matrix SSBO + one indirect draw per layer) instead of
+     * one draw call per section. See {@link ChunkBatcher}.
+     */
+    public static final boolean BATCH = System.getenv("VULKANMOD_BATCH") != null;
+
     /** Debug knob: VULKANMOD_LOG_BLEND=1 logs the mirrored blend state per chunk layer. */
     private static final boolean LOG_BLEND = System.getenv("VULKANMOD_LOG_BLEND") != null;
     private static BlockRenderLayer lastLoggedLayer;
@@ -213,6 +220,16 @@ public class TerrainRenderer {
         Initializer.LOGGER.info("[terrain] shader variant: {}", shader);
         terrainPipeline = new Pipeline(DefaultVertexFormats.BLOCK, shader);
         VRenderSystem.setShaderPipeline(terrainPipeline);
+
+        if (BATCH) {
+            // The batched pipeline reads per-section matrices from an SSBO indexed by a
+            // per-vertex slot attribute; it shares the fragment shader and binding layout with
+            // the plain terrain pipeline, but uses the BLOCK+slot vertex format.
+            Pipeline batched = new Pipeline(ChunkBatcher.FORMAT, "terrain_batch");
+            int freeDelay = net.vulkanmod.vulkan.Vulkan.getSwapChainImages().size() + 1;
+            ChunkArena arena = new ChunkArena(128 * 1024 * 1024, freeDelay, ChunkBatcher.STRIDE);
+            ChunkBatcher.init(arena, batched);
+        }
     }
 
     /** Called at the start of every chunk layer pass (see VboRenderListM). */
@@ -220,6 +237,9 @@ public class TerrainRenderer {
         currentLayer = layer;
         logStats();
         beginLayer(layer);
+        if (BATCH) {
+            ChunkBatcher.beginLayer();
+        }
         if (terrainPipeline == null) {
             return;
         }
@@ -236,6 +256,18 @@ public class TerrainRenderer {
             }
         } catch (Throwable t) {
             reportOnce("chunk layer start", t);
+        }
+    }
+
+    /** Called at the end of every chunk layer pass; submits the batched layer as one draw. */
+    public static void onChunkLayerEnd(BlockRenderLayer layer) {
+        if (!BATCH) {
+            return;
+        }
+        try {
+            ChunkBatcher.endLayer();
+        } catch (Throwable t) {
+            reportOnce("chunk layer end", t);
         }
     }
 

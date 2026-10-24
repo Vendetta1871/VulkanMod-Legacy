@@ -59,6 +59,7 @@ public class Pipeline {
 
     private final List<UBO> UBOs = new ArrayList<>();
     private final List<String> samplers = new ArrayList<>();
+    private final List<String> ssbos = new ArrayList<>();
     private final PushConstant pushConstant = new PushConstant();
 
     private Consumer<Integer> resetDescriptorPoolFun = defaultResetDPFun();
@@ -242,6 +243,7 @@ public class Pipeline {
 
         JsonArray jsonUbos = getArrayOrNull(jsonObject, "UBOs");
         JsonArray jsonSamplers = getArrayOrNull(jsonObject, "samplers");
+        JsonArray jsonSsbos = getArrayOrNull(jsonObject, "SSBOs");
         JsonArray jsonPushConstants = getArrayOrNull(jsonObject, "PushConstants");
 
         int bindingsSize = 0; //UBOs + sampler
@@ -260,6 +262,14 @@ public class Pipeline {
                 this.parseSamplerNode(jsonelement);
             }
             bindingsSize += jsonSamplers.size();
+        }
+
+        if(jsonSsbos != null) {
+
+            for (JsonElement jsonelement : jsonSsbos) {
+                this.parseSsboNode(jsonelement);
+            }
+            bindingsSize += jsonSsbos.size();
         }
 
         if(jsonPushConstants != null) {
@@ -290,6 +300,17 @@ public class Pipeline {
                 samplerLayoutBinding.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
                 samplerLayoutBinding.pImmutableSamplers(null);
                 samplerLayoutBinding.stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
+
+                ++i;
+            }
+
+            for(String s : this.ssbos) {
+                VkDescriptorSetLayoutBinding ssboLayoutBinding = bindings.get(i);
+                ssboLayoutBinding.binding(i);
+                ssboLayoutBinding.descriptorCount(1);
+                ssboLayoutBinding.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                ssboLayoutBinding.pImmutableSamplers(null);
+                ssboLayoutBinding.stageFlags(VK_SHADER_STAGE_VERTEX_BIT);
 
                 ++i;
             }
@@ -341,7 +362,7 @@ public class Pipeline {
     private void createDescriptorPool(int descriptorCount) {
 
         try(MemoryStack stack = stackPush()) {
-            int size =  UBOs.size() + samplers.size();
+            int size =  UBOs.size() + samplers.size() + ssbos.size();
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.create(size);
 
@@ -356,6 +377,12 @@ public class Pipeline {
                 VkDescriptorPoolSize textureSamplerPoolSize = poolSizes.get(i);
                 textureSamplerPoolSize.type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
                 textureSamplerPoolSize.descriptorCount(descriptorCount);
+            }
+
+            for(; i < size; ++i) {
+                VkDescriptorPoolSize storageBufferPoolSize = poolSizes.get(i);
+                storageBufferPoolSize.type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                storageBufferPoolSize.descriptorCount(descriptorCount);
             }
 
             VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.create();
@@ -503,6 +530,13 @@ public class Pipeline {
         samplers.add(name);
     }
 
+    private void parseSsboNode(JsonElement jsonelement) {
+        JsonObject jsonobject = jsonelement.getAsJsonObject();
+        String name = jsonobject.get("name").getAsString();
+
+        ssbos.add(name);
+    }
+
     private void parsePushConstantNode(JsonArray jsonArray) {
 
         for(JsonElement jsonelement : jsonArray) {
@@ -630,7 +664,7 @@ public class Pipeline {
         private void updateDescriptorSet(VkCommandBuffer commandBuffer, int frame, UniformBuffers uniformBuffers) {
             try(MemoryStack stack = stackPush()) {
 
-                VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.create(UBOs.size() + samplers.size());
+                VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.create(UBOs.size() + samplers.size() + ssbos.size());
                 VkDescriptorBufferInfo.Buffer[] bufferInfos = new VkDescriptorBufferInfo.Buffer[UBOs.size()];
 
                 int currentOffset = uniformBuffers.getUsedBytes();
@@ -725,6 +759,31 @@ public class Pipeline {
                     samplerDescriptorWrite.dstSet(descriptorSet);
                         }
                     }
+                }
+
+                for(String name : ssbos) {
+                    net.vulkanmod.vulkan.shader.SSBOResources.Binding b =
+                            net.vulkanmod.vulkan.shader.SSBOResources.get(name);
+                    if (b == null) {
+                        ++i;
+                        continue;
+                    }
+
+                    VkDescriptorBufferInfo.Buffer ssboInfo = VkDescriptorBufferInfo.create(1);
+                    ssboInfo.buffer(b.buffer());
+                    ssboInfo.offset(b.offset());
+                    ssboInfo.range(b.range());
+
+                    VkWriteDescriptorSet ssboWrite = descriptorWrites.get(i);
+                    ssboWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+                    ssboWrite.dstBinding(i);
+                    ssboWrite.dstArrayElement(0);
+                    ssboWrite.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                    ssboWrite.descriptorCount(1);
+                    ssboWrite.pBufferInfo(ssboInfo);
+                    ssboWrite.dstSet(descriptorSet);
+
+                    ++i;
                 }
 
                 vkUpdateDescriptorSets(device, descriptorWrites, null);

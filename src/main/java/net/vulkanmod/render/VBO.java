@@ -12,13 +12,25 @@ import java.nio.ByteBuffer;
 /**
  * Vulkan-side counterpart of one {@code net.minecraft.client.renderer.vertex.VertexBuffer}.
  *
- * <p>Chunk geometry is uploaded once per rebuild as a device-local vertex buffer and
- * drawn indexed; the quad-to-triangle indices come from the shared auto index buffer,
- * mirroring the original VulkanMod VBO.</p>
+ * <p>Two submission models are supported, selected by {@link TerrainRenderer#BATCH}:</p>
+ * <ul>
+ *   <li><b>default</b> - the section's geometry is a standalone device-local vertex buffer,
+ *   drawn with its own draw call and per-chunk modelview;</li>
+ *   <li><b>batched</b> - the geometry lives in a slice of the shared {@link ChunkArena}, and
+ *   drawing only records the section into {@link ChunkBatcher}, which later submits the whole
+ *   layer as one indirect draw.</li>
+ * </ul>
  */
 public class VBO {
     private VertexBuffer vertexBuffer;
     private int vertexCount;
+
+    // Batched path: this section's byte range within the shared arena (-1 when unset), its
+    // persistent matrix slot (-1 when unset), and a reused scratch buffer for slot interleaving.
+    private int arenaOffset = -1;
+    private int arenaBytes;
+    private int slot = -1;
+    private static ByteBuffer scratch = org.lwjgl.system.MemoryUtil.memAlloc(1 << 16);
 
     /**
      * Uploads the vertex data of one chunk layer. The buffer must have position 0 and
@@ -26,6 +38,11 @@ public class VBO {
      * leaves behind).
      */
     public void upload(ByteBuffer data, VertexFormat format, int vertexCount) {
+        if (TerrainRenderer.BATCH) {
+            uploadBatched(data, format, vertexCount);
+            return;
+        }
+
         if (vertexBuffer != null) {
             TerrainRenderer.countUpload(TerrainRenderer.currentLayer, this.vertexCount, vertexCount);
             vertexBuffer.freeBuffer();
@@ -55,18 +72,92 @@ public class VBO {
         }
     }
 
+    private void uploadBatched(ByteBuffer data, VertexFormat format, int vertexCount) {
+        ChunkArena arena = ChunkBatcher.arena();
+
+        // Release the previous slice + slot on rebuild.
+        if (arenaOffset >= 0) {
+            TerrainRenderer.countUpload(TerrainRenderer.currentLayer, this.vertexCount, vertexCount);
+            arena.free(arenaOffset, arenaBytes);
+            arenaOffset = -1;
+        }
+        if (slot >= 0) {
+            ChunkBatcher.freeSlot(slot);
+            slot = -1;
+        }
+
+        this.vertexCount = vertexCount;
+        if (vertexCount <= 0) {
+            return;
+        }
+
+        TerrainRenderer.checkVertexRange(data, vertexCount, format.getSize());
+
+        try {
+            slot = ChunkBatcher.allocSlot();
+            int bytes = ChunkBatcher.STRIDE * vertexCount;
+            ByteBuffer interleaved = interleaveSlot(data, vertexCount, slot);
+            arenaOffset = arena.alloc(bytes);
+            arenaBytes = bytes;
+            arena.upload(arenaOffset, interleaved, bytes);
+        } catch (Throwable t) {
+            if (arenaOffset >= 0) {
+                arena.free(arenaOffset, arenaBytes);
+                arenaOffset = -1;
+            }
+            if (slot >= 0) {
+                ChunkBatcher.freeSlot(slot);
+                slot = -1;
+            }
+            this.vertexCount = 0;
+            TerrainRenderer.reportOnce("chunk batch upload", t);
+        }
+    }
+
+    /**
+     * Copies the BLOCK-stride source vertices into the reused scratch buffer, appending this
+     * section's slot as the trailing float so every vertex carries its matrix index.
+     */
+    private static ByteBuffer interleaveSlot(ByteBuffer data, int vertexCount, int slot) {
+        int bytes = ChunkBatcher.STRIDE * vertexCount;
+        if (scratch.capacity() < bytes) {
+            org.lwjgl.system.MemoryUtil.memFree(scratch);
+            scratch = org.lwjgl.system.MemoryUtil.memAlloc(bytes);
+        }
+        scratch.clear();
+
+        ByteBuffer src = data.duplicate();
+        src.position(0);
+        for (int v = 0; v < vertexCount; ++v) {
+            src.limit(src.position() + ChunkBatcher.BLOCK_STRIDE);
+            scratch.put(src);          // copies exactly BLOCK_STRIDE bytes
+            scratch.putFloat(slot);
+        }
+        scratch.flip();
+        return scratch;
+    }
+
     /** Draws the buffer as indexed quads with the currently bound pipeline. */
     public void draw() {
-        if (vertexBuffer == null || vertexCount <= 0) {
+        if (vertexCount <= 0) {
             return;
         }
         if (Drawer.skipRendering || !Drawer.isActive()) {
             return;
         }
+        if (TerrainRenderer.NO_TRANSLUCENT && TerrainRenderer.currentLayer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT) {
+            return;
+        }
+
+        if (TerrainRenderer.BATCH) {
+            drawBatched();
+            return;
+        }
+
         if (VRenderSystem.getShaderPipeline() == null) {
             return;
         }
-        if (TerrainRenderer.NO_TRANSLUCENT && TerrainRenderer.currentLayer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT) {
+        if (vertexBuffer == null) {
             return;
         }
 
@@ -90,7 +181,37 @@ public class VBO {
         }
     }
 
+    private void drawBatched() {
+        if (arenaOffset < 0 || slot < 0) {
+            return;
+        }
+        try {
+            // Read the projection first, then the per-chunk modelview; updateModelViewMatrix
+            // recomputes MVP from the two, and MVP is what the batched shader reads per slot.
+            VRenderSystem.updateProjectionMatrix();
+            VRenderSystem.updateModelViewMatrix();
+
+            TerrainRenderer.countDraw(TerrainRenderer.currentLayer, vertexCount);
+            ChunkBatcher.record(slot, arenaOffset / ChunkBatcher.STRIDE, vertexCount);
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("chunk batch record", t);
+        }
+    }
+
     public void close() {
+        if (TerrainRenderer.BATCH) {
+            if (arenaOffset >= 0) {
+                ChunkBatcher.arena().free(arenaOffset, arenaBytes);
+                arenaOffset = -1;
+            }
+            if (slot >= 0) {
+                ChunkBatcher.freeSlot(slot);
+                slot = -1;
+            }
+            vertexCount = 0;
+            return;
+        }
+
         if (vertexBuffer != null) {
             vertexBuffer.freeBuffer();
             vertexBuffer = null;

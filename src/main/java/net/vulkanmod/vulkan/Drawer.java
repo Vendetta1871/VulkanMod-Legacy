@@ -155,6 +155,10 @@ public class Drawer {
 
         resetDescriptors();
 
+        if (net.vulkanmod.render.TerrainRenderer.BATCH) {
+            net.vulkanmod.render.ChunkBatcher.beginFrame();
+        }
+
         vkResetCommandBuffer(commandBuffers.get(currentFrame), 0);
 
         try(MemoryStack stack = stackPush()) {
@@ -598,6 +602,26 @@ public class Drawer {
             vkCmdBindIndexBuffer(commandBuffer, indexBuffer.getId(), indexBuffer.getOffset(), VK_INDEX_TYPE_UINT16);
 //            Profiler.Push("draw");
             vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, 0, 0);
+        }
+    }
+
+    /**
+     * Issues one indirect draw covering many chunk sections at once. All sections share the
+     * arena vertex buffer (bound at offset 0; each indirect command selects its section via
+     * {@code vertexOffset}) and the shared quad index buffer. The descriptor set must already
+     * be bound (see {@link #uploadAndBindUBOs}).
+     */
+    public void drawIndexedIndirect(long vertexBuffer, long indexBuffer, long indexOffset,
+                                    long indirectBuffer, long indirectOffset, int drawCount) {
+        if (drawCount <= 0) {
+            return;
+        }
+        try(MemoryStack stack = stackPush()) {
+            VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
+
+            vkCmdBindVertexBuffers(commandBuffer, 0, stack.longs(vertexBuffer), stack.longs(0L));
+            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexedIndirect(commandBuffer, indirectBuffer, indirectOffset, drawCount, 20);
         }
     }
 

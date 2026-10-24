@@ -82,6 +82,24 @@ public class AutoTest {
      */
     private static final String GOTO_SPEC = System.getenv("VULKANMOD_AUTOTEST_GOTO");
 
+    /**
+     * Throughput benchmark: with {@code VULKANMOD_AUTOTEST_FPS=1} the framerate limiter and
+     * vsync are disabled, the render distance is pinned, the camera is teleported (via
+     * {@code VULKANMOD_AUTOTEST_GOTO}) and held perfectly still, and after the chunks settle
+     * the debug FPS is sampled every tick for a fixed window. Reports avg/min/max so a
+     * renderer change can be shown to be faster (or not) on an identical, static scene.
+     *
+     * <p>Tuning knobs: {@code VULKANMOD_AUTOTEST_RENDER} (render distance, default 8),
+     * {@code _SETTLE} (ticks to let chunks build, default 250), {@code _MEASURE} (ticks to
+     * sample, default 150).</p>
+     */
+    private static final boolean FPS_MODE = System.getenv("VULKANMOD_AUTOTEST_FPS") != null;
+    private static int fpsSamples;
+    private static long fpsSum, fpsMin = Long.MAX_VALUE, fpsMax;
+    private static double pinX, pinY, pinZ;
+    private static float pinYaw, pinPitch;
+    private static boolean pinSet;
+
     private static int plantX, plantY, plantZ;
 
     private static boolean waterFound;
@@ -198,6 +216,11 @@ public class AutoTest {
                     if (++warmupTicks % 40 == 0) {
                         Initializer.LOGGER.info("[autotest] warmup fps {} | {}", Minecraft.getDebugFPS(), focusState(mc));
                     }
+                    return;
+                }
+
+                if (FPS_MODE) {
+                    fpsStage(mc);
                     return;
                 }
 
@@ -665,9 +688,89 @@ public class AutoTest {
                 tx >> 4, tz >> 4);
     }
 
+    /**
+     * Drives {@link #FPS_MODE}: pins the benchmark configuration, frames a fixed scene, holds
+     * the camera perfectly still, then samples the debug FPS for a window and reports the
+     * average/min/max. The scene is static (no re-meshing during sampling), so the number is a
+     * pure terrain render-throughput measure comparable across renderer builds.
+     */
+    private static void fpsStage(Minecraft mc) {
+        int tick = ++ticks;
+        int settle = envInt("VULKANMOD_AUTOTEST_SETTLE", 250);
+        int measure = envInt("VULKANMOD_AUTOTEST_MEASURE", 150);
+
+        if (tick == 1) {
+            // Fullscreen for a representative, compositor-free measurement (the user's
+            // requirement): do it before the settle window so the swapchain resize settles.
+            if (!mc.isFullScreen()) {
+                mc.toggleFullscreen();
+            }
+            mc.gameSettings.pauseOnLostFocus = false;
+            mc.gameSettings.limitFramerate = Integer.MAX_VALUE;
+            mc.gameSettings.enableVsync = false;
+            try { org.lwjgl.opengl.Display.setVSyncEnabled(false); } catch (Throwable ignored) { }
+            int rd = envInt("VULKANMOD_AUTOTEST_RENDER", 8);
+            mc.gameSettings.renderDistanceChunks = rd;
+            setWorldTime(6000L); // noon: full-bright, removes time-of-day variance
+            Initializer.LOGGER.info("[autotest] FPS bench render={} settle={} measure={}",
+                    rd, settle, measure);
+        }
+        if (tick == 5) {
+            // Frame a wide, static view: stand at the GOTO coords (or elevated at spawn) and
+            // look horizontally so the frustum spans as many chunks as possible - the
+            // draw-call-heavy case that chunk batching targets. Yaw/pitch are overridable.
+            mc.player.capabilities.isFlying = true;
+            mc.player.capabilities.allowFlying = true;
+            if (GOTO_SPEC != null) {
+                String[] p = GOTO_SPEC.trim().split("\\s+");
+                mc.player.setPosition(Double.parseDouble(p[0]), Double.parseDouble(p[1]), Double.parseDouble(p[2]));
+            } else {
+                mc.player.setPosition(mc.player.posX, Math.max(mc.player.posY, 85), mc.player.posZ);
+            }
+            mc.player.rotationYaw = envInt("VULKANMOD_AUTOTEST_YAW", 45);
+            mc.player.rotationPitch = envInt("VULKANMOD_AUTOTEST_PITCH", 0);
+        }
+        if (tick == 6) {
+            pinX = mc.player.posX; pinY = mc.player.posY; pinZ = mc.player.posZ;
+            pinYaw = mc.player.rotationYaw; pinPitch = mc.player.rotationPitch;
+            pinSet = true;
+        }
+        // Re-apply the pinned transform every tick so neither gravity nor residual motion
+        // can drift the view; a moving camera would re-mesh chunks and skew the sample.
+        if (pinSet) {
+            mc.player.capabilities.isFlying = true;
+            mc.player.capabilities.allowFlying = true;
+            mc.player.setPosition(pinX, pinY, pinZ);
+            mc.player.rotationYaw = pinYaw;
+            mc.player.rotationPitch = pinPitch;
+            mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+        }
+
+        if (tick > settle && tick <= settle + measure) {
+            int fps = Minecraft.getDebugFPS();
+            if (fps > 0) {
+                fpsSamples++;
+                fpsSum += fps;
+                if (fps < fpsMin) fpsMin = fps;
+                if (fps > fpsMax) fpsMax = fps;
+            }
+        }
+        if (tick == settle + measure + 3) {
+            double avg = fpsSamples == 0 ? 0 : (double) fpsSum / fpsSamples;
+            Initializer.LOGGER.info("[autotest] FPS RESULT avg={} min={} max={} samples={} res={}x{} fs={} pos={},{},{}",
+                    String.format("%.1f", avg), fpsMin == Long.MAX_VALUE ? 0 : fpsMin, fpsMax,
+                    fpsSamples, mc.displayWidth, mc.displayHeight, mc.isFullScreen(),
+                    String.format("%.1f", mc.player.posX),
+                    String.format("%.1f", mc.player.posY), String.format("%.1f", mc.player.posZ));
+            if (System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                Initializer.LOGGER.info("[autotest] done, shutting down");
+                mc.shutdown();
+            }
+        }
+    }
+
     /** Dumps the inputs the cloud layer is built from, for autotest forensics. */
-    private static void logClouds(Minecraft mc) {
-        try {
+    private static void logClouds(Minecraft mc) {        try {
             net.minecraft.util.math.Vec3d colour = mc.world.getCloudColour(mc.getRenderPartialTicks());
             Initializer.LOGGER.info(
                     "[autotest] clouds setting={} shouldRender={} cloudHeight={} playerY={} eye=({},{},{}) colour=({},{},{})",

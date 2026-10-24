@@ -19,4 +19,9 @@ public class VboRenderListM {
     private void vulkanmod$onChunkLayerStart(BlockRenderLayer layer, CallbackInfo ci) {
         TerrainRenderer.onChunkLayerStart(layer);
     }
+
+    @Inject(method = "renderChunkLayer", at = @At("TAIL"))
+    private void vulkanmod$onChunkLayerEnd(BlockRenderLayer layer, CallbackInfo ci) {
+        TerrainRenderer.onChunkLayerEnd(layer);
+    }
 }
