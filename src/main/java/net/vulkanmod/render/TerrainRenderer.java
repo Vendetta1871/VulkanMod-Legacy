@@ -45,6 +45,9 @@ public class TerrainRenderer {
      */
     public static final boolean BATCH = System.getenv("VULKANMOD_BATCH") != null;
 
+    /** Diagnostic: VULKANMOD_NO_TERRAIN=1 skips the whole chunk pass (to bound terrain cost). */
+    public static final boolean NO_TERRAIN = System.getenv("VULKANMOD_NO_TERRAIN") != null;
+
     /** Debug knob: VULKANMOD_LOG_BLEND=1 logs the mirrored blend state per chunk layer. */
     private static final boolean LOG_BLEND = System.getenv("VULKANMOD_LOG_BLEND") != null;
     private static BlockRenderLayer lastLoggedLayer;
