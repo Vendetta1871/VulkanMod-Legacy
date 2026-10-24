@@ -150,7 +150,9 @@ public class VBO {
         }
 
         if (TerrainRenderer.BATCH) {
+            net.vulkanmod.debug.FrameProfiler.chunkRecordBegin();
             drawBatched();
+            net.vulkanmod.debug.FrameProfiler.chunkRecordEnd();
             return;
         }
 

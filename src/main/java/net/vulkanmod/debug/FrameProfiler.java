@@ -24,6 +24,55 @@ public class FrameProfiler {
     private static long worldNs, skyNs, cloudsNs, entitiesNs, guiNs;
     private static long entityDrawNs, entityRebuildNs, entityDrawStart, entityRebuildStart;
     private static long entityDraws, entityVerts, entityCount;
+    private static long chunkRecordNs, chunkRecordStart, chunkRecords;
+    private static long submitNs, submitStart, submitCount;
+    private static long layerStartNs, layerStartStart, texNs, texStart;
+
+    /** Times the per-layer texture bridge (lightmap refresh + atlas re-download when animated). */
+    public static void texBegin() {
+        if (!ENABLED) return;
+        texStart = System.nanoTime();
+    }
+
+    public static void texEnd() {
+        if (!ENABLED) return;
+        texNs += System.nanoTime() - texStart;
+    }
+
+    /** Times the per-layer pass setup (snapshotState GL queries + texture refresh + camera capture). */
+    public static void layerStartBegin() {
+        if (!ENABLED) return;
+        layerStartStart = System.nanoTime();
+    }
+
+    public static void layerStartEnd() {
+        if (!ENABLED) return;
+        layerStartNs += System.nanoTime() - layerStartStart;
+    }
+
+    /** Times the per-layer indirect submission (bindPipeline + UBO upload + drawIndexedIndirect). */
+    public static void submitBegin() {
+        if (!ENABLED) return;
+        submitCount++;
+        submitStart = System.nanoTime();
+    }
+
+    public static void submitEnd() {
+        if (!ENABLED) return;
+        submitNs += System.nanoTime() - submitStart;
+    }
+
+    /** Times the batched per-section record (matrix derive + SSBO/indirect write). */
+    public static void chunkRecordBegin() {
+        if (!ENABLED) return;
+        chunkRecords++;
+        chunkRecordStart = System.nanoTime();
+    }
+
+    public static void chunkRecordEnd() {
+        if (!ENABLED) return;
+        chunkRecordNs += System.nanoTime() - chunkRecordStart;
+    }
 
     /** Counts a rendered entity (RenderManager.renderEntity). */
     public static void entity() {
@@ -159,17 +208,19 @@ public class FrameProfiler {
         totalNs += now - frameStart;
         if (++count % LOG_EVERY == 0) {
             double n = LOG_EVERY;
-            Initializer.LOGGER.info("[profile] frame={}ms tick={} render={} [sync={} world={} (sky={} ent={} [draw={} rebuild={} ent/f={} draws/f={} v/draw={}] chunks={}) gui={}] present={} fps~{}",
+            Initializer.LOGGER.info("[profile] frame={}ms tick={} render={} [sync={} world={} (sky={} ent={} [draw={} rebuild={} ent/f={} draws/f={} v/draw={}] chunks={} rec={}/{}s sub={} lstart={} tex={}) gui={}] present={} fps~{}",
                     fmt(totalNs / n / 1e6), fmt(tickNs / n / 1e6), fmt(renderNs / n / 1e6),
                     fmt(syncNs / n / 1e6), fmt(worldNs / n / 1e6),
                     fmt(skyNs / n / 1e6), fmt(entitiesNs / n / 1e6),
                     fmt(entityDrawNs / n / 1e6), fmt(entityRebuildNs / n / 1e6),
                     fmt(entityCount / n), fmt(entityDraws / n), fmt(entityVerts / (double) Math.max(1, entityDraws)),
-                    fmt(terrainNs / n / 1e6), fmt(guiNs / n / 1e6), fmt(presentNs / n / 1e6),
+                    fmt(terrainNs / n / 1e6), fmt(chunkRecordNs / n / 1e6), fmt(chunkRecords / n), fmt(submitNs / n / 1e6), fmt(layerStartNs / n / 1e6), fmt(texNs / n / 1e6), fmt(guiNs / n / 1e6), fmt(presentNs / n / 1e6),
                     fmt(n * 1e9 / totalNs));
             tickNs = renderNs = terrainNs = presentNs = syncNs = totalNs = 0;
             worldNs = skyNs = cloudsNs = entitiesNs = guiNs = 0;
             entityDrawNs = entityRebuildNs = entityDraws = entityVerts = entityCount = 0;
+            chunkRecordNs = chunkRecords = 0;
+            submitNs = submitCount = layerStartNs = texNs = 0;
         }
     }
 

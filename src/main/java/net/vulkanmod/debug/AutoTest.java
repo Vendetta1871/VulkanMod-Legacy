@@ -171,6 +171,10 @@ public class AutoTest {
                                 if (world != null) {
                                     world.setWorldTime(6000); // noon (angle 0)
                                 }
+                                // Pin the weather too: the save persists rain across runs,
+                                // which darkens sky/fog/lightmap and makes screenshots
+                                // incomparable between runs.
+                                server.getCommandManager().executeCommand(server, "weather clear 1000000");
                             });
                         }
                     }
@@ -775,6 +779,13 @@ public class AutoTest {
                     fpsSamples, mc.displayWidth, mc.displayHeight, mc.isFullScreen(),
                     String.format("%.1f", mc.player.posX),
                     String.format("%.1f", mc.player.posY), String.format("%.1f", mc.player.posZ));
+            // Second atlas dump ~measure frames after the capture one: the animated tiles must
+            // have advanced, proving the tile mirror is live (not stale at the stitched frame).
+            try {
+                net.vulkanmod.render.TextureBridge.dumpDebug(mc.gameDir);
+            } catch (Throwable t) {
+                Initializer.LOGGER.warn("[autotest] final texture dump failed", t);
+            }
             if (System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                 Initializer.LOGGER.info("[autotest] done, shutting down");
                 mc.shutdown();
