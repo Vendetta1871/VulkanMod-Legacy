@@ -2,6 +2,11 @@ package net.vulkanmod.debug;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiMainMenu;
+import net.minecraft.client.gui.GuiLanguage;
+import net.minecraft.client.gui.GuiOptions;
+import net.minecraft.init.Blocks;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.EnumSkyBlock;
 import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.world.GameType;
 import net.minecraft.world.WorldSettings;
@@ -28,6 +33,25 @@ public class AutoTest {
     public static final boolean ENABLED = System.getenv("VULKANMOD_AUTOTEST") != null;
 
     private static final int WARMUP = envInt("VULKANMOD_AUTOTEST_WARMUP", 120);
+
+    /**
+     * Water regression repro: with {@code VULKANMOD_AUTOTEST_WATER=1} the world logic is
+     * replaced by a single check - find the nearest water block, frame it and capture, so
+     * the translucent (water) chunk layer and its blend state are exercised.
+     */
+    private static final boolean WATER_MODE = System.getenv("VULKANMOD_AUTOTEST_WATER") != null;
+
+    /**
+     * GUI regression repro: with {@code VULKANMOD_AUTOTEST_GUI=1} the title screen is
+     * captured, then the Options screen (tiled dirt background) and the Language screen
+     * (a scrolling list with a scrollbar) are opened and captured, then the game quits -
+     * no world is loaded. Exercises the REPEAT texture addressing and the "texturing
+     * disabled binds white" path.
+     */
+    private static final boolean GUI_MODE = System.getenv("VULKANMOD_AUTOTEST_GUI") != null;
+
+    private static boolean waterFound;
+    private static int waterX, waterY, waterZ;
 
     private static int stage;
     private static int ticks;
@@ -60,6 +84,10 @@ public class AutoTest {
         }
         switch (stage) {
             case 0 -> {
+                if (GUI_MODE) {
+                    guiStage(mc);
+                    return;
+                }
                 if (mc.currentScreen instanceof GuiMainMenu) {
                     // The long startup makes the timer accumulate a batch of ticks that all
                     // run inside the very first runGameLoop iteration, before its render
@@ -105,6 +133,20 @@ public class AutoTest {
                 if (warmupTicks < WARMUP) {
                     if (++warmupTicks % 40 == 0) {
                         Initializer.LOGGER.info("[autotest] warmup fps {} | {}", Minecraft.getDebugFPS(), focusState(mc));
+                    }
+                    return;
+                }
+
+                if (WATER_MODE) {
+                    if (++ticks == 5) {
+                        scanForWater(mc);
+                    } else if (ticks == 30) {
+                        frameWater(mc);
+                    } else if (ticks == 80) {
+                        capture(mc, "water");
+                    } else if (ticks == 90 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
                     }
                     return;
                 }
@@ -236,6 +278,180 @@ public class AutoTest {
         } catch (Throwable t) {
             Initializer.LOGGER.warn("[autotest] cow spawn failed", t);
         }
+    }
+
+    /**
+     * Drives {@link #GUI_MODE}: title -> Options (dirt background) -> Language (scrollbar),
+     * capturing each after it has rendered a few frames, then quitting.
+     */
+    private static int guiTicks;
+
+    private static void guiStage(Minecraft mc) {
+        if (mc.currentScreen instanceof GuiMainMenu) {
+            if (!titleCaptured && net.vulkanmod.render.GuiRenderer.getRenderedFrames() >= 3) {
+                titleCaptured = true;
+                capture(mc, "title");
+            }
+            if (titleCaptured && ++titleTicks == 3) {
+                mc.displayGuiScreen(new GuiOptions(mc.currentScreen, mc.gameSettings));
+            }
+        } else if (mc.currentScreen instanceof GuiOptions) {
+            if (++guiTicks == 4) {
+                capture(mc, "options");
+            } else if (guiTicks == 10) {
+                mc.displayGuiScreen(new GuiLanguage(mc.currentScreen, mc.gameSettings, mc.getLanguageManager()));
+            }
+        } else if (mc.currentScreen instanceof GuiLanguage) {
+            if (++guiTicks == 24) {
+                capture(mc, "scrollbar");
+            } else if (guiTicks >= 30 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                Initializer.LOGGER.info("[autotest] done, shutting down");
+                mc.shutdown();
+            }
+        }
+    }
+
+    /**
+     * Scans outward from the player for the nearest water source block (server thread) and
+     * records it in {@link #waterX}/{@link #waterY}/{@link #waterZ}. Used by WATER_MODE to
+     * frame a body of water for the translucent-layer capture.
+     */
+    private static void scanForWater(Minecraft mc) {
+        IntegratedServer server = mc.getIntegratedServer();
+        if (server == null) {
+            return;
+        }
+        double px = mc.player.posX, pz = mc.player.posZ;
+        server.addScheduledTask(() -> {
+            net.minecraft.world.World world = server.getWorld(0);
+            if (world == null) {
+                return;
+            }
+            int cx = (int) Math.floor(px), cz = (int) Math.floor(pz);
+            BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+            BlockPos.MutableBlockPos above = new BlockPos.MutableBlockPos();
+            outer:
+            for (int r = 2; r <= 160; r++) {
+                for (int a = 0; a < 360; a += 10) {
+                    double rad = Math.toRadians(a);
+                    int x = cx + (int) (Math.cos(rad) * r);
+                    int z = cz + (int) (Math.sin(rad) * r);
+                    for (int y = 72; y >= 40; y--) {
+                        // Only open-sky surface water: air for several blocks above (so it
+                        // is a lit lake, not a shaded pool or cave) and full skylight, so the
+                        // capture is bright enough to judge the water's transparency.
+                        if (world.getBlockState(cursor.setPos(x, y, z)).getBlock() != Blocks.WATER) {
+                            continue;
+                        }
+                        boolean openSky = true;
+                        for (int dy = 1; dy <= 6; dy++) {
+                            if (!world.isAirBlock(above.setPos(x, y + dy, z))) {
+                                openSky = false;
+                                break;
+                            }
+                        }
+                        if (openSky && world.getLightFromNeighborsFor(EnumSkyBlock.SKY, cursor) >= 15) {
+                            waterX = x;
+                            waterY = y;
+                            waterZ = z;
+                            waterFound = true;
+                            Initializer.LOGGER.info("[autotest] WATER_MODE found water at {},{},{}", x, y, z);
+                            break outer;
+                        }
+                    }
+                }
+            }
+            if (!waterFound) {
+                Initializer.LOGGER.info("[autotest] WATER_MODE no natural water nearby, building a pool");
+                buildWaterPool(world, cx, cz);
+            }
+        });
+    }
+
+    /**
+     * Deterministic fallback for {@link #scanForWater}: carves a shallow 5x5 water pool on
+     * the terrain surface a few blocks from the player (clearing any foliage above it), so
+     * WATER_MODE always has a lit, open-sky translucent body to frame even on a dry spawn.
+     */
+    private static void buildWaterPool(net.minecraft.world.World world, int cx, int cz) {
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int r = 3; r <= 40 && !waterFound; r++) {
+            for (int a = 0; a < 360 && !waterFound; a += 30) {
+                double rad = Math.toRadians(a);
+                int bx = cx + (int) (Math.cos(rad) * r);
+                int bz = cz + (int) (Math.sin(rad) * r);
+                // Topmost GROUND/rock/sand block with air above = the terrain surface (skips
+                // tree canopies, which a naive "any solid" scan would stop on).
+                int sy = -1;
+                for (int y = 72; y >= 58; y--) {
+                    net.minecraft.block.state.IBlockState state = world.getBlockState(cursor.setPos(bx, y, bz));
+                    net.minecraft.block.material.Material m = state.getMaterial();
+                    boolean ground = m == net.minecraft.block.material.Material.GROUND
+                            || m == net.minecraft.block.material.Material.ROCK
+                            || m == net.minecraft.block.material.Material.SAND;
+                    // The cell above may be air or replaceable (grass tufts, flowers, snow);
+                    // the water placement overwrites those, so they must not disqualify the spot.
+                    if (ground && world.getBlockState(cursor.setPos(bx, y + 1, bz)).getBlock().isReplaceable(world, cursor)) {
+                        sy = y;
+                        break;
+                    }
+                }
+                if (sy < 0) {
+                    continue;
+                }
+                // Lay a 5x5 sheet of water one block above the chosen surface, clearing the
+                // column above it. On gently sloping ground the sheet is roughly one block
+                // deep; viewed from above, transparency reads as a tint over the bright
+                // bottom, whereas an opaque layer would be solid blue.
+                // A 1-block stone rim around a 5x5 water interior holds the sources in place
+                // (open water would spread over the lip and drain down the cleared shaft).
+                for (int dx = -3; dx <= 3; dx++) {
+                    for (int dz = -3; dz <= 3; dz++) {
+                        boolean rim = Math.max(Math.abs(dx), Math.abs(dz)) == 3;
+                        world.setBlockState(cursor.setPos(bx + dx, sy + 1, bz + dz),
+                                rim ? Blocks.STONE.getDefaultState() : Blocks.WATER.getDefaultState());
+                        for (int dy = 2; dy <= 14; dy++) {
+                            world.setBlockState(cursor.setPos(bx + dx, sy + dy, bz + dz), Blocks.AIR.getDefaultState());
+                        }
+                    }
+                }
+                waterX = bx;
+                waterY = sy + 1;
+                waterZ = bz;
+                waterFound = true;
+                Initializer.LOGGER.info("[autotest] WATER_MODE built pool at {},{},{}", bx, sy + 1, bz);
+            }
+        }
+        if (!waterFound) {
+            Initializer.LOGGER.warn("[autotest] WATER_MODE could not build a pool (no flat surface found)");
+        }
+    }
+
+    /**
+     * Places the client camera a couple of blocks above and back from the found water block
+     * and points it at the surface, so the capture shows the water top and its transparency.
+     */
+    private static void frameWater(Minecraft mc) {
+        if (!waterFound) {
+            Initializer.LOGGER.warn("[autotest] WATER_MODE nothing to frame (no water found)");
+            return;
+        }
+        // Hover almost directly above the pool (a hair off-centre so the yaw stays defined)
+        // and look nearly straight down. Being high and overhead keeps the camera clear of
+        // the surrounding tree canopy, and the cleared column (see buildWaterPool) opens a
+        // shaft to the water so the surface and its transparency are unobstructed.
+        double tx = waterX + 0.5, ty = waterY + 1.0, tz = waterZ + 0.5;
+        mc.player.capabilities.isFlying = true;
+        mc.player.setPosition(tx + 0.6, waterY + 11.0, tz + 0.6);
+        double dx = tx - mc.player.posX;
+        double dy = ty - (mc.player.posY + mc.player.getEyeHeight());
+        double dz = tz - mc.player.posZ;
+        double xz = Math.sqrt(dx * dx + dz * dz);
+        mc.player.rotationYaw = (float) ((-Math.atan2(-dx, -dz) - Math.PI) * 180.0 / Math.PI);
+        mc.player.rotationPitch = (float) (Math.atan2(-dy, xz) * 180.0 / Math.PI);
+        Initializer.LOGGER.info("[autotest] WATER_MODE framing water at {},{},{} yaw={} pitch={}",
+                waterX, waterY, waterZ, String.format("%.1f", mc.player.rotationYaw),
+                String.format("%.1f", mc.player.rotationPitch));
     }
 
     /** Dumps the inputs the cloud layer is built from, for autotest forensics. */
