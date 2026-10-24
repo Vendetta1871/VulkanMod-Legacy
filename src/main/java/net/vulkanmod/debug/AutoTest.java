@@ -361,6 +361,10 @@ public class AutoTest {
                 // whether the shader's lightmap scaling matches the fixed-function path.
                 else if (ticks == 175) {
                     setWorldTime(18000L);
+                    // Pin to the benchmark perch instead of the clouds-moved position: the
+                    // player drifts there between runs (physics differs from the GL
+                    // reference run), which made the night pair non-comparable.
+                    mc.player.setPosition(-423.5, 85.0, -433.5);
                     mc.player.rotationYaw = 0.0f;
                     mc.player.rotationPitch = 45.0f;
                 } else if (ticks == 205) {

@@ -32,7 +32,6 @@ void main() {
     vertexColor = Color;
     texCoord0 = UV0;
 
-    // Lightmap sampling; see terrain_batch.vsh: +0.5 texel shift reproduces the
-    // Kirino reference's LINEAR texel-index sampling (vanilla itself is NEAREST).
+    // Lightmap sampling with the +0.5 texel shift; see terrain_batch.vsh.
     lightCoord = clamp(vec2(UV2) / 256.0, vec2(0.001953126), vec2(0.96875)) + vec2(0.03125);
 }

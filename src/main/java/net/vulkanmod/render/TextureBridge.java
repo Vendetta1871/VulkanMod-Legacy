@@ -222,6 +222,12 @@ public class TextureBridge {
         lightmapBuffer.limit(16 * 16 * 4);
 
         if (lightmapImage == null) {
+            // LINEAR with the +0.5 texel shift applied in the vertex shaders: vanilla
+            // never sets a filter on the lightmap (GL default NEAREST), but the Kirino
+            // reference samples it LINEAR with the texel position taken as coord*size
+            // (no -0.5 correction). Measured on aligned Vulkan/GL pairs: unshifted
+            // LINEAR reads 0.885x of the reference at noon, NEAREST 0.88x at night,
+            // the shifted LINEAR matches both (median ratio 1.000).
             lightmapImage = new VulkanImage(1, 16, 16, 4, true, true);
         }
 

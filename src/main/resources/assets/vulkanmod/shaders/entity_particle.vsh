@@ -31,7 +31,7 @@ void main() {
     texCoord0 = UV0;
     vertexColor = VertexColor;
 
-    // Same lightmap sampling as the terrain shaders (+0.5 texel shift, see
-    // terrain_batch.vsh); particles use the same lightmap texture and filter.
+    // Same shifted-LINEAR lightmap sampling as the terrain shaders (see
+    // terrain_batch.vsh); particles share the lightmap texture and sampler.
     lightCoord = clamp(vec2(LightMapCoord) / 256.0, vec2(0.001953126), vec2(0.96875)) + vec2(0.03125);
 }
