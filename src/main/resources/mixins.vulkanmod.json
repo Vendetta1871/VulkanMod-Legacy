@@ -21,6 +21,7 @@
     "render.TextureAtlasSpriteM",
     "render.GuiIngameM",
     "render.GuiScreenM",
+    "render.GuiMainMenuM",
     "render.GlStateManagerAlphaM",
     "render.GlStateManagerBlendM",
     "render.GlStateManagerImmediateM",
