@@ -159,6 +159,13 @@ public class ChunkBatcher {
             }
             return false;
         }
+        if (slot >= MAX_SLOTS) {
+            if (!overflowWarned) {
+                overflowWarned = true;
+                Initializer.LOGGER.warn("[batch] SLOT overflow (slot {} >= {}), matrices out of SSBO", slot, MAX_SLOTS);
+            }
+            return false;
+        }
 
         ByteBuffer ssbo = ssboMaps[curFrame];
         ByteBuffer indirect = indirectMaps[curFrame];

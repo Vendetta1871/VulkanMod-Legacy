@@ -82,12 +82,14 @@ public class ChunkArena {
 
         // First-fit scan for a free block big enough.
         for (Map.Entry<Integer, Integer> e : free.entrySet()) {
+            int offset = e.getKey();
             int block = e.getValue();
             if (block >= size) {
-                int offset = e.getKey();
-                if (block == size) {
-                    free.remove(offset);
-                } else {
+                // Consume the block: remove it, then hand back any leftover tail. Leaving the
+                // original entry in place would hand the same offset out on every later alloc,
+                // overlapping live sections (the "floating islands" bug).
+                free.remove(offset);
+                if (block > size) {
                     free.put(offset + size, block - size);
                 }
                 return offset;
@@ -156,6 +158,9 @@ public class ChunkArena {
 
     private void grow(int needed) {
         int newCapacity = Math.max(align(needed), capacity * 2);
+        net.vulkanmod.Initializer.LOGGER.warn("[arena] GROW {}MB -> {}MB (used {}MB, needed {}MB)",
+                capacity / (1024 * 1024), newCapacity / (1024 * 1024),
+                highWater / (1024 * 1024), needed / (1024 * 1024));
 
         long oldBuffer = this.buffer;
         long oldMemory = this.memory;
