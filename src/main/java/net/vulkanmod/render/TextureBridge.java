@@ -5,6 +5,7 @@ import net.minecraft.client.renderer.EntityRenderer;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureMap;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.TransferQueue;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.lwjgl.opengl.GL11;
@@ -18,11 +19,10 @@ import java.nio.ByteBuffer;
  * Vulkan images.
  *
  * <p>The lightmap is a {@link DynamicTexture} whose CPU-side {@code int[]} is read
- * directly (no GL round-trip) once per frame. The block atlas has no CPU mirror, so it
- * is downloaded with {@code glGetTexImage} — but only when its contents actually change
- * (an animated sprite advanced a frame, or the atlas was re-stitched), never per frame:
- * {@code glGetTexImage} forces a full GPU pipeline flush on Mesa and is far too slow to
- * run every frame.</p>
+ * directly (no GL round-trip) once per frame. Animated sprite frames are mirrored into
+ * the Vulkan atlas tile-by-tile from their CPU pixel data (see {@link #uploadSpriteTile}),
+ * so the full {@code glGetTexImage} download - which forces a GPU pipeline flush on Mesa -
+ * only runs once, after the atlas is (re)stitched.</p>
  */
 public class TextureBridge {
 
@@ -32,6 +32,35 @@ public class TextureBridge {
     private static boolean atlasDirty = true;
     private static int atlasWidth = -1;
     private static int atlasHeight = -1;
+
+    /** Reusable CPU staging buffer for mirroring animated sprite tiles (ARGB -&gt; RGBA). */
+    private static ByteBuffer tileBuffer;
+
+    /** Throwaway diagnostic: VULKANMOD_NO_TILEMIRROR=1 restores the full atlas re-download. */
+    private static final boolean NO_TILEMIRROR = System.getenv("VULKANMOD_NO_TILEMIRROR") != null;
+
+    /** True while the per-tick tile uploads share one transfer command buffer. */
+    private static boolean tileBatchOpen;
+
+    /**
+     * Opens the shared transfer command buffer for the tile uploads of one animation tick
+     * (TextureMapM brackets {@code TextureMap.updateAnimations} with these), so a tick with a
+     * dozen animated sprites costs one queue submit instead of a dozen.
+     */
+    public static void beginTileBatch() {
+        if (NO_TILEMIRROR || tileBatchOpen || !Initializer.isVulkanActive()) {
+            return;
+        }
+        TransferQueue.startRecording();
+        tileBatchOpen = true;
+    }
+
+    public static void endTileBatch() {
+        if (tileBatchOpen) {
+            tileBatchOpen = false;
+            TransferQueue.endRecording();
+        }
+    }
 
     /** Set once per render frame so the lightmap is refreshed at most once per frame. */
     private static boolean updatedThisFrame;
@@ -45,6 +74,47 @@ public class TextureBridge {
     /** Called after the atlas is (re)stitched, see TextureMapM. */
     public static void markAtlasDirty() {
         atlasDirty = true;
+    }
+
+    /**
+     * Mirrors one animated sprite frame straight into the Vulkan atlas from the CPU pixel
+     * data vanilla has just uploaded to GL (see TextureAtlasSpriteM), instead of re-downloading
+     * the whole atlas with glGetTexImage. The int[] is TYPE_INT_ARGB, the same source the GL
+     * upload uses, so the mirrored bytes match the GL atlas one-for-one.
+     */
+    public static void uploadSpriteTile(int[] argb, int width, int height, int x, int y) {
+        try {
+            if (NO_TILEMIRROR) {
+                atlasDirty = true;
+                return;
+            }
+            // Atlas not created yet, or mipmap-padded frame data: fall back to the full download.
+            if (atlasImage == null || argb.length != width * height) {
+                atlasDirty = true;
+                return;
+            }
+            int size = width * height * 4;
+            if (tileBuffer == null || tileBuffer.capacity() < size) {
+                if (tileBuffer != null) {
+                    MemoryUtil.memFree(tileBuffer);
+                }
+                tileBuffer = MemoryUtil.memAlloc(size);
+            }
+            tileBuffer.clear();
+            for (int pixel : argb) {
+                tileBuffer.put((byte) (pixel >> 16));
+                tileBuffer.put((byte) (pixel >> 8));
+                tileBuffer.put((byte) pixel);
+                tileBuffer.put((byte) (pixel >>> 24));
+            }
+            tileBuffer.position(0);
+            tileBuffer.limit(size);
+
+            atlasImage.uploadSubTextureAsync(0, width, height, x, y, 4, 0, 0, width, tileBuffer);
+        } catch (Exception | LinkageError e) {
+            Initializer.LOGGER.error("Failed to mirror sprite tile, falling back to atlas download", e);
+            atlasDirty = true;
+        }
     }
 
     /** Called at the start of every render frame (see {@link Initializer#beginFrame()}). */
