@@ -116,6 +116,17 @@ public class AutoTest {
     private static final boolean PLANT_MODE = System.getenv("VULKANMOD_AUTOTEST_PLANT") != null;
 
     /**
+     * Feature-gap probe: with {@code VULKANMOD_AUTOTEST_FEATURES=1} a deterministic scene of
+     * render paths the port may not bracket yet is built next to the spawn: block entities
+     * (chest, sign, furnace, enchanting table, spawner, skull, banner, torch), an item frame,
+     * a dropped enchanted sword (glint), an end crystal, hotbar item icons incl. a filled map,
+     * and worn armor. Captures: world view, third person, open inventory, first person again.
+     * Run once with Vulkan and once with {@code VULKANMOD_DISABLE=1} and diff the pairs to see
+     * exactly which render paths are missing under Vulkan.
+     */
+    private static final boolean FEATURES_MODE = System.getenv("VULKANMOD_AUTOTEST_FEATURES") != null;
+
+    /**
      * Coordinate-driven repro: {@code VULKANMOD_AUTOTEST_GOTO="x y z"} teleports the camera a
      * few blocks from that block and looks at it, to reproduce a reported misplacement at a
      * known world position (the user reports grass floating one block up at specific blocks).
@@ -466,6 +477,62 @@ public class AutoTest {
                     return;
                 }
 
+                if (FEATURES_MODE) {
+                    if (++ticks == 5) {
+                        buildFeatureScene(mc);
+                    } else if (ticks >= 25 && featBuilt && !featFramed) {
+                        // Hover north of the row and look south along it: every test prop is
+                        // in one frame, with the dropped item and crystal in the foreground.
+                        featFramed = true;
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
+                        tpPlayer(mc, featX + 4.5, featY + 6.0, featZ - 10.0);
+                        // look=(0,-0.5,-0.87) at yaw 180 proved the 1.12.2 convention: yaw 0
+                        // faces +Z, so the scene 10 blocks south (+Z) is dead ahead at yaw 0.
+                        mc.player.rotationYaw = 0.0f;
+                        mc.player.rotationPitch = 30.0f;
+                        // The renderer reads the CLIENT inventory; the server-side loadout
+                        // sends no slot packets, so mirror it here.
+                        applyFeatureLoadout(mc.player);
+                    } else if (ticks == 89) {
+                        net.minecraft.util.math.BlockPos p = new net.minecraft.util.math.BlockPos(featX, featY, featZ);
+                        StringBuilder hot = new StringBuilder();
+                        for (int i = 0; i < 9; i++) {
+                            net.minecraft.item.ItemStack st = mc.player.inventory.mainInventory.get(i);
+                            hot.append(st.isEmpty() ? "-" : st.getItem().getRegistryName()).append(' ');
+                        }
+                        Initializer.LOGGER.info("[autotest] FEATURES readback floor={} chest={} dist={}"
+                                        + " current={} mainHand={} offhand={} look={}",
+                                mc.world.getBlockState(p).getBlock().getRegistryName(),
+                                mc.world.getBlockState(p.up()).getBlock().getRegistryName(),
+                                String.format("%.1f", mc.player.getDistance(p.east(4).getX() + 0.5, p.getY() + 1, p.getZ() + 0.5)),
+                                mc.player.inventory.currentItem, mc.gameSettings.mainHand,
+                                mc.player.inventory.offHandInventory.get(0),
+                                String.format("%.2f %.2f %.2f", mc.player.getLook(1.0f).x,
+                                        mc.player.getLook(1.0f).y, mc.player.getLook(1.0f).z));
+                        Initializer.LOGGER.info("[autotest] FEATURES hotbar: {}", hot);
+                    } else if (ticks == 90) {
+                        capture(mc, "featWorld");
+                    } else if (ticks == 100) {
+                        mc.gameSettings.thirdPersonView = 1;
+                    } else if (ticks == 120) {
+                        capture(mc, "featThird");
+                    } else if (ticks == 130) {
+                        mc.gameSettings.thirdPersonView = 0;
+                        mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.player));
+                    } else if (ticks == 160) {
+                        capture(mc, "featInv");
+                    } else if (ticks == 170) {
+                        mc.displayGuiScreen(null);
+                    } else if (ticks == 195) {
+                        capture(mc, "featHand");
+                    } else if (ticks == 215 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
                 if (RAINWATER_MODE) {
                     if (++ticks == 4) {
                         // Pin to the known perch so scanForWater resolves the exact same pool
@@ -652,6 +719,130 @@ public class AutoTest {
      * fog), while the client rain strength is re-asserted every tick in stage 2 to
      * skip the server's ~1000-tick natural ramp-up.
      */
+    private static int featX, featY, featZ;
+    private static boolean featBuilt, featFramed;
+
+    /**
+     * Builds the FEATURES_MODE scene on the server: a stone floor with a row of block-entity
+     * blocks (chest, sign, furnace, enchanting table, spawner, torch on stone, skull, banner),
+     * a wall pillar with an apple item frame, a dropped enchanted diamond sword and an end
+     * crystal in front, plus a hotbar loadout (enchanted sword in hand, block/item/map icons)
+     * and worn diamond chestplate + boots. The anchor is logged so the camera can frame it.
+     */
+    private static void buildFeatureScene(Minecraft mc) {
+        IntegratedServer server = mc.getIntegratedServer();
+        if (server == null) {
+            return;
+        }
+        server.addScheduledTask(() -> {
+            net.minecraft.world.World world = server.getWorld(0);
+            if (world == null) {
+                return;
+            }
+            // Fixed absolute anchor (near the lake spawn of the repro save): the player is
+            // still falling at scene-build time, so a player-relative anchor would land
+            // somewhere different in every run and the Vulkan/GL captures would not match.
+            int bx = -598, bz = 610;
+            BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+            // Deterministic across runs: wipe the footprint+corridor column first (previous
+            // runs stacked platforms here, which made getTopSolidOrLiquidBlock climb +10
+            // every run), then build at a fixed height above the lake surface. Flag 2 keeps
+            // the client sync but skips the expensive neighbor updates.
+            for (int dx = -1; dx <= 9; dx++) {
+                for (int dz = -12; dz <= 1; dz++) {
+                    for (int dy = 60; dy <= 170; dy++) {
+                        world.setBlockState(c.setPos(bx + dx, dy, bz + dz), Blocks.AIR.getDefaultState(), 2);
+                    }
+                }
+            }
+            int py = 75;
+            // Drop the props previous runs spawned (the block wipe cannot remove entities).
+            for (net.minecraft.entity.Entity e : new java.util.ArrayList<>(world.loadedEntityList)) {
+                if ((e instanceof net.minecraft.entity.item.EntityItem
+                        || e instanceof net.minecraft.entity.item.EntityEnderCrystal
+                        || e instanceof net.minecraft.entity.item.EntityItemFrame)
+                        && Math.abs(e.posX - (bx + 4.5)) < 24 && Math.abs(e.posZ - bz) < 24
+                        && e.posY > 50 && e.posY < 180) {
+                    e.setDead();
+                }
+            }
+            for (int dx = -1; dx <= 9; dx++) {
+                for (int dz = -3; dz <= 1; dz++) {
+                    world.setBlockState(c.setPos(bx + dx, py, bz + dz), Blocks.STONE.getDefaultState());
+                }
+            }
+            // Block-entity row, west to east.
+            world.setBlockState(c.setPos(bx, py + 1, bz), Blocks.CHEST.getDefaultState());
+            world.setBlockState(c.setPos(bx + 1, py + 1, bz), Blocks.STANDING_SIGN.getDefaultState());
+            world.setBlockState(c.setPos(bx + 2, py + 1, bz), Blocks.FURNACE.getDefaultState()
+                    .withProperty(net.minecraft.block.BlockHorizontal.FACING, net.minecraft.util.EnumFacing.NORTH));
+            world.setBlockState(c.setPos(bx + 3, py + 1, bz), Blocks.ENCHANTING_TABLE.getDefaultState());
+            world.setBlockState(c.setPos(bx + 4, py + 1, bz), Blocks.MOB_SPAWNER.getDefaultState());
+            world.setBlockState(c.setPos(bx + 5, py + 1, bz), Blocks.STONE.getDefaultState());
+            world.setBlockState(c.setPos(bx + 5, py + 2, bz), Blocks.TORCH.getDefaultState());
+            world.setBlockState(c.setPos(bx + 6, py + 1, bz), Blocks.SKULL.getDefaultState());
+            world.setBlockState(c.setPos(bx + 7, py + 1, bz), Blocks.STANDING_BANNER.getDefaultState());
+            // Wall pillar with an apple item frame on its north face (toward the camera).
+            for (int dy = 1; dy <= 3; dy++) {
+                world.setBlockState(c.setPos(bx + 9, py + dy, bz), Blocks.STONE.getDefaultState());
+            }
+            net.minecraft.entity.item.EntityItemFrame frame = new net.minecraft.entity.item.EntityItemFrame(
+                    world, new BlockPos(bx + 9, py + 2, bz), net.minecraft.util.EnumFacing.NORTH);
+            frame.setDisplayedItem(new net.minecraft.item.ItemStack(net.minecraft.init.Items.APPLE));
+            world.spawnEntity(frame);
+            // Dropped enchanted sword (tests the glint overlay) and an end crystal (beam).
+            net.minecraft.item.ItemStack sword = new net.minecraft.item.ItemStack(net.minecraft.init.Items.DIAMOND_SWORD);
+            sword.addEnchantment(net.minecraft.init.Enchantments.SHARPNESS, 5);
+            world.spawnEntity(new net.minecraft.entity.item.EntityItem(world,
+                    bx + 1.5, py + 2.5, bz - 2.0, sword.copy()));
+            net.minecraft.entity.item.EntityEnderCrystal crystal = new net.minecraft.entity.item.EntityEnderCrystal(world);
+            crystal.setPosition(bx + 5.5, py + 1.0, bz - 2.0);
+            world.spawnEntity(crystal);
+            // Loadout on the server (drives the armor equipment sync + advancement).
+            net.minecraft.entity.player.EntityPlayer sp = world.getPlayerEntityByName(mc.player.getName());
+            if (sp != null) {
+                applyFeatureLoadout(sp);
+            }
+            featX = bx;
+            featY = py;
+            featZ = bz;
+            featBuilt = true;
+            Initializer.LOGGER.info("[autotest] FEATURES_MODE scene built at {},{},{}", bx, py + 1, bz);
+        });
+    }
+
+    /**
+     * Puts the FEATURES_MODE hotbar loadout on a player: enchanted sword in hand, block/item
+     * icons incl. a filled map, diamond chestplate + boots worn. The server-side set alone is
+     * not enough - {@code setInventorySlotContents} sends no sync packet to the client, so the
+     * same loadout is applied to the client player directly too (the renderer reads the client
+     * inventory for the hand, hotbar and GUI icons).
+     */
+    private static void applyFeatureLoadout(net.minecraft.entity.player.EntityPlayer sp) {
+        net.minecraft.item.ItemStack sword = new net.minecraft.item.ItemStack(net.minecraft.init.Items.DIAMOND_SWORD);
+        sword.addEnchantment(net.minecraft.init.Enchantments.SHARPNESS, 5);
+        // Stone in hand (not the sword): a 3D block item is unmistakable when held, so the
+        // captures settle whether the first-person item model renders correctly. NOTE: in
+        // 1.12.2 the hotbar is mainInventory 0..8 (36..44 would hit armor/offhand slots!).
+        sp.inventory.setInventorySlotContents(0, new net.minecraft.item.ItemStack(Blocks.STONE));
+        sp.inventory.setInventorySlotContents(1, sword);
+        sp.inventory.setInventorySlotContents(2, new net.minecraft.item.ItemStack(Blocks.CHEST));
+        sp.inventory.setInventorySlotContents(3, new net.minecraft.item.ItemStack(
+                net.minecraft.item.Item.getItemFromBlock(Blocks.STANDING_SIGN)));
+        sp.inventory.setInventorySlotContents(4, new net.minecraft.item.ItemStack(Blocks.TORCH));
+        sp.inventory.setInventorySlotContents(5, new net.minecraft.item.ItemStack(net.minecraft.init.Items.APPLE));
+        sp.inventory.setInventorySlotContents(6, new net.minecraft.item.ItemStack(net.minecraft.init.Items.BOW));
+        sp.inventory.setInventorySlotContents(7, new net.minecraft.item.ItemStack(net.minecraft.init.Items.FILLED_MAP));
+        sp.inventory.setInventorySlotContents(8, new net.minecraft.item.ItemStack(net.minecraft.init.Items.COMPASS));
+        sp.setItemStackToSlot(net.minecraft.inventory.EntityEquipmentSlot.CHEST,
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.DIAMOND_CHESTPLATE));
+        sp.setItemStackToSlot(net.minecraft.inventory.EntityEquipmentSlot.FEET,
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.DIAMOND_BOOTS));
+        // Clear whatever the save left in the offhand so the captures only show the loadout.
+        sp.setItemStackToSlot(net.minecraft.inventory.EntityEquipmentSlot.OFFHAND, net.minecraft.item.ItemStack.EMPTY);
+        sp.inventory.currentItem = 0;
+    }
+
     /**
      * Moves the player authoritatively. The integrated server owns the position, so a client-side
      * set is snapped back next tick; drive it with a server-side /tp and mirror it on the client so

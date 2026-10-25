@@ -1,6 +1,7 @@
 package net.vulkanmod.render;
 
 import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.vulkanmod.Initializer;
 import net.vulkanmod.vulkan.Drawer;
 import net.vulkanmod.vulkan.VRenderSystem;
 import net.vulkanmod.vulkan.memory.AutoIndexBuffer;
@@ -47,6 +48,9 @@ public class VBO {
             TerrainRenderer.countUpload(TerrainRenderer.currentLayer, this.vertexCount, vertexCount);
             vertexBuffer.freeBuffer();
             vertexBuffer = null;
+        }
+        if (TerrainRenderer.LOG_UPLOADS) {
+            Initializer.LOGGER.info("[terrain] UPLOAD {} -> {} verts", this.vertexCount, vertexCount);
         }
 
         this.vertexCount = vertexCount;

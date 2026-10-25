@@ -161,6 +161,9 @@ public class TerrainRenderer {
      * gone" from "it is drawn but invisible".
      */
     private static final boolean LOG_STATS = System.getenv("VULKANMOD_LOG_WATER") != null;
+
+    /** Debug knob: VULKANMOD_LOG_UPLOADS=1 logs every chunk-section buffer upload. */
+    public static final boolean LOG_UPLOADS = System.getenv("VULKANMOD_LOG_UPLOADS") != null;
     private static final java.util.EnumMap<BlockRenderLayer, int[]> layerStats =
             new java.util.EnumMap<>(BlockRenderLayer.class);
     private static long lastStatsLog;
