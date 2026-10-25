@@ -66,13 +66,15 @@ public class VRenderSystem {
         clearColor.put(0, 0.1f).put(1, 0.2f).put(2, 0.5f).put(3, 1.0f);
     }
 
-    /** Mirrors GL_FOG_COLOR into the clear color so the void matches the fog (horizon seam). */
-    public static void updateClearColorFromFog() {
+    /**
+     * The frame clear color, fed by {@code EntityRendererM} from the fog color
+     * {@code EntityRenderer.updateFogColor} computes (the same values vanilla passes
+     * to {@code GlStateManager.clearColor}), so the void and the uncovered zenith
+     * match the fog exactly like in GL.
+     */
+    public static void setClearColor(float r, float g, float b) {
         clearColor.position(0);
-        org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_FOG_COLOR, clearColor);
-        if (clearColor.get(3) <= 0.0f) {
-            clearColor.put(3, 1.0f);
-        }
+        clearColor.put(0, r).put(1, g).put(2, b).put(3, 1.0f);
         clearColor.position(0);
     }
 

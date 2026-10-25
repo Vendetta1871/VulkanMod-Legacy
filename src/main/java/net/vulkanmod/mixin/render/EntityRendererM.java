@@ -3,7 +3,9 @@ package net.vulkanmod.mixin.render;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.GuiRenderer;
+import net.vulkanmod.vulkan.VRenderSystem;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -25,6 +27,31 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(net.minecraft.client.renderer.EntityRenderer.class)
 public class EntityRendererM {
+
+    @Shadow
+    private float fogColorRed;
+
+    @Shadow
+    private float fogColorGreen;
+
+    @Shadow
+    private float fogColorBlue;
+
+    /**
+     * The frame clear color. Vanilla clears the world framebuffer with
+     * {@code fogColorRed/Green/Blue} (set here via {@code GlStateManager.clearColor}),
+     * while GL_FOG_COLOR is only written later, per pass, in {@code setupFogColor} -
+     * reading it at frame start would grab whatever fog the last pass of the previous
+     * frame left behind (weather, overlays), which is lighter than the world fog.
+     * Capturing the fields here mirrors the exact value vanilla clears with; the
+     * Vulkan pass consumes it next frame (the clear happens before this method runs).
+     */
+    @Inject(method = "updateFogColor(F)V", at = @At("TAIL"))
+    private void vulkanmod$captureClearColor(float partialTicks, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.setClearColor(fogColorRed, fogColorGreen, fogColorBlue);
+        }
+    }
 
     @Inject(method = "updateCameraAndRender", at = @At("HEAD"))
     private void vulkanmod$beginFrame(float partialTicks, long finishTimeNano, CallbackInfo ci) {
