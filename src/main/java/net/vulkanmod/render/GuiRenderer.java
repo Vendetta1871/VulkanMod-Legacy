@@ -30,11 +30,15 @@ import java.util.HashMap;
  * (tinted overlays). Textures (icons, misc, ascii, the block atlas for hotbar items)
  * are downloaded from the GL by texture id and cached, like the entity skins.</p>
  *
- * <p>Depth testing is forced off: vanilla clears the GL depth buffer before the GUI
+ * <p>Flat GUI quads force depth off: vanilla clears the GL depth buffer before the GUI
  * ({@code setupOverlayRendering} and the pre-screen {@code clear(256)}), a clear that
  * never reaches the Vulkan depth attachment, so replaying "depth test on" against the
- * leftover world depth would occlude the HUD. Without a depth test the GUI layers
- * purely by submission order, which is what vanilla effectively does as well.</p>
+ * leftover world depth would occlude the HUD. Without a depth test those quads layer
+ * purely by submission order, which is what vanilla effectively does as well. The 3D
+ * item icons are the exception: they need a real depth test (the chest lid must win
+ * over the body's top face, and the enchantment glint covers only the item's own pixels
+ * through {@code depthFunc EQUAL}), so the first icon of a pass clears the depth
+ * attachment and the icons then test against the fresh buffer.</p>
  */
 public class GuiRenderer {
 
@@ -84,7 +88,19 @@ public class GuiRenderer {
 
     public static void setGuiPass(boolean value) {
         guiPass = value;
+        if (value) {
+            itemDepthReady = false;
+        }
     }
+
+    /**
+     * True once the depth attachment has been cleared for the current GUI pass. The 3D
+     * item icons (the chest, the block items) need a real depth test: vanilla renders
+     * them with depth on, so the lid of the chest wins over the body's black top face,
+     * while the port's submission-order-only GUI let the later body quads paint over the
+     * lid. Flat GUI quads keep depth off and are unaffected by the leftover depth.
+     */
+    private static boolean itemDepthReady;
 
     public static boolean isGuiPass() {
         return guiPass;
@@ -147,14 +163,6 @@ public class GuiRenderer {
                 && format != DefaultVertexFormats.ITEM && format != DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL) {
             return false;
         }
-        // The enchantment glint relies on depthFunc EQUAL to cover only the item's own
-        // pixels; the GUI pass forces depth off (see the class doc), so replaying the
-        // SRC_COLOR/ONE quad would wash the whole slot with the glint texture. Leave it
-        // to the (unpresented) GL side until the GUI pass gains a depth buffer.
-        if (format == DefaultVertexFormats.ITEM && VRenderSystem.blendEnabled
-                && VRenderSystem.blendSrcRgb == 768 && VRenderSystem.blendDstRgb == 1) {
-            return false;
-        }
         // Only after the cheap rejections, so a draw we would not replay never opens a frame.
         if (!ensureRenderPass()) {
             return false;
@@ -211,6 +219,22 @@ public class GuiRenderer {
             } else {
                 VRenderSystem.disableCull();
             }
+            // Vanilla draws the 3D icons with depth testing on (the GUI transform pushes
+            // them to z=100); the port's GUI otherwise layers purely by submission, which
+            // lets the chest body's top face overwrite the lid drawn before it. Clear the
+            // leftover world depth once per pass and test against a fresh buffer.
+            if (!itemDepthReady) {
+                Drawer.clearAttachments(0x100);
+                itemDepthReady = true;
+            }
+            VRenderSystem.enableDepthTest();
+            VRenderSystem.depthMask(true);
+            // The enchantment glint covers only the item's own pixels via depthFunc EQUAL
+            // against the depth the icon wrote just before; every other icon face tests
+            // normally. (The glint is the ITEM draw with the SRC_COLOR/ONE additive blend.)
+            boolean glint = format == DefaultVertexFormats.ITEM && VRenderSystem.blendEnabled
+                    && VRenderSystem.blendSrcRgb == 768 && VRenderSystem.blendDstRgb == 1;
+            VRenderSystem.depthFunc(glint ? GL11.GL_EQUAL : GL11.GL_LEQUAL);
         }
 
         ByteBuffer data = buffer.getByteBuffer();
