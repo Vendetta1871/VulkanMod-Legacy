@@ -6,7 +6,8 @@
   "compatibilityLevel": "JAVA_21",
   "minVersion": "0.8",
   "mixins": [
-    "render.WindowBuilderM"
+    "render.WindowBuilderM",
+    "render.WindowCloseM"
   ],
   "client": [
     "render.MinecraftM",
