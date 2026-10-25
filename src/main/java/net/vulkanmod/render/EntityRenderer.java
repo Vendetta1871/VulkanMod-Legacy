@@ -46,8 +46,12 @@ public class EntityRenderer {
     private static final VertexFormat PARTICLE_FORMAT = DefaultVertexFormats.PARTICLE_POSITION_TEX_COLOR_LMAP;
     private static final VertexFormat BLOCK_FORMAT = DefaultVertexFormats.BLOCK;
 
-    /** True between the head and return of {@code RenderManager.renderEntity}. */
-    private static boolean entityPass;
+    /**
+     * Nesting depth of entity-owned render brackets: {@code RenderManager.renderEntity} and
+     * the block-entity pass both bracket it, and a TESR that renders an entity inside itself
+     * (the spawner's mini-mob) must not clear the outer pass on return.
+     */
+    private static int entityPassDepth;
 
     /** True between the head and return of {@code EntityRenderer.renderHand} (first person). */
     private static boolean handPass;
@@ -60,6 +64,18 @@ public class EntityRenderer {
 
     /** The entity being rendered; supplies the constant lightmap sample. */
     private static Entity currentEntity;
+
+    /**
+     * Packed lightmap of the block entity being rendered (-1 outside the block-entity
+     * pass). TESR draws (chest, sign, book, frame) carry no lightmap of their own and the
+     * stale {@link #currentEntity} would light them like the last mob, so the dispatcher
+     * bracket supplies the light at the tile entity's own position.
+     */
+    private static int tesrLight = -1;
+
+    public static void setTesrLight(int packed) {
+        tesrLight = packed;
+    }
 
     private static final float[] tint = new float[3];
 
@@ -146,11 +162,11 @@ public class EntityRenderer {
     }
 
     public static void setEntityPass(boolean value) {
-        entityPass = value;
+        entityPassDepth = Math.max(0, entityPassDepth + (value ? 1 : -1));
     }
 
     public static boolean isEntityPass() {
-        return entityPass;
+        return entityPassDepth > 0;
     }
 
     public static void setHandPass(boolean value) {
@@ -167,7 +183,7 @@ public class EntityRenderer {
 
     /** True while any pass whose draws this class replays is running. */
     public static boolean isActive() {
-        return entityPass || handPass || particlePass || rainPass;
+        return isEntityPass() || handPass || particlePass || rainPass;
     }
 
     /** The ITEM-format pipeline, shared with the GUI pass for item icons. */
@@ -192,6 +208,8 @@ public class EntityRenderer {
         // Safety reset: a throw between a pass's head and return must not leak the flag.
         handPass = false;
         particlePass = false;
+        entityPassDepth = 0;
+        tesrLight = -1;
         // Drop any weather left un-flushed by an aborted frame before re-capturing this one.
         weatherPending = false;
         weatherVerts = 0;
@@ -252,16 +270,16 @@ public class EntityRenderer {
      */
     private static Pipeline pipelineFor(VertexFormat format) {
         if (format == MODEL_FORMAT) {
-            return entityPass ? entityPipeline : null;
+            return isEntityPass() ? entityPipeline : null;
         }
         if (format == ITEM_FORMAT) {
-            return entityPass || handPass ? itemPipeline : null;
+            return isEntityPass() || handPass ? itemPipeline : null;
         }
         if (format == SHADOW_FORMAT) {
-            return entityPass ? shadowPipeline : null;
+            return isEntityPass() ? shadowPipeline : null;
         }
         if (format == FLAT_FORMAT) {
-            return entityPass ? flatPipeline : null;
+            return isEntityPass() ? flatPipeline : null;
         }
         if (format == PARTICLE_FORMAT) {
             // Cleanroom builds the weather quads in the particle format (per-vertex
@@ -273,7 +291,7 @@ public class EntityRenderer {
             // Held blocks (the enderman's) go through the terrain shader: the BLOCK
             // vertices carry their own lightmap UVs, so the CPU lightmap multiply is
             // skipped for this pipeline in applyDrawState.
-            return entityPass ? blockPipeline : null;
+            return isEntityPass() ? blockPipeline : null;
         }
         return null;
     }
@@ -561,6 +579,11 @@ public class EntityRenderer {
         // detector - the CPU lightmap multiply follows it instead of the entity's light.
         if (VRenderSystem.blendEnabled && VRenderSystem.blendSrcRgb == 1 && VRenderSystem.blendDstRgb == 1) {
             return 61680;
+        }
+        // Block-entity draws (chest/sign/book/frame models) light from their own position,
+        // set by the dispatcher bracket - never from the stale last-rendered mob.
+        if (tesrLight >= 0) {
+            return tesrLight;
         }
         if (currentEntity == null) {
             return -1;

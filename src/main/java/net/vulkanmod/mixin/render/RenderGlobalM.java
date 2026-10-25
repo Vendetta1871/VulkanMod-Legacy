@@ -56,6 +56,12 @@ public class RenderGlobalM {
                                                net.minecraft.client.renderer.culling.ICamera camera, float partialTicks,
                                                CallbackInfo ci) {
         FrameProfiler.entitiesBegin();
+        // The block-entity (TESR) pass runs inside renderEntities but its dispatcher
+        // methods are Cleanroom-added (unmapped), so the entity capture window spans the
+        // whole span: everything drawn here is entity or block-entity geometry.
+        if (Initializer.isVulkanActive()) {
+            net.vulkanmod.render.EntityRenderer.setEntityPass(true);
+        }
     }
 
     @Inject(method = "renderEntities", at = @At("TAIL"))
@@ -63,5 +69,8 @@ public class RenderGlobalM {
                                              net.minecraft.client.renderer.culling.ICamera camera, float partialTicks,
                                              CallbackInfo ci) {
         FrameProfiler.entitiesEnd();
+        if (Initializer.isVulkanActive()) {
+            net.vulkanmod.render.EntityRenderer.setEntityPass(false);
+        }
     }
 }
