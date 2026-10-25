@@ -329,12 +329,16 @@ public class EntityRenderer {
         tint[1] = float4.get(1);
         tint[2] = float4.get(2);
 
-        int packed = pipeline == blockPipeline ? -1 : packedLight();
+        // The CPU lightmap multiply is only for the entity model pipeline, whose vertices
+        // carry no lightmap. The BLOCK (enderman-held block) and PARTICLE (billboards and
+        // the weather) pipelines sample the lightmap in the shader from their own per-vertex
+        // UV2, so multiplying the tint by an entity's light on top of that double-applies a
+        // light that is not theirs: the rain and particles inherited the last mob's lightmap
+        // and turned black whenever that mob stood in the dark.
+        int packed = (pipeline == blockPipeline || pipeline == particlePipeline) ? -1 : packedLight();
         if (packed >= 0) {
             // RenderManager.renderEntityStatic turns the packed light into the lightmap
-            // unit's texture coordinate: block * 16 across, sky * 16 up. The BLOCK
-            // pipeline is excluded: its vertices carry UV2 and the terrain shader
-            // samples the lightmap itself.
+            // unit's texture coordinate: block * 16 across, sky * 16 up.
             TextureBridge.multiplyLightmap(packed % 65536 / 16, packed / 65536 / 16, tint);
         }
 
@@ -366,6 +370,14 @@ public class EntityRenderer {
      * computes it before handing the entity to its renderer.
      */
     private static int packedLight() {
+        // First-person hand: the held item/block is lit by the viewer's own light. The hand
+        // pass runs after the entity pass, so currentEntity is stale here - without this the
+        // held item inherited the last mob's lightmap and went black when that mob stood in
+        // the dark (the ITEM format carries no UV2, so the shader cannot supply the light).
+        if (handPass) {
+            Entity view = net.minecraft.client.Minecraft.getMinecraft().getRenderViewEntity();
+            return view == null ? -1 : view.getBrightnessForRender();
+        }
         // The eye layers (spider, enderman, ender dragon) blend additively (ONE/ONE)
         // and force the lightmap unit to full-bright (61680) so eyes glow in the dark.
         // That blend is unique to them in the entity pass, so it doubles as the pass
