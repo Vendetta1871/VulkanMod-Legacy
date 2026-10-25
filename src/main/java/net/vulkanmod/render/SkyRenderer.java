@@ -114,7 +114,6 @@ public class SkyRenderer {
         }
     }
 
-    private static int debugTick;
     private static boolean celestialLogPending;
 
     private static void renderSky(Minecraft mc, World world, float partialTicks, int pass) {
@@ -137,10 +136,6 @@ public class SkyRenderer {
         VRenderSystem.setLightDirections(headMV);
 
         snapshotFog();
-
-        if (debugTick++ % 40 == 0) {
-            debugLog(mc, world, partialTicks, pass);
-        }
 
         VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
         if (boolState(GL11.GL_DEPTH_TEST)) {
@@ -216,8 +211,10 @@ public class SkyRenderer {
         VRenderSystem.applyModelViewMatrix(celestial);
         VRenderSystem.calculateMVP();
 
-        // Forensics: where does the MVP buffer the shader will read put the sun center?
-        if (debugTick % 40 == 1 || celestialLogPending) {
+        // One-shot forensics: AutoTest sets celestialLogPending right before a sky capture so the
+        // screenshot lines up with the predicted sun/moon position. This must stay off otherwise -
+        // formatting these matrix dumps every frame caused a GC hitch (micro-freeze) every ~40 frames.
+        if (celestialLogPending) {
             celestialLogPending = false;
             java.nio.FloatBuffer mvpBuf = VRenderSystem.getMVP().asFloatBuffer().position(0).limit(16);
             float[] m = new float[16];
@@ -266,44 +263,6 @@ public class SkyRenderer {
      */
     public static void logCelestial(Minecraft mc, float partialTicks) {
         celestialLogPending = true;
-    }
-
-    /** Throttled dump of the inputs the sky is built from, for autotest forensics. */
-    private static void debugLog(Minecraft mc, World world, float partialTicks, int pass) {
-        try {
-            float[] rawMv = new float[16];
-            float[] rawPr = new float[16];
-            GL11.glGetFloatv(GL11.GL_MODELVIEW_MATRIX, rawMv);
-            GL11.glGetFloatv(GL11.GL_PROJECTION_MATRIX, rawPr);
-            Initializer.LOGGER.info("[sky] rawMV={} rawPR={}", raws(rawMv), raws(rawPr));
-            Vec3d sky = world.getSkyColor(mc.getRenderViewEntity(), partialTicks);
-            GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
-            float[] head = {float4.get(0), float4.get(1), float4.get(2), float4.get(3)};
-            GL11.glGetFloatv(GL11.GL_FOG_COLOR, float4);
-            float[] fogCol = {float4.get(0), float4.get(1), float4.get(2), float4.get(3)};
-            GL11.glGetFloatv(GL11.GL_FOG_START, float1);
-            float fogStart = float1.get(0);
-            GL11.glGetFloatv(GL11.GL_FOG_END, float1);
-            float fogEnd = float1.get(0);
-            Initializer.LOGGER.info(
-                    "[sky] pass={} angle={} sky=({},{},{}) headColor=({},{},{},{}) fog={} start={} end={} fogCol=({},{},{}) glow={} star={} rain={}",
-                    pass, world.getCelestialAngle(partialTicks), sky.x, sky.y, sky.z,
-                    head[0], head[1], head[2], head[3],
-                    boolState(GL11.GL_FOG), fogStart, fogEnd, fogCol[0], fogCol[1], fogCol[2],
-                    world.provider.calcSunriseSunsetColors(world.getCelestialAngle(partialTicks), partialTicks) != null,
-                    world.getStarBrightness(partialTicks), world.getRainStrength(partialTicks));
-            Matrix4f mv = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
-            Matrix4f pr = new Matrix4f(VRenderSystem.getProjectionMatrix4f());
-            Initializer.LOGGER.info("[sky] mv={} proj={}",
-                    String.format("%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f",
-                            mv.m00(), mv.m01(), mv.m02(), mv.m03(), mv.m10(), mv.m11(), mv.m12(), mv.m13(),
-                            mv.m20(), mv.m21(), mv.m22(), mv.m23(), mv.m30(), mv.m31(), mv.m32(), mv.m33()),
-                    String.format("%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f|%.3f,%.3f,%.3f,%.3f",
-                            pr.m00(), pr.m01(), pr.m02(), pr.m03(), pr.m10(), pr.m11(), pr.m12(), pr.m13(),
-                            pr.m20(), pr.m21(), pr.m22(), pr.m23(), pr.m30(), pr.m31(), pr.m32(), pr.m33()));
-        } catch (Throwable t) {
-            Initializer.LOGGER.warn("[sky] debug log failed", t);
-        }
     }
 
     // --- geometry builders (replicating the vanilla generators) ---
