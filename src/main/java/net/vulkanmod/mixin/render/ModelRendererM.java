@@ -26,6 +26,9 @@ import java.util.List;
  *
  * <p>The display-list compile itself is flagged so its (recording-only) draws are not
  * captured with the wrong matrix.</p>
+ *
+ * <p>The same rebuild runs for the hand pass: the first-person arms are drawn through
+ * {@code ModelRenderer.render} inside {@code renderHand}.</p>
  */
 @Mixin(ModelRenderer.class)
 public class ModelRendererM {
@@ -43,7 +46,7 @@ public class ModelRendererM {
     @Redirect(method = {"render(F)V", "renderWithRotation(F)V"},
             at = @At(value = "INVOKE", target = "net/minecraft/client/renderer/GlStateManager.callList(I)V"))
     private void vulkanmod$rebuildOrCallList(int list) {
-        if (EntityRenderer.isEntityPass()) {
+        if (EntityRenderer.isEntityPass() || EntityRenderer.isHandPass()) {
             net.vulkanmod.debug.FrameProfiler.entityRebuildBegin();
             // Accumulate the part's quads (each box.render flushes one quad) and issue them
             // as a single draw - they all share this part's model-view, texture and tint.

@@ -173,6 +173,11 @@ public class EntityRenderer {
         handPass = value;
     }
 
+    /** True while {@code renderHand} runs: held items, the first-person arms and the overlays. */
+    public static boolean isHandPass() {
+        return handPass;
+    }
+
     public static void setParticlePass(boolean value) {
         particlePass = value;
     }
@@ -280,7 +285,10 @@ public class EntityRenderer {
      */
     private static Pipeline pipelineFor(VertexFormat format) {
         if (format == MODEL_FORMAT) {
-            return isEntityPass() ? entityPipeline : null;
+            // The first-person arms (RenderPlayer.renderRightArm/renderLeftArm) are
+            // ModelRenderer parts drawn inside renderHand, so the hand pass needs the
+            // entity pipeline too; packedLight() already lights them from the viewer.
+            return isEntityPass() || handPass ? entityPipeline : null;
         }
         if (format == ITEM_FORMAT) {
             return isEntityPass() || handPass ? itemPipeline : null;
@@ -289,7 +297,11 @@ public class EntityRenderer {
             return isEntityPass() ? shadowPipeline : null;
         }
         if (format == FLAT_FORMAT) {
-            return isEntityPass() ? flatPipeline : null;
+            // The burning-fire, water and suffocation overlays plus the held map are
+            // POSITION_TEX quads drawn by ItemRenderer inside renderHand, so the hand
+            // pass needs the flat pipeline too (their setupOverlayRendering call site
+            // is not the redirected one, so they never reach the GUI pass).
+            return isEntityPass() || handPass ? flatPipeline : null;
         }
         if (format == PARTICLE_FORMAT) {
             // Cleanroom builds the weather quads in the particle format (per-vertex
