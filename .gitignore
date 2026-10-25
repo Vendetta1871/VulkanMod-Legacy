@@ -27,3 +27,6 @@ run/*/options.txt
 .idea/
 *.iml
 .vscode/
+run/client/.mixin.out/
+run/*/*.png
+run/client/vm_mvp_dump.txt
