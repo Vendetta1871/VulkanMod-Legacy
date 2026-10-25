@@ -96,4 +96,65 @@ public class GlStateManagerBlendM {
             VRenderSystem.colorMask(red, green, blue, alpha);
         }
     }
+
+    /*
+     * Texture matrix mirror. The matrix ops run for the modelview/projection stacks too,
+     * so each hook only acts while the texture mode is current (a static int compare);
+     * VRenderSystem keeps the stack in sync with the calls Kirino sees.
+     */
+    @Inject(method = "matrixMode(I)V", at = @At("HEAD"))
+    private static void vulkanmod$matrixMode(int mode, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixMode(mode);
+        }
+    }
+
+    @Inject(method = "setActiveTexture(I)V", at = @At("HEAD"))
+    private static void vulkanmod$setActiveTexture(int texture, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixActiveTexture(texture);
+        }
+    }
+
+    @Inject(method = "pushMatrix()V", at = @At("HEAD"))
+    private static void vulkanmod$pushMatrix(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixPush();
+        }
+    }
+
+    @Inject(method = "popMatrix()V", at = @At("HEAD"))
+    private static void vulkanmod$popMatrix(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixPop();
+        }
+    }
+
+    @Inject(method = "loadIdentity()V", at = @At("HEAD"))
+    private static void vulkanmod$loadIdentity(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixLoadIdentity();
+        }
+    }
+
+    @Inject(method = "translate(FFF)V", at = @At("HEAD"))
+    private static void vulkanmod$translate(float x, float y, float z, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixTranslate(x, y, z);
+        }
+    }
+
+    @Inject(method = "rotate(FFFF)V", at = @At("HEAD"))
+    private static void vulkanmod$rotate(float angle, float x, float y, float z, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixRotate(angle, x, y, z);
+        }
+    }
+
+    @Inject(method = "scale(FFF)V", at = @At("HEAD"))
+    private static void vulkanmod$scale(float x, float y, float z, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixScale(x, y, z);
+        }
+    }
 }

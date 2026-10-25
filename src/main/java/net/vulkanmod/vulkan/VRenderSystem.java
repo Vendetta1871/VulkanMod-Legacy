@@ -270,12 +270,89 @@ public class VRenderSystem {
         buffer.position(0);
     }
 
-    public static void setTextureMatrix(Matrix4f mat) {
-        TextureMatrix.position(0);
-        mat.get(TextureMatrix);
+    /**
+     * Mirror of the GL texture matrix, per texture unit. Kirino tracks the texture stacks
+     * internally but does not expose them through {@code glGetFloatv(GL_TEXTURE_MATRIX)},
+     * so the port keeps its own copies. Two vanilla users matter: the enchantment glint
+     * scrolls its UVs on unit 0 (scale + translate + rotate), while
+     * {@code EntityRenderer.enableLightmap} leaves a scale/translate on the lightmap
+     * unit's matrix - conflating the units would smear that transform over the atlas UVs
+     * of every item icon. The {@code GlStateManager} matrix hooks feed the current unit;
+     * only calls made while the texture mode is current apply.
+     */
+    private static final class TexUnit {
+        final Matrix4f cur = new Matrix4f();
+        final java.util.ArrayDeque<Matrix4f> stack = new java.util.ArrayDeque<>();
+    }
+
+    private static final TexUnit[] TEX_UNITS = new TexUnit[16];
+    private static int texUnit;
+    private static int matrixMode = 5888; // GL_MODELVIEW
+
+    private static TexUnit texUnit(int i) {
+        TexUnit u = TEX_UNITS[i];
+        if (u == null) {
+            u = new TexUnit();
+            TEX_UNITS[i] = u;
+        }
+        return u;
+    }
+
+    public static void texMatrixActiveTexture(int textureEnum) {
+        int unit = textureEnum - 33984; // GL_TEXTURE0
+        if (unit >= 0 && unit < TEX_UNITS.length) {
+            texUnit = unit;
+        }
+    }
+
+    public static void texMatrixMode(int mode) {
+        matrixMode = mode;
+    }
+
+    public static void texMatrixPush() {
+        if (matrixMode == 5890) { // GL_TEXTURE
+            TexUnit u = texUnit(texUnit);
+            u.stack.push(new Matrix4f(u.cur));
+        }
+    }
+
+    public static void texMatrixPop() {
+        if (matrixMode == 5890) {
+            TexUnit u = texUnit(texUnit);
+            if (!u.stack.isEmpty()) {
+                u.cur.set(u.stack.pop());
+            }
+        }
+    }
+
+    public static void texMatrixLoadIdentity() {
+        if (matrixMode == 5890) {
+            texUnit(texUnit).cur.identity();
+        }
+    }
+
+    public static void texMatrixTranslate(float x, float y, float z) {
+        if (matrixMode == 5890) {
+            texUnit(texUnit).cur.translate(x, y, z);
+        }
+    }
+
+    public static void texMatrixRotate(float angleDeg, float x, float y, float z) {
+        if (matrixMode == 5890) {
+            texUnit(texUnit).cur.rotate((float) Math.toRadians(angleDeg), x, y, z);
+        }
+    }
+
+    public static void texMatrixScale(float x, float y, float z) {
+        if (matrixMode == 5890) {
+            texUnit(texUnit).cur.scale(x, y, z);
+        }
     }
 
     public static ByteBuffer getTextureMatrix() {
+        TextureMatrix.position(0);
+        texUnit(0).cur.get(TextureMatrix); // the atlas/item unit
+        TextureMatrix.position(0);
         return TextureMatrix;
     }
 
@@ -507,5 +584,13 @@ public class VRenderSystem {
         lineWidth = 1.0f;
         pointSize = 1.0f;
         currentPipeline = null;
+        for (TexUnit u : TEX_UNITS) {
+            if (u != null) {
+                u.cur.identity();
+                u.stack.clear();
+            }
+        }
+        texUnit = 0;
+        matrixMode = 5888;
     }
 }
