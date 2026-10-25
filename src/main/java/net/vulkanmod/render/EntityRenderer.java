@@ -37,12 +37,14 @@ public class EntityRenderer {
     private static Pipeline shadowPipeline;   // POSITION_TEX_COLOR: entity drop shadow
     private static Pipeline flatPipeline;     // POSITION_TEX: burning fire / map / glint quads
     private static Pipeline particlePipeline; // PARTICLE_POSITION_TEX_COLOR_LMAP: billboards
+    private static Pipeline blockPipeline;    // BLOCK: held blocks (RenderLivingBase equip)
 
     private static final VertexFormat MODEL_FORMAT = DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL;
     private static final VertexFormat ITEM_FORMAT = DefaultVertexFormats.ITEM;
     private static final VertexFormat SHADOW_FORMAT = DefaultVertexFormats.POSITION_TEX_COLOR;
     private static final VertexFormat FLAT_FORMAT = DefaultVertexFormats.POSITION_TEX;
     private static final VertexFormat PARTICLE_FORMAT = DefaultVertexFormats.PARTICLE_POSITION_TEX_COLOR_LMAP;
+    private static final VertexFormat BLOCK_FORMAT = DefaultVertexFormats.BLOCK;
 
     /** True between the head and return of {@code RenderManager.renderEntity}. */
     private static boolean entityPass;
@@ -52,6 +54,9 @@ public class EntityRenderer {
 
     /** True between the head and return of {@code ParticleManager.renderParticles}. */
     private static boolean particlePass;
+
+    /** True from the frame's start to the head of {@code GuiIngame.renderGameOverlay}. */
+    private static boolean rainPass;
 
     /** The entity being rendered; supplies the constant lightmap sample. */
     private static Entity currentEntity;
@@ -108,6 +113,7 @@ public class EntityRenderer {
         shadowPipeline = new Pipeline(SHADOW_FORMAT, "entity_shadow");
         flatPipeline = new Pipeline(FLAT_FORMAT, "entity_flat");
         particlePipeline = new Pipeline(PARTICLE_FORMAT, "entity_particle");
+        blockPipeline = new Pipeline(BLOCK_FORMAT, "terrain");
     }
 
     public static void setEntityPass(boolean value) {
@@ -126,9 +132,13 @@ public class EntityRenderer {
         particlePass = value;
     }
 
+    public static void setRainPass(boolean value) {
+        rainPass = value;
+    }
+
     /** True while any pass whose draws this class replays is running. */
     public static boolean isActive() {
-        return entityPass || handPass || particlePass;
+        return entityPass || handPass || particlePass || rainPass;
     }
 
     /** The ITEM-format pipeline, shared with the GUI pass for item icons. */
@@ -153,6 +163,11 @@ public class EntityRenderer {
         // Safety reset: a throw between a pass's head and return must not leak the flag.
         handPass = false;
         particlePass = false;
+        // The rain pass spans from here to the HUD's head (GuiIngameM closes it):
+        // renderRainSnow is private and unmapped, so it cannot be bracketed directly,
+        // and the only particle-format batch in between that is not already the
+        // particle pipeline's is the weather itself.
+        rainPass = true;
     }
 
     public static void setCompiling(boolean value) {
@@ -197,7 +212,9 @@ public class EntityRenderer {
      * shadows and flat overlay quads only inside the entity pass; item models (ITEM)
      * inside the entity pass (dropped items) and the hand pass (first-person items and
      * held blocks, both re-emitted as ITEM); particle billboards only inside the
-     * particle pass. Anything else (e.g. the enderman's held BLOCK) is left to the GL path.
+     * particle pass; the rain/snow quads (particle format, per-vertex lightmap)
+     * inside the rain pass; held blocks (BLOCK, the enderman's) inside the entity
+     * pass.
      */
     private static Pipeline pipelineFor(VertexFormat format) {
         if (format == MODEL_FORMAT) {
@@ -213,7 +230,16 @@ public class EntityRenderer {
             return entityPass ? flatPipeline : null;
         }
         if (format == PARTICLE_FORMAT) {
-            return particlePass ? particlePipeline : null;
+            // Cleanroom builds the weather quads in the particle format (per-vertex
+            // lightmap from getCombinedLight), so the rain pass reuses the particle
+            // pipeline: ColorModulator * vertexColor * texture * lightmap + fog.
+            return particlePass || rainPass ? particlePipeline : null;
+        }
+        if (format == BLOCK_FORMAT) {
+            // Held blocks (the enderman's) go through the terrain shader: the BLOCK
+            // vertices carry their own lightmap UVs, so the CPU lightmap multiply is
+            // skipped for this pipeline in applyDrawState.
+            return entityPass ? blockPipeline : null;
         }
         return null;
     }
@@ -303,10 +329,12 @@ public class EntityRenderer {
         tint[1] = float4.get(1);
         tint[2] = float4.get(2);
 
-        int packed = packedLight();
+        int packed = pipeline == blockPipeline ? -1 : packedLight();
         if (packed >= 0) {
             // RenderManager.renderEntityStatic turns the packed light into the lightmap
-            // unit's texture coordinate: block * 16 across, sky * 16 up.
+            // unit's texture coordinate: block * 16 across, sky * 16 up. The BLOCK
+            // pipeline is excluded: its vertices carry UV2 and the terrain shader
+            // samples the lightmap itself.
             TextureBridge.multiplyLightmap(packed % 65536 / 16, packed / 65536 / 16, tint);
         }
 
@@ -338,6 +366,13 @@ public class EntityRenderer {
      * computes it before handing the entity to its renderer.
      */
     private static int packedLight() {
+        // The eye layers (spider, enderman, ender dragon) blend additively (ONE/ONE)
+        // and force the lightmap unit to full-bright (61680) so eyes glow in the dark.
+        // That blend is unique to them in the entity pass, so it doubles as the pass
+        // detector - the CPU lightmap multiply follows it instead of the entity's light.
+        if (VRenderSystem.blendEnabled && VRenderSystem.blendSrcRgb == 1 && VRenderSystem.blendDstRgb == 1) {
+            return 61680;
+        }
         if (currentEntity == null) {
             return -1;
         }
@@ -412,9 +447,14 @@ public class EntityRenderer {
         pixels.position(0);
         pixels.limit(width * height * 4);
 
-        // NEAREST filtering, clamped addressing, single mip level - like the vanilla
-        // entity skins uploaded through SimpleTexture without an mcmeta.
-        VulkanImage image = new VulkanImage(1, width, height, 4, false, true);
+        // LINEAR filtering, clamped addressing, single mip level. Vanilla never sets a
+        // filter on these textures (the GL default reads NEAREST) and uploads them as a
+        // single level, but the Kirino reference samples every texture with its own
+        // LINEAR sampler - the same finding that settled the lightmap filter (see
+        // TextureBridge). Kirino has no mip chain to sample either, so the mirror is
+        // LINEAR at LOD 0: on the minified rain quads it covers 0.84x of the
+        // reference's streak pixels, NEAREST only 0.58x.
+        VulkanImage image = new VulkanImage(1, width, height, 4, true, true);
         image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         MemoryUtil.memFree(pixels);
         return image;

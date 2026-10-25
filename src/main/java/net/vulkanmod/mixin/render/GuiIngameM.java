@@ -22,6 +22,8 @@ public class GuiIngameM {
     private void vulkanmod$beginGui(float partialTicks, CallbackInfo ci) {
         FrameProfiler.guiBegin();
         if (Initializer.isVulkanActive()) {
+            // The rain pass opened with the frame; the weather draw has passed.
+            net.vulkanmod.render.EntityRenderer.setRainPass(false);
             GuiRenderer.setGuiPass(true);
         }
     }

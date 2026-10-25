@@ -20,18 +20,20 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     vec4 color = ColorModulator;
 
+    // GL fog replaces only the fragment RGB; the alpha (the blend
+    // weight of translucent draws) passes through untouched.
     if (FogMode == 1) {
         float f = clamp((FogEnd - vertexDistance) / (FogEnd - FogStart), 0.0, 1.0);
-        color = mix(FogColor, color, f);
+        color.rgb = mix(FogColor.rgb, color.rgb, f);
     }
     else if (FogMode == 2) {
         float f = clamp(exp(-FogDensity * vertexDistance), 0.0, 1.0);
-        color = mix(FogColor, color, f);
+        color.rgb = mix(FogColor.rgb, color.rgb, f);
     }
     else if (FogMode == 3) {
         float d = FogDensity * vertexDistance;
         float f = clamp(exp(-d * d), 0.0, 1.0);
-        color = mix(FogColor, color, f);
+        color.rgb = mix(FogColor.rgb, color.rgb, f);
     }
 
     fragColor = color;

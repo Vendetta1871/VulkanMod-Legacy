@@ -192,6 +192,12 @@ public class AutoTest {
                     mc.shutdown();
                     return;
                 }
+                if (rainOn && mc.world != null) {
+                    // The server ramps rain strength by 0.01/tick (~1000 ticks to a full
+                    // downpour), so re-assert full rain on the client every tick: the rain
+                    // window is immediate and identical between the Vulkan and GL runs.
+                    mc.world.setRainStrength(1.0f);
+                }
                 if (BURST_MODE) {
                     // Let the world load and the player settle for ~1.2 s, then pin the camera
                     // still at eye level: without this the player falls through the
@@ -376,7 +382,29 @@ public class AutoTest {
                     // constant lightmap sample should darken it onto the terrain instead of
                     // leaving it lit as if it were noon.
                     capture(mc, "night_entity");
-                } else if (ticks == 255 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                } else if (ticks == 249) {
+                    // A midnight enderman holding a grass block: the additive eye layer
+                    // must render full-bright while the body follows the entity's dark
+                    // light, and the held block (BLOCK format) must go through the
+                    // terrain pipeline instead of a GL fallback.
+                    spawnNightEnderman(mc);
+                    // Aim in the same tick: staring provokes endermen and they close in
+                    // within a few ticks, so the capture has to follow immediately.
+                    aimAtEnderman(mc);
+                } else if (ticks == 251) {
+                    capture(mc, "night_enderman");
+                } else if (ticks == 252) {
+                    // Gone before the rain pair so a late teleport cannot pollute it.
+                    if (nightEnderman != null) {
+                        nightEnderman.setDead();
+                    }
+                } else if (ticks == 253) {
+                    startRain(mc);
+                } else if (ticks == 261) {
+                    // The weather quads through the Vulkan pipeline: full-bright streaks
+                    // with vertex alpha 0.25 over the darkened rainy-night terrain.
+                    capture(mc, "rain");
+                } else if (ticks == 269 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                     Initializer.LOGGER.info("[autotest] done, shutting down");
                     mc.shutdown();
                 }
@@ -389,6 +417,85 @@ public class AutoTest {
             default -> {
             }
         }
+    }
+
+    /** Client-side enderman for the night capture (eyes + held block), aimed at by the camera. */
+    private static net.minecraft.entity.monster.EntityEnderman nightEnderman;
+    private static double enderX, enderY, enderZ;
+
+    /** True once the autotest forced a downpour; re-asserts the client strength each tick. */
+    private static boolean rainOn;
+
+    /**
+     * Starts a downpour: the server command flips the weather flag (dark sky, rainy
+     * fog), while the client rain strength is re-asserted every tick in stage 2 to
+     * skip the server's ~1000-tick natural ramp-up.
+     */
+    private static void startRain(Minecraft mc) {
+        rainOn = true;
+        mc.world.setRainStrength(1.0f);
+        IntegratedServer server = mc.getIntegratedServer();
+        if (server != null) {
+            server.addScheduledTask(() ->
+                    server.getCommandManager().executeCommand(server, "weather rain 1000000"));
+        }
+        Initializer.LOGGER.info("[autotest] downpour started");
+    }
+
+    /** Spawns a held-grass-block enderman on the ground 6 blocks along the view axis. */
+    private static void spawnNightEnderman(Minecraft mc) {
+        // The night perch slopes down to the south and has a small pool near the
+        // crosshair: take the first dry column (an enderman in water takes damage and
+        // teleports frantically, which would desync the GL reference pair).
+        enderY = 0;
+        for (double lat : new double[]{0, 2, -2, 4, -4}) {
+            double x = mc.player.posX + lat;
+            double z = mc.player.posZ + 6.0;
+            int y = 120;
+            while (y > 0 && !mc.world.getBlockState(new net.minecraft.util.math.BlockPos(x, y, z))
+                    .getMaterial().blocksMovement()) {
+                y--;
+            }
+            if (y > 0 && !mc.world.getBlockState(new net.minecraft.util.math.BlockPos(x, y + 1, z))
+                    .getMaterial().isLiquid()) {
+                enderX = x;
+                enderZ = z;
+                enderY = y + 1;
+                break;
+            }
+        }
+        if (enderY <= 0) {
+            Initializer.LOGGER.warn("[autotest] no dry column for the enderman, skipping");
+            return;
+        }
+        net.minecraft.entity.monster.EntityEnderman enderman =
+                new net.minecraft.entity.monster.EntityEnderman(mc.world);
+        enderman.setHeldBlockState(net.minecraft.init.Blocks.GRASS.getDefaultState());
+        enderman.setPosition(enderX, enderY, enderZ);
+        // Face the camera so the eye layer is visible.
+        double toPlayer = Math.toDegrees(Math.atan2(
+                -(mc.player.posX - enderX), mc.player.posZ - enderZ));
+        enderman.rotationYaw = enderman.rotationYawHead = (float) toPlayer;
+        nightEnderman = enderman;
+        mc.world.spawnEntity(enderman);
+        Initializer.LOGGER.info("[autotest] spawned enderman at ({},{},{})",
+                String.format("%.1f", enderX), String.format("%.1f", enderY),
+                String.format("%.1f", enderZ));
+    }
+
+    /** Points the camera so the enderman fills the lower frame without the crosshair
+     *  hitting it: a stared-at enderman provokes and teleports to the player before the
+     *  capture. */
+    private static void aimAtEnderman(Minecraft mc) {
+        if (nightEnderman == null) {
+            return;
+        }
+        double dx = enderX - mc.player.posX;
+        double dy = enderY + 1.7 - (mc.player.posY + 1.62);
+        double dz = enderZ - mc.player.posZ;
+        mc.player.rotationYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        mc.player.rotationPitch = (float) -Math.toDegrees(
+                Math.atan2(dy, Math.sqrt(dx * dx + dz * dz))) - 12.0f;
     }
 
     /** Spawns a cow a few blocks in front of the client player, at eye level. */
@@ -747,6 +854,12 @@ public class AutoTest {
             pinX = mc.player.posX; pinY = mc.player.posY; pinZ = mc.player.posZ;
             pinYaw = mc.player.rotationYaw; pinPitch = mc.player.rotationPitch;
             pinSet = true;
+        }
+        if (tick == 10 && System.getenv("VULKANMOD_AUTOTEST_RAIN") != null) {
+            // Benchmark with the weather pass active: the rain quads are a batched
+            // POSITION_TEX_COLOR draw every frame - exactly what the GL fallback
+            // stalled on (framerate in the twenties during a downpour).
+            startRain(mc);
         }
         // Re-apply the pinned transform every tick so neither gravity nor residual motion
         // can drift the view; a moving camera would re-mesh chunks and skew the sample.
