@@ -73,6 +73,15 @@ public class AutoTest {
     private static final boolean STICKY_MODE = System.getenv("VULKANMOD_AUTOTEST_STICKY") != null;
 
     /**
+     * Window-resize regression test: with {@code VULKANMOD_AUTOTEST_RESIZE=1} the autotest drives
+     * an SDL window resize and checks that {@code Minecraft.displayWidth/Height} follow it. VulkanMod
+     * cancels {@code updateDisplay()}, which normally runs {@code checkWindowResize()}; without the
+     * resize bookkeeping being redone, the size (and the open screen's scaled layout) go stale and
+     * GUI buttons stop matching the cursor after a resize.
+     */
+    private static final boolean RESIZE_MODE = System.getenv("VULKANMOD_AUTOTEST_RESIZE") != null;
+
+    /**
      * GUI regression repro: with {@code VULKANMOD_AUTOTEST_GUI=1} the title screen is
      * captured, then the Options screen (tiled dirt background) and the Language screen
      * (a scrolling list with a scrollbar) are opened and captured, then the game quits -
@@ -392,6 +401,35 @@ public class AutoTest {
                         capture(mc, "stickyC");
                     }
                     if (t == 270 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
+                if (RESIZE_MODE) {
+                    int t = ++ticks;
+                    if (t == 5) {
+                        Initializer.LOGGER.info("[autotest] RESIZE initial mc={}x{} display={}x{} win=0x{}",
+                                mc.displayWidth, mc.displayHeight,
+                                org.lwjgl.opengl.Display.getWidth(), org.lwjgl.opengl.Display.getHeight(),
+                                Long.toHexString(org.lwjgl.sdl.SDLVideo.SDL_GL_GetCurrentWindow()));
+                    } else if (t == 30) {
+                        org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(
+                                org.lwjgl.sdl.SDLVideo.SDL_GL_GetCurrentWindow(), 1000, 700);
+                    } else if (t == 75) {
+                        Initializer.LOGGER.info("[autotest] RESIZE after->1000x700 mc={}x{} display={}x{}",
+                                mc.displayWidth, mc.displayHeight,
+                                org.lwjgl.opengl.Display.getWidth(), org.lwjgl.opengl.Display.getHeight());
+                    } else if (t == 95) {
+                        org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(
+                                org.lwjgl.sdl.SDLVideo.SDL_GL_GetCurrentWindow(), 800, 600);
+                    } else if (t == 140) {
+                        Initializer.LOGGER.info("[autotest] RESIZE after->800x600 mc={}x{} display={}x{}",
+                                mc.displayWidth, mc.displayHeight,
+                                org.lwjgl.opengl.Display.getWidth(), org.lwjgl.opengl.Display.getHeight());
+                    }
+                    if (t == 160 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                         Initializer.LOGGER.info("[autotest] done, shutting down");
                         mc.shutdown();
                     }

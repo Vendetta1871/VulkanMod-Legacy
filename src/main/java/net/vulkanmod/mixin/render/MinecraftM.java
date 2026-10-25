@@ -29,6 +29,18 @@ public class MinecraftM {
     @Inject(method = "updateDisplay", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$presentFrame(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            Minecraft mc = (Minecraft) (Object) this;
+            // updateDisplay() normally runs checkWindowResize() right after the GL swap we replace.
+            // Cancelling the whole method would skip it, leaving displayWidth/Height and the open
+            // screen's scaled size stale, so GUI buttons stop matching the cursor after a window
+            // resize (and only line up again when the window is dragged back to its old size).
+            // Do the same bookkeeping - resize() updates the size, the current screen and the
+            // framebuffer - before presenting through Vulkan.
+            int width = org.lwjgl.opengl.Display.getWidth();
+            int height = org.lwjgl.opengl.Display.getHeight();
+            if (width > 0 && height > 0 && (width != mc.displayWidth || height != mc.displayHeight)) {
+                mc.resize(width, height);
+            }
             FrameProfiler.presentBegin();
             Initializer.presentFrame();
             FrameProfiler.presentEnd();
