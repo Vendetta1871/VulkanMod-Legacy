@@ -2,6 +2,9 @@ package net.vulkanmod.debug;
 
 import net.vulkanmod.Initializer;
 
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
+
 /**
  * Lightweight per-frame phase timer for locating CPU cost. Enabled with VULKANMOD_PROFILE=1.
  * Splits each frame into tick+setup, world render (and within it: sync, sky, clouds, entities,
@@ -27,6 +30,35 @@ public class FrameProfiler {
     private static long chunkRecordNs, chunkRecordStart, chunkRecords;
     private static long submitNs, submitStart, submitCount;
     private static long layerStartNs, layerStartStart, texNs, texStart;
+
+    // Slow-frame forensics: per-frame phase snapshots + GC attribution, to pin down periodic
+    // micro-freezes (which the averaged [profile] line would otherwise blur out).
+    private static long lastTickNs, lastSyncNs, lastRenderNs, lastWorldNs, lastSkyNs, lastGuiNs, lastPresentNs;
+    private static long gcCount0, gcTime0, maxFrameNs;
+    private static final long SLOW_NS = slowNs();
+
+    private static long slowNs() {
+        String s = System.getenv("VULKANMOD_SLOW_MS");
+        return (s != null ? Long.parseLong(s) : 50L) * 1_000_000L;
+    }
+
+    private static long gcCount() {
+        long c = 0;
+        for (GarbageCollectorMXBean b : ManagementFactory.getGarbageCollectorMXBeans()) {
+            long v = b.getCollectionCount();
+            if (v > 0) c += v;
+        }
+        return c;
+    }
+
+    private static long gcTime() {
+        long t = 0;
+        for (GarbageCollectorMXBean b : ManagementFactory.getGarbageCollectorMXBeans()) {
+            long v = b.getCollectionTime();
+            if (v > 0) t += v;
+        }
+        return t;
+    }
 
     /** Times the per-layer texture bridge (lightmap refresh + atlas re-download when animated). */
     public static void texBegin() {
@@ -112,17 +144,23 @@ public class FrameProfiler {
     public static void frameBegin() {
         if (!ENABLED) return;
         frameStart = System.nanoTime();
+        gcCount0 = gcCount();
+        gcTime0 = gcTime();
     }
 
     public static void renderBegin() {
         if (!ENABLED) return;
-        tickNs += System.nanoTime() - frameStart;
-        renderStart = System.nanoTime();
+        long now = System.nanoTime();
+        lastTickNs = now - frameStart;
+        tickNs += lastTickNs;
+        renderStart = now;
     }
 
     public static void renderEnd() {
         if (!ENABLED) return;
-        renderNs += System.nanoTime() - renderStart;
+        long d = System.nanoTime() - renderStart;
+        lastRenderNs = d;
+        renderNs += d;
     }
 
     /** Times Initializer.beginFrame (fence wait + swapchain acquire) - the GPU backpressure. */
@@ -133,7 +171,9 @@ public class FrameProfiler {
 
     public static void syncEnd() {
         if (!ENABLED) return;
-        syncNs += System.nanoTime() - syncStart;
+        long d = System.nanoTime() - syncStart;
+        lastSyncNs = d;
+        syncNs += d;
     }
 
     public static void worldBegin() {
@@ -143,7 +183,9 @@ public class FrameProfiler {
 
     public static void worldEnd() {
         if (!ENABLED) return;
-        worldNs += System.nanoTime() - worldStart;
+        long d = System.nanoTime() - worldStart;
+        lastWorldNs = d;
+        worldNs += d;
     }
 
     public static void skyBegin() {
@@ -153,7 +195,9 @@ public class FrameProfiler {
 
     public static void skyEnd() {
         if (!ENABLED) return;
-        skyNs += System.nanoTime() - skyStart;
+        long d = System.nanoTime() - skyStart;
+        lastSkyNs = d;
+        skyNs += d;
     }
 
     public static void cloudsBegin() {
@@ -183,7 +227,9 @@ public class FrameProfiler {
 
     public static void guiEnd() {
         if (!ENABLED) return;
-        guiNs += System.nanoTime() - guiStart;
+        long d = System.nanoTime() - guiStart;
+        lastGuiNs = d;
+        guiNs += d;
     }
 
     public static void terrainBegin() {
@@ -204,12 +250,24 @@ public class FrameProfiler {
     public static void presentEnd() {
         if (!ENABLED) return;
         long now = System.nanoTime();
-        presentNs += now - presentStart;
-        totalNs += now - frameStart;
+        long frame = now - frameStart;
+        lastPresentNs = now - presentStart;
+        presentNs += lastPresentNs;
+        totalNs += frame;
+        if (frame > maxFrameNs) {
+            maxFrameNs = frame;
+        }
+        if (frame > SLOW_NS) {
+            Initializer.LOGGER.info(
+                    "[slow] total={}ms gc={}ms/{} tick={} sync={} render={} world={} sky={} gui={} present={}",
+                    fmt(frame / 1e6), gcTime() - gcTime0, gcCount() - gcCount0,
+                    fmt(lastTickNs / 1e6), fmt(lastSyncNs / 1e6), fmt(lastRenderNs / 1e6),
+                    fmt(lastWorldNs / 1e6), fmt(lastSkyNs / 1e6), fmt(lastGuiNs / 1e6), fmt(lastPresentNs / 1e6));
+        }
         if (++count % LOG_EVERY == 0) {
             double n = LOG_EVERY;
-            Initializer.LOGGER.info("[profile] frame={}ms tick={} render={} [sync={} world={} (sky={} ent={} [draw={} rebuild={} ent/f={} draws/f={} v/draw={}] chunks={} rec={}/{}s sub={} lstart={} tex={}) gui={}] present={} fps~{}",
-                    fmt(totalNs / n / 1e6), fmt(tickNs / n / 1e6), fmt(renderNs / n / 1e6),
+            Initializer.LOGGER.info("[profile] frame={}ms max={} tick={} render={} [sync={} world={} (sky={} ent={} [draw={} rebuild={} ent/f={} draws/f={} v/draw={}] chunks={} rec={}/{}s sub={} lstart={} tex={}) gui={}] present={} fps~{}",
+                    fmt(totalNs / n / 1e6), fmt(maxFrameNs / 1e6), fmt(tickNs / n / 1e6), fmt(renderNs / n / 1e6),
                     fmt(syncNs / n / 1e6), fmt(worldNs / n / 1e6),
                     fmt(skyNs / n / 1e6), fmt(entitiesNs / n / 1e6),
                     fmt(entityDrawNs / n / 1e6), fmt(entityRebuildNs / n / 1e6),
@@ -221,6 +279,7 @@ public class FrameProfiler {
             entityDrawNs = entityRebuildNs = entityDraws = entityVerts = entityCount = 0;
             chunkRecordNs = chunkRecords = 0;
             submitNs = submitCount = layerStartNs = texNs = 0;
+            maxFrameNs = 0;
         }
     }
 
