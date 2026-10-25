@@ -67,8 +67,8 @@ public class SkyRenderer {
     private static final VertexFormat POSITION_TEX = DefaultVertexFormats.POSITION_TEX;
     private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
 
-    /** 13x13 quads, 4 vertices each (the vanilla glSkyList loop). */
-    private static final int SKY_PLANE_VERTS = 13 * 13 * 4;
+    /** Two 13x13 quad planes (vanilla's glSkyList + glSkyList2), 4 vertices each. */
+    private static final int SKY_PLANE_VERTS = 2 * 13 * 13 * 4;
 
     private static final float PI = (float) Math.PI;
     private static final float HALF_PI = (float) (Math.PI / 2.0);
@@ -160,12 +160,12 @@ public class SkyRenderer {
         GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, (java.nio.IntBuffer) int1());
         VRenderSystem.depthFunc(int1().get(0));
         // Vanilla keeps GL_CULL_FACE enabled through all of renderSky (renderWorldPass
-        // enables it before the sky). That is what makes the sky plane one-sided: with
-        // the plane's front face up (+Y, see buildSkyPlane), looking up sees the culled
-        // underside, so the sky reads as the clear/fog colour overhead and only rays
-        // past the zenith catch the fogged plane top. The sun, moon, fan and star quads
-        // use vanilla's vertex order and face the camera, so mirroring the live cull
-        // state keeps them visible exactly as vanilla does.
+        // enables it before the sky). That is what makes the two sky planes one-sided:
+        // the y=+16 plane (front face down) covers the upper hemisphere and the y=-16
+        // plane (front face up) the lower one, so the zenith reads as the near sky
+        // colour rather than the clear colour (see buildSkyPlane). The sun, moon, fan
+        // and star quads use vanilla's vertex order and face the camera, so mirroring
+        // the live cull state keeps them visible exactly as vanilla does.
         if (boolState(GL11.GL_CULL_FACE)) {
             VRenderSystem.enableCull();
         } else {
@@ -362,11 +362,14 @@ public class SkyRenderer {
      * here is likewise rotation-only, so the vertices stay in raw camera-relative
      * space - no eye subtraction.
      *
-     * The winding is chosen so the plane's front face points UP (+Y): with GL_CULL_FACE
-     * enabled (as vanilla keeps it through renderSky) the underside is culled, so
-     * looking up shows the clear/fog colour and only rays past the zenith catch the
-     * fogged plane. This is what makes the sky read as the fog colour overhead rather
-     * than a saturated sky-coloured sheet. Rebuilt every frame (the rotation changes).
+     * Both vanilla display lists are built here with vanilla's exact vertex order, so
+     * their front faces point the same way and GL_CULL_FACE (enabled through all of
+     * renderSky) culls them identically: {@code glSkyList} is the y=+16 plane with its
+     * front face DOWN, visible from below so it covers the upper hemisphere (the zenith
+     * reads as the near, unfogged sky colour, not the clear colour); {@code glSkyList2}
+     * is the y=-16 plane with its front face UP, visible from above to cover the lower
+     * hemisphere (mostly hidden by terrain, fogged to the fog colour at the horizon).
+     * Rebuilt every frame (the rotation changes).
      */
     private static void buildSkyPlane() {
         ByteBuffer buf = skyPlaneBuffer;
@@ -375,10 +378,17 @@ public class SkyRenderer {
             for (int l = -384; l <= 384; l += 64) {
                 float f = k;
                 float f1 = k + 64;
+                // glSkyList: renderSky(16, false) - front face down, seen looking up.
                 putPos(buf, f, 16.0f, l);
-                putPos(buf, f, 16.0f, l + 64.0f);
-                putPos(buf, f1, 16.0f, l + 64.0f);
                 putPos(buf, f1, 16.0f, l);
+                putPos(buf, f1, 16.0f, l + 64.0f);
+                putPos(buf, f, 16.0f, l + 64.0f);
+                // glSkyList2: renderSky(-16, true) - the f/f1 swap reverses the winding,
+                // front face up, seen looking down.
+                putPos(buf, f1, -16.0f, l);
+                putPos(buf, f, -16.0f, l);
+                putPos(buf, f, -16.0f, l + 64.0f);
+                putPos(buf, f1, -16.0f, l + 64.0f);
             }
         }
         buf.position(0);
