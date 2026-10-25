@@ -127,8 +127,6 @@ public class Drawer {
         if(skipRendering) return;
 
         drawFrame();
-        //TODO
-        //if(rebuild) rebuildInstance();
     }
 
     public void initiateRenderPass() {
@@ -257,6 +255,7 @@ public class Drawer {
         for(Pipeline pipeline : usedPipelines) {
             pipeline.resetDescriptorPool(currentFrame);
         }
+        Pipeline.processPendingDescriptorPools();
 
         usedPipelines.clear();
     }

@@ -39,6 +39,8 @@ public class AutoIndexBuffer {
 
         indexBuffer = new IndexBuffer(size, MemoryTypes.GPU_MEM);
         indexBuffer.copyBuffer(buffer);
+        // The host-side index data is only needed to fill the GPU buffer.
+        MemoryUtil.memFree(buffer);
     }
 
     public void checkCapacity(int vertexCount) {
@@ -46,9 +48,9 @@ public class AutoIndexBuffer {
             int newVertexCount = this.vertexCount * 2;
             System.out.println("Reallocating AutoIndexBuffer from " + this.vertexCount + " to " + newVertexCount);
 
-            //TODO: free old
-            //Can't know when VBO will stop using it
-            //indexBuffer.freeBuffer();
+            // In-flight command buffers may still bind the old index buffer; addToFreeable
+            // defers the destroy until they have finished.
+            MemoryManager.addToFreeable(indexBuffer);
             createIndexBuffer(newVertexCount);
         }
     }
@@ -105,7 +107,6 @@ public class AutoIndexBuffer {
     public static ByteBuffer genTriangleStripIdxs(int vertexCount) {
         int indexCount = (vertexCount - 2) * 3;
 
-        //TODO: free buffer
         ByteBuffer buffer = MemoryUtil.memAlloc(indexCount * Short.BYTES);
         ShortBuffer idxs = buffer.asShortBuffer();
 

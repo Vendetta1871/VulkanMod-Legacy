@@ -43,7 +43,8 @@ public class StagingBuffer extends Buffer{
     }
 
     private void resizeBuffer(int newSize) {
-        //TODO
+        // The old buffer stays alive (addToFreeable) until the command buffers that
+        // already reference it have finished; the new buffer keeps the frame's offset.
         MemoryManager.addToFreeable(this);
         createStagingBuffer(newSize);
 

@@ -56,7 +56,7 @@ public class IndexBuffer extends Buffer {
         MemoryManager.addToFreeable(this);
         createIndexBuffer(newSize);
 
-        System.out.println("resized vertexBuffer to: " + newSize);
+        System.out.println("resized indexBuffer to: " + newSize);
     }
 
     public long getOffset() { return  offset; }

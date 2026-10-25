@@ -776,16 +776,27 @@ public class Vulkan {
 
     private static int chooseSwapPresentMode(IntBuffer availablePresentModes) {
 
-        //TODO: check if immediate mode is supported
-        //fifo mode is the only mode that has to be supported
-//        for(int i = 0;i < availablePresentModes.capacity();i++) {
-//            if(availablePresentModes.get(i) == VK_PRESENT_MODE_MAILBOX_KHR) {
-//                return availablePresentModes.get(i);
-//            }
-//        }
-//
-//        return VK_PRESENT_MODE_FIFO_KHR;
-        return vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
+        // FIFO is the only mode a Vulkan implementation has to support, so the low
+        // latency modes are picked only when the surface actually offers them.
+        boolean mailbox = false;
+        boolean immediate = false;
+        for (int i = 0; i < availablePresentModes.capacity(); i++) {
+            int mode = availablePresentModes.get(i);
+            if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+                mailbox = true;
+            }
+            else if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+                immediate = true;
+            }
+        }
+
+        if (vsync) {
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+        if (immediate) {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+        return mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
     }
 
     private static VkExtent2D chooseSwapExtent(VkSurfaceCapabilitiesKHR capabilities) {

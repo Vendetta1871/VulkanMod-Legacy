@@ -56,6 +56,10 @@ public class Pipeline {
 
     private final long[] descriptorPools = new long[imagesSize];
     private int descriptorCount = 500;
+    // Pools replaced by a mid-frame resize: {long[] handles, Integer framesAged}. Static
+    // so one per-frame pass can age every pipeline's pools, including pipelines that stop
+    // being bound before their superseded pools would otherwise be retired.
+    private static final java.util.ArrayList<Object[]> pendingPoolDestruction = new java.util.ArrayList<>();
 
     private final List<UBO> UBOs = new ArrayList<>();
     private final List<String> samplers = new ArrayList<>();
@@ -406,7 +410,14 @@ public class Pipeline {
         vkDestroyShaderModule(device, fragShaderModule, null);
 
         for(long descriptorPool : descriptorPools)
-        vkDestroyDescriptorPool(device, descriptorPool, null);
+            vkDestroyDescriptorPool(device, descriptorPool, null);
+
+        for(Object[] entry : pendingPoolDestruction) {
+            for(long pool : (long[]) entry[0]) {
+                vkDestroyDescriptorPool(device, pool, null);
+            }
+        }
+        pendingPoolDestruction.clear();
 
         this.resetDescriptorPoolFun = i -> {};
 
@@ -610,6 +621,31 @@ public class Pipeline {
         this.resetDescriptorPoolFun.accept(i);
     }
 
+    /**
+     * Destroys descriptor pools superseded by a resize once they have aged past the
+     * swapchain image count. Called once per frame (from {@code Drawer.resetDescriptors}),
+     * so by then every image's fence has been waited at least once since the pools were
+     * replaced and no in-flight command buffer can still reference their sets.
+     */
+    public static void processPendingDescriptorPools() {
+        if (pendingPoolDestruction.isEmpty()) {
+            return;
+        }
+        var it = pendingPoolDestruction.iterator();
+        while (it.hasNext()) {
+            Object[] entry = it.next();
+            int age = (Integer) entry[1] + 1;
+            if (age > imagesSize) {
+                for (long pool : (long[]) entry[0]) {
+                    vkDestroyDescriptorPool(device, pool, null);
+                }
+                it.remove();
+            } else {
+                entry[1] = age;
+            }
+        }
+    }
+
     public long getHandle(PipelineState state) {
         return graphicsPipelines.computeIfAbsent(state, state1 -> createGraphicsPipeline(this.vertexFormat, state1));
     }
@@ -645,10 +681,13 @@ public class Pipeline {
                 int result = vkAllocateDescriptorSets(device, allocInfo, pDescriptorSet);
                 if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
                     descriptorCount *= 2;
+                    // The old pools may still back sets referenced by in-flight command
+                    // buffers, so they cannot be destroyed here; keep them until every
+                    // frame-in-flight boundary has passed its fence (see
+                    // {@link #processPendingDescriptorPools()}).
+                    pendingPoolDestruction.add(new Object[]{descriptorPools.clone(), 0});
                     createDescriptorPool(descriptorCount);
                     allocateDescriptorSet(frame);
-
-                    //TODO: free old descriptorPool when its relative cmdBuffer has finished drawing
 
                     System.out.println("resized DescriptorPool to: " + descriptorCount);
                     return;
