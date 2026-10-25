@@ -635,7 +635,7 @@ public class Pipeline {
                 LongBuffer layouts = stack.mallocLong(1);
                 layouts.put(0, descriptorSetLayout);
 
-                VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.create();
+                VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack);
                 allocInfo.sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
                 allocInfo.descriptorPool(descriptorPools[frame]);
                 allocInfo.pSetLayouts(layouts);
@@ -664,7 +664,7 @@ public class Pipeline {
         private void updateDescriptorSet(VkCommandBuffer commandBuffer, int frame, UniformBuffers uniformBuffers) {
             try(MemoryStack stack = stackPush()) {
 
-                VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.create(UBOs.size() + samplers.size() + ssbos.size());
+                VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.calloc(UBOs.size() + samplers.size() + ssbos.size(), stack);
                 VkDescriptorBufferInfo.Buffer[] bufferInfos = new VkDescriptorBufferInfo.Buffer[UBOs.size()];
 
                 int currentOffset = uniformBuffers.getUsedBytes();
@@ -675,7 +675,7 @@ public class Pipeline {
                     ubo.update();
                     uniformBuffers.uploadUBO(ubo.getBuffer(), currentOffset, frame);
 
-                    bufferInfos[i] = VkDescriptorBufferInfo.create(1);
+                    bufferInfos[i] = VkDescriptorBufferInfo.calloc(1, stack);
                     bufferInfos[i].buffer(uniformBuffers.getId(frame));
                     bufferInfos[i].offset(currentOffset);
                     bufferInfos[i].range(ubo.getSize());
@@ -702,7 +702,7 @@ public class Pipeline {
                     if (texture == null) texture = VTextureSelector.getWhiteTexture();
                     texture.readOnlyLayout();
 
-                    imageInfos[0] = VkDescriptorImageInfo.create(1);
+                    imageInfos[0] = VkDescriptorImageInfo.calloc(1, stack);
                     imageInfos[0].imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     imageInfos[0].imageView(texture.getTextureImageView());
                     imageInfos[0].sampler(texture.getTextureSampler());
@@ -723,7 +723,7 @@ public class Pipeline {
                         if (texture == null) texture = VTextureSelector.getWhiteTexture();
                         texture.readOnlyLayout();
 
-                        imageInfos[1] = VkDescriptorImageInfo.create(1);
+                        imageInfos[1] = VkDescriptorImageInfo.calloc(1, stack);
                         imageInfos[1].imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                         imageInfos[1].imageView(texture.getTextureImageView());
                         imageInfos[1].sampler(texture.getTextureSampler());
@@ -744,7 +744,7 @@ public class Pipeline {
                             if (texture == null) texture = VTextureSelector.getWhiteTexture();
                             texture.readOnlyLayout();
 
-                            imageInfos[2] = VkDescriptorImageInfo.create(1);
+                            imageInfos[2] = VkDescriptorImageInfo.calloc(1, stack);
                             imageInfos[2].imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                             imageInfos[2].imageView(texture.getTextureImageView());
                             imageInfos[2].sampler(texture.getTextureSampler());
@@ -769,7 +769,7 @@ public class Pipeline {
                         continue;
                     }
 
-                    VkDescriptorBufferInfo.Buffer ssboInfo = VkDescriptorBufferInfo.create(1);
+                    VkDescriptorBufferInfo.Buffer ssboInfo = VkDescriptorBufferInfo.calloc(1, stack);
                     ssboInfo.buffer(b.buffer());
                     ssboInfo.offset(b.offset());
                     ssboInfo.range(b.range());
@@ -827,7 +827,13 @@ public class Pipeline {
 
         @Override
         public int hashCode() {
-            return Objects.hash(blendState, depthState, logicOpState, cullState);
+            // Allocation-free (Objects.hash would allocate an Object[] + boxes on every draw lookup).
+            int result = 1;
+            result = 31 * result + blendState.hashCode();
+            result = 31 * result + depthState.hashCode();
+            result = 31 * result + logicOpState.hashCode();
+            result = 31 * result + (cullState ? 1231 : 1237);
+            return result;
         }
     }
 
@@ -879,7 +885,13 @@ public class Pipeline {
 
         @Override
         public int hashCode() {
-            return Objects.hash(srcRgbFactor, dstRgbFactor, srcAlphaFactor, dstAlphaFactor, blendOp);
+            int result = 1;
+            result = 31 * result + srcRgbFactor;
+            result = 31 * result + dstRgbFactor;
+            result = 31 * result + srcAlphaFactor;
+            result = 31 * result + dstAlphaFactor;
+            result = 31 * result + blendOp;
+            return result;
         }
     }
 
@@ -915,7 +927,10 @@ public class Pipeline {
         }
 
         public int hashCode() {
-            return Objects.hash(enabled, logicOp);
+            int result = 1;
+            result = 31 * result + (enabled ? 1231 : 1237);
+            result = 31 * result + logicOp;
+            return result;
         }
     }
 
@@ -978,7 +993,11 @@ public class Pipeline {
 
         @Override
         public int hashCode() {
-            return Objects.hash(depthTest, depthMask, function);
+            int result = 1;
+            result = 31 * result + (depthTest ? 1231 : 1237);
+            result = 31 * result + (depthMask ? 1231 : 1237);
+            result = 31 * result + function;
+            return result;
         }
     }
 }
