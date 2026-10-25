@@ -443,18 +443,22 @@ public class EntityRenderer {
 
         ByteBuffer pixels = MemoryUtil.memAlloc(width * height * 4);
         GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+        // Mirror the texture's live wrap mode. The weather texture scrolls its V
+        // coordinate by a negative, time-based offset (renderRainSnow), which only
+        // animates under GL_REPEAT; clamped to edge the streaks freeze. Entity skins
+        // and the particle atlas keep whatever mode they were uploaded with.
+        int wrapS = GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S);
+        int wrapT = GL11.glGetTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevBinding);
+        boolean clamp = wrapS != GL11.GL_REPEAT && wrapT != GL11.GL_REPEAT;
         pixels.position(0);
         pixels.limit(width * height * 4);
 
-        // LINEAR filtering, clamped addressing, single mip level. Vanilla never sets a
-        // filter on these textures (the GL default reads NEAREST) and uploads them as a
-        // single level, but the Kirino reference samples every texture with its own
-        // LINEAR sampler - the same finding that settled the lightmap filter (see
-        // TextureBridge). Kirino has no mip chain to sample either, so the mirror is
-        // LINEAR at LOD 0: on the minified rain quads it covers 0.84x of the
-        // reference's streak pixels, NEAREST only 0.58x.
-        VulkanImage image = new VulkanImage(1, width, height, 4, true, true);
+        // NEAREST filtering, clamped addressing, single mip level - the vanilla look:
+        // every texel stays a crisp pixel (the GL default these textures are sampled
+        // with). The Kirino reference happens to sample LINEAR, but that is a property
+        // of the translation layer, not the target; the user wants the crisp pixels.
+        VulkanImage image = new VulkanImage(1, width, height, 4, false, clamp);
         image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         MemoryUtil.memFree(pixels);
         return image;

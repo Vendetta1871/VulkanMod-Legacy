@@ -212,6 +212,38 @@ public class Vulkan {
         }
     }
 
+    /**
+     * Compares the window's current pixel size against the swapchain extent and flags a
+     * recreation when they diverge. Minecraft's framebuffer-size event is unreliable for a
+     * Wayland maximize (no VK_ERROR_OUT_OF_DATE_KHR reaches the presenter), so the swapchain
+     * would otherwise keep the old extent and the compositor stretches the stale image.
+     * Edge-triggered on the window size so a window clamped by the surface's min/max image
+     * extent (extent != size) cannot spin the recreation every frame.
+     */
+    private static int lastPolledW = -1, lastPolledH = -1;
+
+    public static void pollWindowResize() {
+        if (swapChainExtent == null) {
+            return;
+        }
+        try(MemoryStack stack = stackPush()) {
+            IntBuffer width = stack.ints(0);
+            IntBuffer height = stack.ints(0);
+            SDL_GetWindowSizeInPixels(window, width, height);
+            int w = width.get(0), h = height.get(0);
+            if (w <= 0 || h <= 0) {
+                return;
+            }
+            if (w != lastPolledW || h != lastPolledH) {
+                lastPolledW = w;
+                lastPolledH = h;
+                if (w != swapChainExtent.width() || h != swapChainExtent.height()) {
+                    Drawer.shouldRecreate = true;
+                }
+            }
+        }
+    }
+
     public static void recreateSwapChain() {
 
         Synchronization.waitFences();

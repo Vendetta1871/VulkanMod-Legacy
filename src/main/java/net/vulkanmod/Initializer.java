@@ -132,6 +132,7 @@ public class Initializer {
             return;
         }
         try {
+            net.vulkanmod.vulkan.Vulkan.pollWindowResize();
             VRenderSystem.updateClearColorFromFog();
             net.vulkanmod.render.TextureBridge.beginFrame();
             net.vulkanmod.render.TerrainRenderer.onFrameBegin();

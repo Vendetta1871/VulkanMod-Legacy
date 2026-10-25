@@ -885,6 +885,11 @@ public class AutoTest {
         if (tick == settle && System.getenv("VULKANMOD_AUTOTEST_FPS_CAPTURE") != null) {
             capture(mc, "fps_fullscreen");
         }
+        // Second frame a few ticks later: the rain offset advances with rendererUpdateCount,
+        // so a moving streak proves the weather pass animates (a static diff = frozen rain).
+        if (tick == settle + 6 && System.getenv("VULKANMOD_AUTOTEST_FPS_CAPTURE") != null) {
+            capture(mc, "fps_rain_b");
+        }
         // Dump the exact per-section MVP matrices of the frame right after settling.
         if (tick == settle && net.vulkanmod.render.TerrainRenderer.DUMP_MVP) {
             net.vulkanmod.render.TerrainRenderer.armMatrixDump();
