@@ -135,9 +135,10 @@ public class AutoTest {
 
     /**
      * Exact-scene repro: {@code VULKANMOD_AUTOTEST_REPRO="x y z yaw pitch time"} places the
-     * camera at the given position/rotation, pins the world time, forces precipitation and
-     * captures one frame. Used to reproduce a user-reported view pixel-for-pixel (run against a
-     * COPY of their world so the real save is never touched).
+     * camera at the given position/rotation, pins the world time and captures one frame;
+     * precipitation is forced only when {@code VULKANMOD_AUTOTEST_RAIN} is also set. Used to
+     * reproduce a user-reported view pixel-for-pixel (run against a COPY of their world so
+     * the real save is never touched).
      */
     private static final String REPRO_SPEC = System.getenv("VULKANMOD_AUTOTEST_REPRO");
 
@@ -300,7 +301,10 @@ public class AutoTest {
                 if (REPRO_SPEC != null) {
                     if (++ticks == 5) {
                         doRepro(mc);
-                    } else if (ticks == 45) {
+                    } else if (ticks == 45 && System.getenv("VULKANMOD_AUTOTEST_RAIN") != null) {
+                        // Rain used to be unconditional here for the weather repro; it is
+                        // opt-in now so plain scene repros (e.g. the world border pair)
+                        // capture clear-weather frames.
                         startRain(mc);
                     } else if (ticks == 95) {
                         logWeatherDiag(mc);
@@ -1427,7 +1431,8 @@ public class AutoTest {
     }
 
     /** Sets the overworld time on the integrated server so the client syncs it. */
-    private static void setWorldTime(long time) {        IntegratedServer server = Minecraft.getMinecraft().getIntegratedServer();
+    private static void setWorldTime(long time) {
+        IntegratedServer server = Minecraft.getMinecraft().getIntegratedServer();
         if (server != null) {
             server.addScheduledTask(() -> {
                 net.minecraft.world.World world = server.getWorld(0);

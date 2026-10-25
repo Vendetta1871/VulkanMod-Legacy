@@ -7,6 +7,7 @@ import net.vulkanmod.render.EntityRenderer;
 import net.vulkanmod.render.GuiRenderer;
 import net.vulkanmod.render.SkyRenderer;
 import net.vulkanmod.render.TerrainRenderer;
+import net.vulkanmod.render.WorldBorderRenderer;
 import net.vulkanmod.vulkan.Drawer;
 import net.vulkanmod.vulkan.VRenderSystem;
 import org.apache.logging.log4j.LogManager;
@@ -98,6 +99,7 @@ public class Initializer {
             TerrainRenderer.init();
             SkyRenderer.init();
             CloudRenderer.init();
+            WorldBorderRenderer.init();
             EntityRenderer.init();
             GuiRenderer.init();
 

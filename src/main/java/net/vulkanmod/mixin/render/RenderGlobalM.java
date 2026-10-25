@@ -5,6 +5,7 @@ import net.vulkanmod.Initializer;
 import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.CloudRenderer;
 import net.vulkanmod.render.SkyRenderer;
+import net.vulkanmod.render.WorldBorderRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -49,6 +50,14 @@ public class RenderGlobalM {
     private void vulkanmod$renderCloudsEnd(float partialTicks, int pass, double x, double y, double z,
                                            CallbackInfo ci) {
         FrameProfiler.cloudsEnd();
+    }
+
+    @Inject(method = "renderWorldBorder(Lnet/minecraft/entity/Entity;F)V", at = @At("HEAD"))
+    private void vulkanmod$renderWorldBorder(net.minecraft.entity.Entity player, float partialTicks,
+                                             CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            WorldBorderRenderer.render(player, partialTicks);
+        }
     }
 
     @Inject(method = "renderEntities", at = @At("HEAD"))
