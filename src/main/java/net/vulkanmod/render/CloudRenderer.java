@@ -24,17 +24,15 @@ import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 
 /**
- * Vulkan port of the 1.12.2 cloud layer, {@code RenderGlobal.renderClouds} fast path
- * (the {@code gameSettings.clouds == 1} branch). The grid is built in eye-relative
- * space exactly like vanilla - a 16x16 grid of 32x32 quads at
- * {@code y = cloudHeight - eyeY + 0.33}, tiled with the scrolling {@code clouds.png}
- * - and drawn with a rotation-only modelview, so it follows the camera horizontally
- * while the texture scroll keeps it anchored in world space.
- *
- * <p>The fancy path ({@code clouds == 2}, the vanilla default) extrudes each cell into
- * a shaded box and uses a two-pass {@code colorMask} depth prepass to keep the
- * semi-transparent sides from double-blending; it is not ported yet, so the fast path
- * is used for both settings until then.</p>
+ * Vulkan port of the 1.12.2 cloud layer, {@code RenderGlobal.renderClouds}. Both vanilla
+ * paths are ported: the fast path ({@code clouds == 1}) builds a 16x16 grid of 32x32
+ * quads at {@code y = cloudHeight - eyeY + 0.33}, and the fancy path ({@code clouds == 2},
+ * the default) extrudes each cell into a shaded box (bottom, top and the four sides) in
+ * the {@code scale(12,1,12)} space vanilla uses, drawn twice - a {@code colorMask}-off
+ * depth prepass so the near faces occlude the semi-transparent sides behind them, then
+ * the coloured pass. Both are built in eye-relative space and drawn with a rotation-only
+ * modelview, so they follow the camera horizontally while the texture scroll keeps the
+ * cloud field anchored in world space.
  */
 public class CloudRenderer {
 
@@ -50,13 +48,20 @@ public class CloudRenderer {
     /** 16x16 quads, 4 vertices each (the vanilla fast-cloud loop). */
     private static final int CLOUD_VERTS = 16 * 16 * 4;
 
+    /**
+     * Upper bound on the fancy-cloud vertex count: 8x8 cells, each at most bottom(4) +
+     * top(4) + four side strips of 8 quads (4x32). The buffer is sized for this so both
+     * paths share one allocation.
+     */
+    private static final int FANCY_VERTS_MAX = 64 * (4 + 4 + 4 * 32);
+
     private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
     private static final FloatBuffer float1 = MemoryUtil.memAllocFloat(1);
     private static final ByteBuffer bool1 = MemoryUtil.memAlloc(1);
 
     public static void init() {
         cloudPipeline = new Pipeline(POSITION_TEX_COLOR, "clouds");
-        cloudBuffer = MemoryUtil.memAlloc(CLOUD_VERTS * POSITION_TEX_COLOR.getSize());
+        cloudBuffer = MemoryUtil.memAlloc(FANCY_VERTS_MAX * POSITION_TEX_COLOR.getSize());
     }
 
     /**
@@ -135,11 +140,32 @@ public class CloudRenderer {
         Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
         VTextureSelector.bindTexture(cloudTexture);
 
-        VRenderSystem.applyModelViewMatrix(headMV);
-        VRenderSystem.calculateMVP();
+        if (mc.gameSettings.shouldRenderClouds() == 2) {
+            // renderCloudsFancy scales the modelview by (12,1,12) and builds each cell
+            // in that squashed space; the fog distance the shader derives from the
+            // view-space position therefore matches the GL fog coordinate.
+            Matrix4f mv = new Matrix4f(headMV);
+            mv.scale(12.0f, 1.0f, 12.0f);
+            VRenderSystem.applyModelViewMatrix(mv);
+            VRenderSystem.calculateMVP();
 
-        buildClouds(world, partialTicks, cloudTickCounter, eyeX, eyeY, eyeZ, r, g, b);
-        drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, CLOUD_VERTS);
+            int vertCount = buildFancyClouds(world, partialTicks, cloudTickCounter,
+                    eyeX, eyeY, eyeZ, r, g, b);
+            if (vertCount > 0) {
+                // Two passes like vanilla: a colorMask-off depth prepass writes the depth
+                // of the near faces first, so the coloured pass rejects the semi-transparent
+                // side fragments hidden behind them instead of double-blending them.
+                VRenderSystem.colorMask(false, false, false, false);
+                drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, vertCount);
+                VRenderSystem.colorMask(true, true, true, true);
+                drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, vertCount);
+            }
+        } else {
+            VRenderSystem.applyModelViewMatrix(headMV);
+            VRenderSystem.calculateMVP();
+            buildClouds(world, partialTicks, cloudTickCounter, eyeX, eyeY, eyeZ, r, g, b);
+            drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, CLOUD_VERTS);
+        }
     }
 
     /**
@@ -176,6 +202,104 @@ public class CloudRenderer {
             }
         }
         buf.position(0);
+    }
+
+    /**
+     * Refills the buffer with the fancy-cloud volume, replicating the vanilla
+     * {@code renderCloudsFancy} loop: 8x8 cells of 8x8 units (in the {@code scale(12,1,12)}
+     * space the caller set up), each extruded from {@code f2} to {@code f2+4}. The bottom
+     * face is shaded to 0.7, the top to full colour and the X/Z sides to 0.9/0.8; the UV
+     * is the cell coordinate scaled by 1/256 plus the wrapped scroll offset. Returns the
+     * number of vertices written (0 when the layer is entirely out of range).
+     */
+    private static int buildFancyClouds(World world, float partialTicks, int cloudTickCounter,
+                                        double eyeX, double eyeY, double eyeZ,
+                                        float r, float g, float b) {
+        double d0 = (float) cloudTickCounter + partialTicks;
+        double d1 = (eyeX + d0 * 0.03) / 12.0;
+        double d2 = eyeZ / 12.0 + 0.33;
+        float f2 = world.provider.getCloudHeight() - (float) eyeY + 0.33f;
+        int i = MathHelper.floor(d1 / 2048.0);
+        int j = MathHelper.floor(d2 / 2048.0);
+        d1 -= (double) (i * 2048);
+        d2 -= (double) (j * 2048);
+
+        // Face shading factors relative to the (already desaturated) cloud colour.
+        float br = r * 0.7f, bg = g * 0.7f, bb = b * 0.7f;   // bottom
+        float xr = r * 0.9f, xg = g * 0.9f, xb = b * 0.9f;   // +/-X sides
+        float zr = r * 0.8f, zg = g * 0.8f, zb = b * 0.8f;   // +/-Z sides
+
+        float f16 = MathHelper.floor(d1) * 0.00390625f;
+        float f17 = MathHelper.floor(d2) * 0.00390625f;
+        float f18 = (float) (d1 - MathHelper.floor(d1));
+        float f19 = (float) (d2 - MathHelper.floor(d2));
+
+        ByteBuffer buf = cloudBuffer;
+        buf.position(0);
+        for (int j1 = -3; j1 <= 4; ++j1) {
+            for (int k1 = -3; k1 <= 4; ++k1) {
+                float f21 = j1 * 8;
+                float f22 = k1 * 8;
+                float f23 = f21 - f18;
+                float f24 = f22 - f19;
+                if (f2 > -5.0f) {
+                    putPosUvColor(buf, f23, f2, f24 + 8, f21 * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, br, bg, bb, 0.8f);
+                    putPosUvColor(buf, f23 + 8, f2, f24 + 8, (f21 + 8) * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, br, bg, bb, 0.8f);
+                    putPosUvColor(buf, f23 + 8, f2, f24, (f21 + 8) * 0.00390625f + f16, f22 * 0.00390625f + f17, br, bg, bb, 0.8f);
+                    putPosUvColor(buf, f23, f2, f24, f21 * 0.00390625f + f16, f22 * 0.00390625f + f17, br, bg, bb, 0.8f);
+                }
+                if (f2 <= 5.0f) {
+                    float top = f2 + 4.0f - 9.765625E-4f;
+                    putPosUvColor(buf, f23, top, f24 + 8, f21 * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, r, g, b, 0.8f);
+                    putPosUvColor(buf, f23 + 8, top, f24 + 8, (f21 + 8) * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, r, g, b, 0.8f);
+                    putPosUvColor(buf, f23 + 8, top, f24, (f21 + 8) * 0.00390625f + f16, f22 * 0.00390625f + f17, r, g, b, 0.8f);
+                    putPosUvColor(buf, f23, top, f24, f21 * 0.00390625f + f16, f22 * 0.00390625f + f17, r, g, b, 0.8f);
+                }
+                if (j1 > -1) {
+                    for (int l1 = 0; l1 < 8; ++l1) {
+                        float u = (f21 + l1 + 0.5f) * 0.00390625f + f16;
+                        float x = f23 + l1;
+                        putPosUvColor(buf, x, f2, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        putPosUvColor(buf, x, f2 + 4.0f, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        putPosUvColor(buf, x, f2 + 4.0f, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        putPosUvColor(buf, x, f2, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                    }
+                }
+                if (j1 <= 1) {
+                    for (int i2 = 0; i2 < 8; ++i2) {
+                        float u = (f21 + i2 + 0.5f) * 0.00390625f + f16;
+                        float x = f23 + i2 + 1.0f - 9.765625E-4f;
+                        putPosUvColor(buf, x, f2, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        putPosUvColor(buf, x, f2 + 4.0f, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        putPosUvColor(buf, x, f2 + 4.0f, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        putPosUvColor(buf, x, f2, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                    }
+                }
+                if (k1 > -1) {
+                    for (int j2 = 0; j2 < 8; ++j2) {
+                        float v = (f22 + j2 + 0.5f) * 0.00390625f + f17;
+                        float z = f24 + j2;
+                        putPosUvColor(buf, f23, f2 + 4.0f, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        putPosUvColor(buf, f23 + 8, f2 + 4.0f, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        putPosUvColor(buf, f23 + 8, f2, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        putPosUvColor(buf, f23, f2, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                    }
+                }
+                if (k1 <= 1) {
+                    for (int k2 = 0; k2 < 8; ++k2) {
+                        float v = (f22 + k2 + 0.5f) * 0.00390625f + f17;
+                        float z = f24 + k2 + 1.0f - 9.765625E-4f;
+                        putPosUvColor(buf, f23, f2 + 4.0f, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        putPosUvColor(buf, f23 + 8, f2 + 4.0f, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        putPosUvColor(buf, f23 + 8, f2, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        putPosUvColor(buf, f23, f2, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                    }
+                }
+            }
+        }
+        int count = buf.position() / POSITION_TEX_COLOR.getSize();
+        buf.position(0);
+        return count;
     }
 
     // --- cloud texture ---
