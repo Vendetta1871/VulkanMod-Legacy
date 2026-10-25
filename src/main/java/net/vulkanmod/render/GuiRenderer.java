@@ -144,7 +144,15 @@ public class GuiRenderer {
             return false;
         }
         if (format != POSITION_TEX && format != POSITION_COLOR && format != POSITION_TEX_COLOR
-                && format != DefaultVertexFormats.ITEM) {
+                && format != DefaultVertexFormats.ITEM && format != DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL) {
+            return false;
+        }
+        // The enchantment glint relies on depthFunc EQUAL to cover only the item's own
+        // pixels; the GUI pass forces depth off (see the class doc), so replaying the
+        // SRC_COLOR/ONE quad would wash the whole slot with the glint texture. Leave it
+        // to the (unpresented) GL side until the GUI pass gains a depth buffer.
+        if (format == DefaultVertexFormats.ITEM && VRenderSystem.blendEnabled
+                && VRenderSystem.blendSrcRgb == 768 && VRenderSystem.blendDstRgb == 1) {
             return false;
         }
         // Only after the cheap rejections, so a draw we would not replay never opens a frame.
@@ -177,8 +185,14 @@ public class GuiRenderer {
 
         Drawer drawer = Drawer.getInstance();
 
-        boolean item = format == DefaultVertexFormats.ITEM;
-        Pipeline pipeline = item ? EntityRenderer.getItemPipeline()
+        // OLDMODEL_POSITION_TEX_NORMAL arrives from the TESR dispatcher of builtin item
+        // icons (the chest): each box quad is a self-contained begin+draw batch. The
+        // entity pipeline replays them; the CPU lightmap multiply lives in the entity
+        // submit path, so GUI icons stay fullbright like vanilla's lit item render.
+        boolean model = format == DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL;
+        boolean item = format == DefaultVertexFormats.ITEM || model;
+        Pipeline pipeline = model ? EntityRenderer.getEntityPipeline()
+                : format == DefaultVertexFormats.ITEM ? EntityRenderer.getItemPipeline()
                 : format == POSITION_TEX ? guiPipeline
                 : format == POSITION_COLOR ? guiColorPipeline
                 : guiTexColorPipeline;

@@ -71,6 +71,11 @@ public class EntityRendererM {
                     target = "Lnet/minecraft/client/renderer/EntityRenderer;setupOverlayRendering()V"))
     private void vulkanmod$beginGui(net.minecraft.client.renderer.EntityRenderer self) {
         if (Initializer.isVulkanActive()) {
+            // The weather has been drawn by now (it runs inside renderWorldPass), so the
+            // rain window closes here. Cleanroom routes the HUD through GuiIngameForge,
+            // which overrides renderGameOverlay without calling super, so this call site
+            // is the only reliable "HUD begins" point.
+            net.vulkanmod.render.EntityRenderer.setRainPass(false);
             GuiRenderer.setGuiPass(true);
         }
         self.setupOverlayRendering();

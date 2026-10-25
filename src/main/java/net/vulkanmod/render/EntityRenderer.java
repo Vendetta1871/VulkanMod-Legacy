@@ -191,6 +191,11 @@ public class EntityRenderer {
         return itemPipeline;
     }
 
+    /** The entity-model pipeline, shared with the GUI pass for builtin (TESR) item icons. */
+    public static Pipeline getEntityPipeline() {
+        return entityPipeline;
+    }
+
     /** Clears the hurt/death tint state; GUI item draws must never inherit a stale one. */
     public static void clearRedOverlay() {
         redOverlayActive = false;

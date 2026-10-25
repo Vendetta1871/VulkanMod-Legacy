@@ -59,6 +59,14 @@ public class ModelRendererM {
                 EntityRenderer.endPart();
             }
             net.vulkanmod.debug.FrameProfiler.entityRebuildEnd();
+        } else if (net.vulkanmod.render.GuiRenderer.isGuiPass()) {
+            // Builtin item icons (the chest, the shulker box, ...) render their baked
+            // boxes through the TESR dispatcher during the GUI pass; rebuild them the
+            // same way so the batch reaches the GUI capture instead of a display list.
+            BufferBuilder buffer = Tessellator.getInstance().getBuffer();
+            for (ModelBox box : this.cubeList) {
+                box.render(buffer, this.vulkanmod$scale);
+            }
         } else {
             GlStateManager.callList(list);
         }

@@ -9,9 +9,12 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Brackets the current screen render (the main menu, inventories, settings, ...) the
- * same way {@link GuiIngameM} brackets the HUD. Nested {@code super.drawScreen} calls
- * just re-set the flag, so the flag stays true until the outermost screen returns.
+ * Opens the GUI pass around the current screen render (the main menu, inventories,
+ * settings, ...) as a safety net for drawScreen calls outside {@code updateCameraAndRender}.
+ * The flag is deliberately never closed here: {@code GuiContainer.drawScreen} calls
+ * {@code super.drawScreen} in the middle of its own body and then renders the slot items,
+ * so closing on return would drop every {@code drawSlot} draw. The frame head resets the
+ * flag instead.
  */
 @Mixin(GuiScreen.class)
 public class GuiScreenM {
@@ -20,13 +23,6 @@ public class GuiScreenM {
     private void vulkanmod$beginScreen(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
             GuiRenderer.setGuiPass(true);
-        }
-    }
-
-    @Inject(method = "drawScreen(IIF)V", at = @At("RETURN"))
-    private void vulkanmod$endScreen(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
-            GuiRenderer.setGuiPass(false);
         }
     }
 }
