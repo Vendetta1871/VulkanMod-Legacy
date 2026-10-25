@@ -606,7 +606,7 @@ public class EntityRenderer {
         if (texId == 0) {
             return null;
         }
-        if (cachedEntityTexture != null && texId == cachedTextureId) {
+        if (cachedEntityTexture != null && texId == cachedTextureId && matchesLiveSize(cachedEntityTexture)) {
             return cachedEntityTexture;
         }
         // The block atlas is already mirrored for the terrain (tile-by-tile, animated);
@@ -617,7 +617,7 @@ public class EntityRenderer {
             return cachedEntityTexture;
         }
         VulkanImage image = textureCache.get(texId);
-        if (image == null) {
+        if (image == null || !matchesLiveSize(image)) {
             image = downloadTexture(texId);
             if (image != null) {
                 textureCache.put(texId, image);
@@ -641,6 +641,26 @@ public class EntityRenderer {
     /** UBO source for the {@code RedOverlay} field (0.3 matches the combiner constant). */
     public static float getRedOverlay() {
         return redOverlayActive ? 0.3f : 0.0f;
+    }
+
+    /**
+     * A cached image is only trusted while the live texture still has the same size: GL
+     * reuses deleted texture ids (see {@code AbstractTextureM}); the queried texture is
+     * the current binding, so no rebind is needed.
+     */
+    private static boolean matchesLiveSize(VulkanImage image) {
+        int w = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
+        int h = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
+        return w == image.getWidth() && h == image.getHeight();
+    }
+
+    /** Forgets the Vulkan image mirrored from a GL texture that is being deleted. */
+    public static void onTextureDeleted(int texId) {
+        textureCache.remove(texId);
+        if (cachedTextureId == texId) {
+            cachedEntityTexture = null;
+            cachedTextureId = -1;
+        }
     }
 
     private static VulkanImage downloadTexture(int texId) {

@@ -345,7 +345,7 @@ public class GuiRenderer {
             return TextureBridge.getAtlasImage();
         }
         VulkanImage cached = textureCache.get(texId);
-        if (cached != null) {
+        if (cached != null && matchesLiveSize(cached)) {
             return cached;
         }
         VulkanImage image = downloadTexture(texId);
@@ -353,6 +353,23 @@ public class GuiRenderer {
             textureCache.put(texId, image);
         }
         return image;
+    }
+
+    /**
+     * A cached image is only trusted while the live texture still has the same size: GL
+     * reuses deleted texture ids, and {@code AbstractTextureM} clears the caches on the
+     * vanilla delete path, but a same-tick delete + regenerate could still slip through.
+     * The queried texture is the current binding, so no rebind is needed.
+     */
+    private static boolean matchesLiveSize(VulkanImage image) {
+        int w = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
+        int h = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
+        return w == image.getWidth() && h == image.getHeight();
+    }
+
+    /** Forgets the Vulkan image mirrored from a GL texture that is being deleted. */
+    public static void onTextureDeleted(int texId) {
+        textureCache.remove(texId);
     }
 
     private static VulkanImage downloadTexture(int texId) {

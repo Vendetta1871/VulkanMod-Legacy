@@ -35,6 +35,14 @@ public class VulkanImage {
     private int height;
     private int formatSize;
 
+    public int getWidth() {
+        return width;
+    }
+
+    public int getHeight() {
+        return height;
+    }
+
     private int currentLayout;
     private TransferQueue.CommandBuffer commandBuffer;
 
