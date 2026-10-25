@@ -242,6 +242,11 @@ public class EntityRenderer {
         int vertexCount = buffer.getVertexCount();
         int drawMode = buffer.getDrawMode();
         VertexFormat format = buffer.getVertexFormat();
+        // A fully masked-off batch writes no colour in GL (the boat's depth-only
+        // noWater occluder); replaying it would paint a visible quad instead.
+        if (VRenderSystem.colorMask == 0) {
+            return false;
+        }
         Pipeline pipeline = pipelineFor(format);
         if (vertexCount <= 0 || drawMode != 7 || pipeline == null) {
             return false;

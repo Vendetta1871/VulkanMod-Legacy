@@ -83,4 +83,17 @@ public class GlStateManagerBlendM {
             VRenderSystem.textureEnabled = false;
         }
     }
+
+    /**
+     * The boat's {@code noWater} occluder is drawn with the colour mask fully off
+     * (depth only, to clip water inside the hull). The pipelines bake the mask into
+     * their state, so the capture needs the tracked value to recognise and skip such
+     * batches instead of painting them.
+     */
+    @Inject(method = "colorMask(ZZZZ)V", at = @At("HEAD"))
+    private static void vulkanmod$colorMask(boolean red, boolean green, boolean blue, boolean alpha, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.colorMask(red, green, blue, alpha);
+        }
+    }
 }
