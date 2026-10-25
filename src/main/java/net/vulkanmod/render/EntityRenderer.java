@@ -78,6 +78,9 @@ public class EntityRenderer {
     private static ByteBuffer weatherScratch;
     private static int weatherVerts;
     private static boolean weatherPending;
+    // The vertex count of the most recent flush, exposed for the STICKY autotest to assert the
+    // weather is not being truncated frame-to-frame (see AutoTest). Zero when nothing was drawn.
+    private static int lastWeatherVerts;
     // The weather is drawn in many small batches whose texture alternates between the snow and
     // rain sprites (vanilla samples the biome per column, so a view straddling a snow/rain biome
     // boundary mixes both). Each batch is buffered with its own texture and replayed as-is.
@@ -434,6 +437,14 @@ public class EntityRenderer {
             }
             weatherBuffer = grown;
         }
+        // flushWeather replays each batch by setting this buffer's limit to that batch's end, so
+        // after a frame the limit is left at that frame's total, not at the capacity. ByteBuffer.put
+        // bounds against the limit, so without this reset the next frame's weather is capped at the
+        // previous frame's total: once the column count dips (e.g. descending, where vanilla culls
+        // the tall columns) the limit drops with it and every later frame overflows it, silently
+        // dropping the rest of the weather - sticky patchiness that never recovers. The grow above
+        // only checks capacity, which stays large enough, so the limit is otherwise never restored.
+        weatherBuffer.limit(weatherBuffer.capacity());
         ByteBuffer src = data.duplicate();
         src.position(0);
         src.limit(bytes);
@@ -473,6 +484,7 @@ public class EntityRenderer {
         }
         weatherPending = false;
         int n = weatherVerts;
+        lastWeatherVerts = n;
         int batches = weatherBatch.size();
         weatherVerts = 0;
         if (n <= 0 || weatherBuffer == null || batches == 0
@@ -527,6 +539,11 @@ public class EntityRenderer {
             weatherBatch.clear();
             weatherBatchTex.clear();
         }
+    }
+
+    /** Vertex count of the most recent {@link #flushWeather()}; used by the STICKY autotest. */
+    public static int lastWeatherVerts() {
+        return lastWeatherVerts;
     }
 
     private static int packedLight() {
