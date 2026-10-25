@@ -41,6 +41,37 @@ public class AutoTest {
      */
     private static final boolean WATER_MODE = System.getenv("VULKANMOD_AUTOTEST_WATER") != null;
 
+    /** TEMP repro: noon + downpour framed on a water body, to compare weather-over-water. */
+    private static final boolean RAINWATER_MODE = System.getenv("VULKANMOD_AUTOTEST_RAINWATER") != null;
+
+    /**
+     * Movement repro: with {@code VULKANMOD_AUTOTEST_FLYUP=1} the camera starts at the repro
+     * perch and ascends a fixed step every tick (as if the player holds space to fly up),
+     * capturing at several altitudes. A static teleport to the same height renders the weather
+     * fine, so this isolates whether the reported "weather vanishes while flying up" is driven
+     * by the per-tick position change rather than the absolute height.
+     */
+    private static final boolean FLYUP_MODE = System.getenv("VULKANMOD_AUTOTEST_FLYUP") != null;
+
+    /**
+     * Free-roam sandbox: with {@code VULKANMOD_AUTOTEST_FREE=1} the world is loaded, a full
+     * downpour is forced, and the player is given flight — then the autotest does nothing else
+     * (no captures, no time changes, no auto-exit). Used to reproduce a user-reported weather
+     * bug by hand: fly to the spot, read the F3 coords, and check whether the "no weather" zone
+     * is world-anchored (biome) or screen-anchored (render bug).
+     */
+    private static final boolean FREE_MODE = System.getenv("VULKANMOD_AUTOTEST_FREE") != null;
+
+    /**
+     * Sticky-cap regression test: with {@code VULKANMOD_AUTOTEST_STICKY=1} the player is parked at
+     * a full-weather spot (A), moved to the low-altitude spot where the column count dips (B), then
+     * returned to A (C). The old weather buffer left its limit at the previous frame's total, so a
+     * frame whose weather was larger than the last overflowed that stale limit and got truncated -
+     * pinning the weather at the lowest total seen (phase C stuck at B's count). With the limit
+     * reset in {@code deferWeather}, phase C recovers to phase A's vertex count.
+     */
+    private static final boolean STICKY_MODE = System.getenv("VULKANMOD_AUTOTEST_STICKY") != null;
+
     /**
      * GUI regression repro: with {@code VULKANMOD_AUTOTEST_GUI=1} the title screen is
      * captured, then the Options screen (tiled dirt background) and the Language screen
@@ -81,6 +112,14 @@ public class AutoTest {
      * known world position (the user reports grass floating one block up at specific blocks).
      */
     private static final String GOTO_SPEC = System.getenv("VULKANMOD_AUTOTEST_GOTO");
+
+    /**
+     * Exact-scene repro: {@code VULKANMOD_AUTOTEST_REPRO="x y z yaw pitch time"} places the
+     * camera at the given position/rotation, pins the world time, forces precipitation and
+     * captures one frame. Used to reproduce a user-reported view pixel-for-pixel (run against a
+     * COPY of their world so the real save is never touched).
+     */
+    private static final String REPRO_SPEC = System.getenv("VULKANMOD_AUTOTEST_REPRO");
 
     /**
      * Throughput benchmark: with {@code VULKANMOD_AUTOTEST_FPS=1} the framerate limiter and
@@ -238,6 +277,127 @@ public class AutoTest {
                     return;
                 }
 
+                if (REPRO_SPEC != null) {
+                    if (++ticks == 5) {
+                        doRepro(mc);
+                    } else if (ticks == 45) {
+                        startRain(mc);
+                    } else if (ticks == 95) {
+                        logWeatherDiag(mc);
+                        capture(mc, "repro");
+                    } else if (ticks == 110 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
+                if (FLYUP_MODE) {
+                    int t = ++ticks;
+                    if (t == 5) {
+                        // Start at the repro perch (or a default over the lake) and enable flight.
+                        double sx = -370.65, sy = 106.01, sz = -518.47;
+                        float syaw = -38.4f, spitch = 0.0f;
+                        if (REPRO_SPEC != null) {
+                            String[] p = REPRO_SPEC.trim().split("\\s+");
+                            if (p.length >= 5) {
+                                sx = Double.parseDouble(p[0]); sy = Double.parseDouble(p[1]); sz = Double.parseDouble(p[2]);
+                                syaw = Float.parseFloat(p[3]); spitch = Float.parseFloat(p[4]);
+                            }
+                        }
+                        mc.player.capabilities.isFlying = true;
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.setPositionAndRotation(sx, sy, sz, syaw, spitch);
+                        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+                        setWorldTime(6651L);
+                    } else if (t == 45) {
+                        startRain(mc);
+                    } else if (t > 45) {
+                        // Ascend like holding space. The integrated server owns the player's
+                        // authoritative position, so a client-side posY bump gets snapped back
+                        // next tick; drive the ascent with a /tp on the server (authoritative)
+                        // and mirror it on the client so the render-time interpolation is smooth.
+                        double targetY = 106.01 + (t - 45) * 0.2;
+                        IntegratedServer server = mc.getIntegratedServer();
+                        if (server != null) {
+                            final double ty = targetY;
+                            final double tx = mc.player.posX, tz = mc.player.posZ;
+                            final String who = mc.player.getName();
+                            server.addScheduledTask(() -> server.getCommandManager().executeCommand(server,
+                                    String.format("tp %s %.3f %.3f %.3f", who, tx, ty, tz)));
+                        }
+                        mc.player.lastTickPosX = mc.player.posX;
+                        mc.player.lastTickPosY = mc.player.posY;
+                        mc.player.lastTickPosZ = mc.player.posZ;
+                        mc.player.posY = targetY;
+                        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+                        mc.player.rotationYaw = -38.4f;
+                        mc.player.rotationPitch = 0.0f;
+                    }
+                    if (t == 70 || t == 110 || t == 150 || t == 190) {
+                        Initializer.LOGGER.info("[autotest] FLYUP capture at y={}",
+                                String.format("%.1f", mc.player.posY));
+                        capture(mc, "fly" + t);
+                    }
+                    if (t == 210 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
+                if (FREE_MODE) {
+                    if (++ticks == 5) {
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
+                        startRain(mc);
+                        Initializer.LOGGER.info(
+                                "[autotest] FREE mode: downpour forced, flight enabled. Fly to the spot "
+                                + "where weather vanishes, read the F3 coords, and check if the empty "
+                                + "zone is world-anchored (biome) or screen-anchored (render bug).");
+                    }
+                    // Stay open indefinitely; the user closes the window when done.
+                    return;
+                }
+
+                if (STICKY_MODE) {
+                    int t = ++ticks;
+                    // A: full-weather perch over the lake at height; B: the low spot where the
+                    // column count dips; C: back to A. If the buffer limit is not reset between
+                    // frames, C is pinned at B's (lower) vertex count instead of recovering to A.
+                    final double ax = -370.65, ay = 135.0, az = -518.47;
+                    final double bx = -359.3, by = 95.0, bz = -527.5;
+                    if (t == 5) {
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
+                        mc.player.setPositionAndRotation(ax, ay, az, -38.4f, 0.0f);
+                        setWorldTime(6651L);
+                    } else if (t == 45) {
+                        startRain(mc);
+                    } else if (t == 90) {
+                        Initializer.LOGGER.info("[autotest] STICKY phase A (full) y={} verts={}",
+                                String.format("%.1f", mc.player.posY), net.vulkanmod.render.EntityRenderer.lastWeatherVerts());
+                        capture(mc, "stickyA");
+                    } else if (t == 110) {
+                        tpPlayer(mc, bx, by, bz);
+                    } else if (t == 170) {
+                        Initializer.LOGGER.info("[autotest] STICKY phase B (dip) y={} verts={}",
+                                String.format("%.1f", mc.player.posY), net.vulkanmod.render.EntityRenderer.lastWeatherVerts());
+                        capture(mc, "stickyB");
+                    } else if (t == 190) {
+                        tpPlayer(mc, ax, ay, az);
+                    } else if (t == 250) {
+                        Initializer.LOGGER.info("[autotest] STICKY phase C (recover) y={} verts={}",
+                                String.format("%.1f", mc.player.posY), net.vulkanmod.render.EntityRenderer.lastWeatherVerts());
+                        capture(mc, "stickyC");
+                    }
+                    if (t == 270 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
                 if (GOTO_SPEC != null) {
                     if (++ticks == 5) {
                         gotoTarget(mc);
@@ -262,6 +422,29 @@ public class AutoTest {
                     } else if (ticks == 90) {
                         capture(mc, "plant");
                     } else if (ticks == 100 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
+                if (RAINWATER_MODE) {
+                    if (++ticks == 4) {
+                        // Pin to the known perch so scanForWater resolves the exact same pool
+                        // in both the Vulkan and the GL reference run - the two captures then
+                        // frame identical water and only the renderer differs.
+                        mc.player.capabilities.isFlying = true;
+                        mc.player.setPosition(-423.5, 85.0, -433.5);
+                        setWorldTime(6000L);
+                    } else if (ticks == 6) {
+                        scanForWater(mc);
+                    } else if (ticks == 30) {
+                        frameWater(mc);
+                    } else if (ticks == 60) {
+                        startRain(mc);
+                    } else if (ticks == 95) {
+                        capture(mc, "rainwater");
+                    } else if (ticks == 105 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                         Initializer.LOGGER.info("[autotest] done, shutting down");
                         mc.shutdown();
                     }
@@ -431,6 +614,25 @@ public class AutoTest {
      * fog), while the client rain strength is re-asserted every tick in stage 2 to
      * skip the server's ~1000-tick natural ramp-up.
      */
+    /**
+     * Moves the player authoritatively. The integrated server owns the position, so a client-side
+     * set is snapped back next tick; drive it with a server-side /tp and mirror it on the client so
+     * the render-time interpolation stays smooth.
+     */
+    private static void tpPlayer(Minecraft mc, double x, double y, double z) {
+        IntegratedServer server = mc.getIntegratedServer();
+        if (server != null) {
+            final String who = mc.player.getName();
+            server.addScheduledTask(() -> server.getCommandManager().executeCommand(server,
+                    String.format("tp %s %.3f %.3f %.3f", who, x, y, z)));
+        }
+        mc.player.lastTickPosX = mc.player.posX;
+        mc.player.lastTickPosY = mc.player.posY;
+        mc.player.lastTickPosZ = mc.player.posZ;
+        mc.player.setPosition(x, y, z);
+        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+    }
+
     private static void startRain(Minecraft mc) {
         rainOn = true;
         mc.world.setRainStrength(1.0f);
@@ -774,10 +976,50 @@ public class AutoTest {
     }
 
     /**
+     * Debug: logs exactly what {@code renderRainSnow} sees at the player's column at capture
+     * time, so a V-vs-GL weather-type mismatch can be attributed to the CPU decision (biome) or
+     * to the draw. The snow/rain branch is {@code getTemperatureAtHeight(temp, precipY) < 0.15}.
+     */
+    private static void logWeatherDiag(Minecraft mc) {
+        if (mc.world == null || mc.player == null) {
+            return;
+        }
+        net.minecraft.util.math.BlockPos p = new net.minecraft.util.math.BlockPos(mc.player);
+        net.minecraft.world.biome.Biome b = mc.world.getBiome(p);
+        int ph = mc.world.getPrecipitationHeight(p).getY();
+        float t = b.getTemperature(p);
+        float th = mc.world.getBiomeProvider().getTemperatureAtHeight(t, ph);
+        Initializer.LOGGER.info("[autotest] WEATHERDIAG biome={} temp={} precipY={} tempAtH={} snowCheck={} raining={} strength={}",
+                b.getBiomeName(), t, ph, th, th < 0.15f, mc.world.isRaining(), mc.world.getRainStrength(1.0f));
+    }
+
+    /**
      * Teleports the camera a few blocks from the {@code VULKANMOD_AUTOTEST_GOTO} block and
      * points it at that block, logging the block and the block above it (the plant) so the
      * capture can be correlated with the reported misplacement.
      */
+    private static void doRepro(Minecraft mc) {
+        String[] p = REPRO_SPEC.trim().split("\\s+");
+        if (p.length < 5) {
+            Initializer.LOGGER.warn("[autotest] REPRO needs \"x y z yaw pitch [time]\", got: {}", REPRO_SPEC);
+            return;
+        }
+        double x = Double.parseDouble(p[0]);
+        double y = Double.parseDouble(p[1]);
+        double z = Double.parseDouble(p[2]);
+        float yaw = Float.parseFloat(p[3]);
+        float pitch = Float.parseFloat(p[4]);
+        mc.player.capabilities.isFlying = true;
+        mc.player.capabilities.allowFlying = true;
+        mc.player.setPositionAndRotation(x, y, z, yaw, pitch);
+        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+        if (p.length >= 6) {
+            setWorldTime(Long.parseLong(p[5]));
+        }
+        Initializer.LOGGER.info("[autotest] REPRO camera at {},{},{} yaw={} pitch={}",
+                x, y, z, yaw, pitch);
+    }
+
     private static void gotoTarget(Minecraft mc) {
         String[] parts = GOTO_SPEC.trim().split("\\s+");
         if (parts.length < 3) {
