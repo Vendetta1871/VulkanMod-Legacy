@@ -58,6 +58,10 @@ public class SkyRenderer {
 
     private static VulkanImage sunTexture;
     private static VulkanImage moonTexture;
+    private static VulkanImage endSkyTexture;
+
+    /** One face of the End sky cube (the y=-100 square); drawn 6 times, once per rotation. */
+    private static ByteBuffer endSkyBuffer;
 
     private static final VertexFormat POSITION = DefaultVertexFormats.POSITION;
     private static final VertexFormat POSITION_TEX = DefaultVertexFormats.POSITION_TEX;
@@ -84,6 +88,7 @@ public class SkyRenderer {
         sunBuffer = buildSun();
         moonBuffer = MemoryUtil.memAlloc(4 * POSITION_TEX.getSize());
         fanBuffer = MemoryUtil.memAlloc(18 * POSITION_COLOR.getSize());
+        endSkyBuffer = buildEndSkyFace();
     }
 
     /** Called at the head of {@code RenderGlobal.renderSky}, before the GL sky runs. */
@@ -95,15 +100,24 @@ public class SkyRenderer {
         }
 
         WorldProvider provider = world.provider;
-        // Custom (modded) sky renderers and the End dimension keep their GL-only path
-        // for now; only the vanilla surface sky is ported.
-        if (provider.getSkyRenderer() != null || provider.getDimensionType().getId() == 1
-                || !provider.isSurfaceWorld()) {
+        // Custom (modded) sky renderers draw arbitrary GL geometry that cannot be
+        // replayed generically, so they keep the GL path. The End has a fixed cube sky
+        // (renderEndSky); the Nether renders no sky at all (the fog-coloured clear is
+        // already correct there).
+        if (provider.getSkyRenderer() != null) {
+            return;
+        }
+        boolean end = provider.getDimensionType().getId() == 1;
+        if (!end && !provider.isSurfaceWorld()) {
             return;
         }
 
         try {
-            renderSky(mc, world, partialTicks, pass);
+            if (end) {
+                renderEndSky();
+            } else {
+                renderSky(mc, world, partialTicks, pass);
+            }
         } catch (Throwable t) {
             TerrainRenderer.reportOnce("sky", t);
         } finally {
@@ -254,6 +268,80 @@ public class SkyRenderer {
             VRenderSystem.setShaderPipeline(skyPipeline);
             drawer.draw(starBuffer, 7, POSITION, starVertexCount);
         }
+    }
+
+    /**
+     * The End sky: vanilla {@code RenderGlobal.renderSkyEnd} draws the inside of a
+     * 200-block cube of {@code end_sky.png} - one dark (40,40,40) square at y=-100 with
+     * UVs 0..16 (GL_REPEAT), drawn six times under fixed rotations. The square is built
+     * once; the rotations ride on the modelview on top of the camera-only head matrix,
+     * exactly like the overworld sky layers.
+     */
+    private static void renderEndSky() {
+        VRenderSystem.updateProjectionMatrix();
+        VRenderSystem.updateModelViewMatrix();
+        Matrix4f headMV = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
+        headMV.set(0, 3, 0.0f).set(1, 3, 0.0f).set(2, 3, 0.0f);
+
+        // renderSkyEnd disables fog and never writes depth; cull mirrors the live GL
+        // state like the overworld sky does (the cube is seen from the inside).
+        VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
+        VRenderSystem.depthMask(false);
+        if (boolState(GL11.GL_CULL_FACE)) {
+            VRenderSystem.enableCull();
+        } else {
+            VRenderSystem.disableCull();
+        }
+
+        if (endSkyTexture == null) {
+            if (endSkyTextureFailed) {
+                return;
+            }
+            try {
+                // blur=false, clamp=false: NEAREST + GL_REPEAT, the vanilla SimpleTexture
+                // defaults the UVs 0..16 rely on.
+                endSkyTexture = loadTexture("textures/environment/end_sky.png", false);
+            } catch (Exception e) {
+                endSkyTextureFailed = true;
+                Initializer.LOGGER.error("[sky] cannot load end_sky texture", e);
+                return;
+            }
+        }
+
+        VRenderSystem.setShaderColor(40.0f / 255.0f, 40.0f / 255.0f, 40.0f / 255.0f, 1.0f);
+        VRenderSystem.setShaderPipeline(skyTexPipeline);
+        Drawer.currentBlendState = new Pipeline.BlendState(GL11.GL_SRC_ALPHA,
+                GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ZERO);
+        VTextureSelector.bindTexture(endSkyTexture);
+
+        Drawer drawer = Drawer.getInstance();
+        for (int face = 0; face < 6; ++face) {
+            Matrix4f mv = new Matrix4f(headMV);
+            switch (face) {
+                case 1 -> mv.rotate(HALF_PI, 1.0f, 0.0f, 0.0f);
+                case 2 -> mv.rotate(-HALF_PI, 1.0f, 0.0f, 0.0f);
+                case 3 -> mv.rotate(PI, 1.0f, 0.0f, 0.0f);
+                case 4 -> mv.rotate(HALF_PI, 0.0f, 0.0f, 1.0f);
+                case 5 -> mv.rotate(-HALF_PI, 0.0f, 0.0f, 1.0f);
+                default -> {}
+            }
+            VRenderSystem.applyModelViewMatrix(mv);
+            VRenderSystem.calculateMVP();
+            drawer.draw(endSkyBuffer, 7, POSITION_TEX, 4);
+        }
+    }
+
+    private static boolean endSkyTextureFailed;
+
+    /** The End sky cube face: the y=-100 square, UVs 0..16, like vanilla's loop body. */
+    private static ByteBuffer buildEndSkyFace() {
+        ByteBuffer buf = MemoryUtil.memAlloc(4 * POSITION_TEX.getSize());
+        putPosUv(buf, -100.0f, -100.0f, -100.0f, 0.0f, 0.0f);
+        putPosUv(buf, -100.0f, -100.0f, 100.0f, 0.0f, 16.0f);
+        putPosUv(buf, 100.0f, -100.0f, 100.0f, 16.0f, 16.0f);
+        putPosUv(buf, 100.0f, -100.0f, -100.0f, 16.0f, 0.0f);
+        buf.position(0);
+        return buf;
     }
 
     /**
@@ -408,10 +496,10 @@ public class SkyRenderer {
         }
         try {
             if (sunTexture == null) {
-                sunTexture = loadTexture("textures/environment/sun.png");
+                sunTexture = loadTexture("textures/environment/sun.png", true);
             }
             if (moonTexture == null) {
-                moonTexture = loadTexture("textures/environment/moon_phases.png");
+                moonTexture = loadTexture("textures/environment/moon_phases.png", true);
             }
             Initializer.LOGGER.info("[sky] celestial textures uploaded");
             return true;
@@ -427,7 +515,7 @@ public class SkyRenderer {
      * order matches the GL texture: Minecraft uploads the BufferedImage rows as-is,
      * so row 0 of both textures is the top of the image and the UVs transfer 1:1.
      */
-    private static VulkanImage loadTexture(String path) throws Exception {
+    private static VulkanImage loadTexture(String path, boolean clamp) throws Exception {
         net.minecraft.client.resources.IResource resource = Minecraft.getMinecraft()
                 .getResourceManager().getResource(new ResourceLocation(path));
 
@@ -454,9 +542,9 @@ public class SkyRenderer {
         pixels.position(0);
         pixels.limit(width * height * 4);
 
-        // LINEAR filtering + clamp, like the vanilla environment textures.
-        // Vanilla uploads sun/moon via SimpleTexture without mcmeta: blur=false, no mipmaps.
-        VulkanImage texture = new VulkanImage(1, width, height, 4, false, true);
+        // NEAREST filtering (blur=false), clamp as requested; vanilla uploads environment
+        // textures via SimpleTexture without mcmeta: no blur, no mipmaps.
+        VulkanImage texture = new VulkanImage(1, width, height, 4, false, clamp);
         texture.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         MemoryUtil.memFree(pixels);
         return texture;
