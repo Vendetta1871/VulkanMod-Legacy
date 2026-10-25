@@ -391,15 +391,20 @@ public class TerrainRenderer {
 
     /** Called at the end of every chunk layer pass; submits the batched layer as one draw. */
     public static void onChunkLayerEnd(BlockRenderLayer layer) {
-        if (!BATCH) {
-            return;
+        if (BATCH) {
+            try {
+                net.vulkanmod.debug.FrameProfiler.submitBegin();
+                ChunkBatcher.endLayer();
+                net.vulkanmod.debug.FrameProfiler.submitEnd();
+            } catch (Throwable t) {
+                reportOnce("chunk layer end", t);
+            }
         }
-        try {
-            net.vulkanmod.debug.FrameProfiler.submitBegin();
-            ChunkBatcher.endLayer();
-            net.vulkanmod.debug.FrameProfiler.submitEnd();
-        } catch (Throwable t) {
-            reportOnce("chunk layer end", t);
+        // Replay the deferred weather now that the translucent (water) layer has been drawn,
+        // so falling snow/rain lands on top of the water instead of under it. This runs for
+        // every frame (renderChunkLayer is always invoked for the translucent layer).
+        if (layer == BlockRenderLayer.TRANSLUCENT) {
+            EntityRenderer.flushWeather();
         }
     }
 

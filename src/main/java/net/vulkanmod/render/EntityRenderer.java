@@ -63,6 +63,32 @@ public class EntityRenderer {
 
     private static final float[] tint = new float[3];
 
+    // --- Deferred weather ---------------------------------------------------------------
+    // Vanilla renders the rain/snow quads (renderRainSnow) BEFORE the translucent water
+    // layer, so falling weather ends up behind the water surface and gets tinted by it -
+    // snow over a lake turns blue, rain over water nearly vanishes. That is illogical: the
+    // particles are in the air between the camera and the water, so they belong in front.
+    // We capture the weather geometry during renderRainSnow but defer its draw to just after
+    // the translucent layer (see flushWeather), where it blends over the water instead of
+    // under it. The quads still depth-test against the solid terrain, so weather behind
+    // hills stays hidden; it only stops being covered by the water.
+    private static ByteBuffer weatherBuffer;
+    // Scratch used to hand one batch to Drawer.draw starting at position 0 (Drawer's memcpy
+    // reads the source from position 0, so a mid-buffer slice cannot be passed directly).
+    private static ByteBuffer weatherScratch;
+    private static int weatherVerts;
+    private static boolean weatherPending;
+    // The weather is drawn in many small batches whose texture alternates between the snow and
+    // rain sprites (vanilla samples the biome per column, so a view straddling a snow/rain biome
+    // boundary mixes both). Each batch is buffered with its own texture and replayed as-is.
+    private static final java.util.ArrayList<int[]> weatherBatch = new java.util.ArrayList<>();
+    private static final java.util.ArrayList<VulkanImage> weatherBatchTex = new java.util.ArrayList<>();
+    private static final float[] weatherTint = new float[4];
+    private static final float[] weatherMV = new float[16];
+    private static Pipeline.BlendState weatherBlend;
+    private static boolean weatherDepthMask, weatherDepthTest, weatherCull;
+    private static int weatherDepthFunc;
+
     /** True while a model display list is compiling, so the compile-time draw is skipped. */
     private static boolean compiling;
 
@@ -163,6 +189,11 @@ public class EntityRenderer {
         // Safety reset: a throw between a pass's head and return must not leak the flag.
         handPass = false;
         particlePass = false;
+        // Drop any weather left un-flushed by an aborted frame before re-capturing this one.
+        weatherPending = false;
+        weatherVerts = 0;
+        weatherBatch.clear();
+        weatherBatchTex.clear();
         // The rain pass spans from here to the HUD's head (GuiIngameM closes it):
         // renderRainSnow is private and unmapped, so it cannot be bracketed directly,
         // and the only particle-format batch in between that is not already the
@@ -356,6 +387,16 @@ public class EntityRenderer {
         Drawer.currentBlendState = VRenderSystem.getBlendState();
         VTextureSelector.bindTexture(texture);
 
+        // The weather is not drawn here: it is buffered and replayed after the translucent
+        // water layer so falling snow/rain is not hidden or tinted by the water. Only the
+        // weather (rainPass) is deferred - the real particle billboards (particlePass) draw
+        // in place. See deferWeather / flushWeather.
+        if (rainPass && !particlePass && pipeline == particlePipeline) {
+            deferWeather(data, vertexCount, texture);
+            net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
+            return;
+        }
+
         drawer.draw(data, 7, format, vertexCount);
 
         if (!loggedFirst) {
@@ -369,6 +410,125 @@ public class EntityRenderer {
      * The entity's packed light exactly as {@code RenderManager.renderEntityStatic}
      * computes it before handing the entity to its renderer.
      */
+    /**
+     * Buffers one weather batch (rain/snow quads) captured during {@code renderRainSnow}. The
+     * weather is not one draw: vanilla samples the biome per column, so a view that straddles a
+     * snow/rain biome boundary emits many small batches whose texture alternates between the
+     * snow and rain sprites. Each batch is appended to a growable buffer (copying the existing
+     * contents on growth) and recorded with its own texture; {@link #flushWeather()} replays
+     * them after the translucent layer. The draw state (model-view, tint, blend, depth) is
+     * constant across the weather, so it is snapshotted once from the first batch.
+     */
+    private static void deferWeather(ByteBuffer data, int vertexCount, VulkanImage texture) {
+        int stride = PARTICLE_FORMAT.getSize();
+        int bytes = vertexCount * stride;
+        int off = weatherVerts * stride;
+        int need = off + bytes;
+        if (weatherBuffer == null || weatherBuffer.capacity() < need) {
+            ByteBuffer grown = MemoryUtil.memAlloc(Math.max(need * 2, 1 << 16));
+            if (weatherBuffer != null) {
+                weatherBuffer.position(0);
+                weatherBuffer.limit(off);
+                grown.put(weatherBuffer);
+                MemoryUtil.memFree(weatherBuffer);
+            }
+            weatherBuffer = grown;
+        }
+        ByteBuffer src = data.duplicate();
+        src.position(0);
+        src.limit(bytes);
+        weatherBuffer.position(off);
+        weatherBuffer.put(src);
+        weatherBatch.add(new int[]{weatherVerts, vertexCount});
+        weatherBatchTex.add(texture);
+        weatherVerts += vertexCount;
+
+        if (!weatherPending) {
+            VRenderSystem.modelViewMatrix.asFloatBuffer().position(0).limit(16).get(weatherMV);
+            GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
+            weatherTint[0] = float4.get(0);
+            weatherTint[1] = float4.get(1);
+            weatherTint[2] = float4.get(2);
+            weatherTint[3] = float4.get(3);
+            weatherBlend = VRenderSystem.getBlendState();
+            weatherDepthMask = boolState(GL11.GL_DEPTH_WRITEMASK);
+            weatherDepthTest = boolState(GL11.GL_DEPTH_TEST);
+            GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
+            weatherDepthFunc = int1.get(0);
+            weatherCull = boolState(GL11.GL_CULL_FACE);
+        }
+        weatherPending = true;
+    }
+
+    /**
+     * Replays the buffered weather after the translucent water layer, one batch at a time so
+     * each keeps its own snow/rain texture. Called from {@code TerrainRenderer.onChunkLayerEnd}
+     * for the translucent layer, which runs every frame (even with no water on screen), so the
+     * weather is never dropped. The model-view captured at {@code renderRainSnow} time is
+     * restored so the quads land exactly where they did.
+     */
+    public static void flushWeather() {
+        if (!weatherPending) {
+            return;
+        }
+        weatherPending = false;
+        int n = weatherVerts;
+        int batches = weatherBatch.size();
+        weatherVerts = 0;
+        if (n <= 0 || weatherBuffer == null || batches == 0
+                || !Drawer.isActive() || Drawer.skipRendering) {
+            weatherBatch.clear();
+            weatherBatchTex.clear();
+            return;
+        }
+        try {
+            VRenderSystem.modelViewMatrix.position(0);
+            VRenderSystem.modelViewMatrix.asFloatBuffer().position(0).limit(16).put(weatherMV);
+            VRenderSystem.updateProjectionMatrix();
+            VRenderSystem.calculateMVP();
+
+            VRenderSystem.depthMask(weatherDepthMask);
+            if (weatherDepthTest) {
+                VRenderSystem.enableDepthTest();
+            } else {
+                VRenderSystem.disableDepthTest();
+            }
+            VRenderSystem.depthFunc(weatherDepthFunc);
+            if (weatherCull) {
+                VRenderSystem.enableCull();
+            } else {
+                VRenderSystem.disableCull();
+            }
+            VRenderSystem.setShaderColor(weatherTint[0], weatherTint[1], weatherTint[2], weatherTint[3]);
+            VRenderSystem.setShaderPipeline(particlePipeline);
+            Drawer.currentBlendState = weatherBlend;
+
+            int stride = PARTICLE_FORMAT.getSize();
+            if (weatherScratch == null || weatherScratch.capacity() < n * stride) {
+                weatherScratch = MemoryUtil.memAlloc(Math.max(n * stride, 1 << 16));
+            }
+            for (int i = 0; i < batches; i++) {
+                int[] vr = weatherBatch.get(i);
+                int start = vr[0] * stride;
+                int bytes = vr[1] * stride;
+                // Drawer.draw reads its source from position 0, so stage this batch there.
+                weatherBuffer.position(start);
+                weatherBuffer.limit(start + bytes);
+                weatherScratch.clear();
+                weatherScratch.limit(bytes);
+                weatherScratch.put(weatherBuffer);
+                weatherScratch.limit(bytes).position(0);
+                VTextureSelector.bindTexture(weatherBatchTex.get(i));
+                Drawer.getInstance().draw(weatherScratch, 7, PARTICLE_FORMAT, vr[1]);
+            }
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("weather flush", t);
+        } finally {
+            weatherBatch.clear();
+            weatherBatchTex.clear();
+        }
+    }
+
     private static int packedLight() {
         // First-person hand: the held item/block is lit by the viewer's own light. The hand
         // pass runs after the entity pass, so currentEntity is stale here - without this the
