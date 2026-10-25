@@ -111,6 +111,38 @@ public class Drawer {
 
     }
 
+    /**
+     * Non-indexed line draw for the debug-box / selection-box capture (GL_LINES,
+     * GL_LINE_STRIP). The caller sets {@link VRenderSystem#topology} to the matching line
+     * topology and binds the POSITION_COLOR line pipeline; the width is taken from
+     * {@link VRenderSystem#getLineWidth()} through the pipeline's dynamic line-width state.
+     * Vertices are drawn in order, so no index buffer is needed.
+     */
+    public void drawLines(ByteBuffer buffer, VertexFormat vertexFormat, int vertexCount)
+    {
+        assertCommandBufferState();
+
+        if(!(vertexCount > 0)) return;
+
+        VertexBuffer vertexBuffer = this.vertexBuffers[currentFrame];
+        vertexBuffer.copyToVertexBuffer(vertexFormat.getSize(), vertexCount, buffer);
+
+        Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
+        usedPipelines.add(boundPipeline);
+        bindPipeline(boundPipeline);
+
+        uploadAndBindUBOs(boundPipeline);
+
+        try(MemoryStack stack = stackPush()) {
+            VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
+
+            vkCmdSetLineWidth(commandBuffer, VRenderSystem.getLineWidth());
+            vkCmdBindVertexBuffers(commandBuffer, 0, stack.longs(vertexBuffer.getId()), stack.longs(vertexBuffer.getOffset()));
+            vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
+        }
+        currentIndex++;
+    }
+
     public void draw(VertexBuffer vertexBuffer, IndexBuffer indexBuffer, int indexCount, int drawMode)
     {
         assertCommandBufferState();

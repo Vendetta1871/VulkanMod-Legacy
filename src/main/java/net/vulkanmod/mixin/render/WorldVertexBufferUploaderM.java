@@ -3,6 +3,7 @@ package net.vulkanmod.mixin.render;
 import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.WorldVertexBufferUploader;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.render.DebugLinesRenderer;
 import net.vulkanmod.render.EntityRenderer;
 import net.vulkanmod.render.GuiRenderer;
 import org.spongepowered.asm.mixin.Mixin;
@@ -26,6 +27,12 @@ public class WorldVertexBufferUploaderM {
         }
         boolean captured = (EntityRenderer.isActive() && EntityRenderer.capture(buffer))
                 || (GuiRenderer.isGuiPass() && GuiRenderer.capture(buffer));
+        if (!captured && DebugLinesRenderer.accepts(buffer)) {
+            // World-pass POSITION_COLOR lines: the F3 debug boxes and the block selection
+            // box. Their glDrawArrays is never presented, so replay them in Vulkan.
+            DebugLinesRenderer.render(buffer);
+            captured = true;
+        }
         if (captured) {
             buffer.reset();
             ci.cancel();

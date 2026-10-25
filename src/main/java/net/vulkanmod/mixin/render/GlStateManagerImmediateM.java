@@ -3,6 +3,7 @@ package net.vulkanmod.mixin.render;
 import net.minecraft.client.renderer.GlStateManager;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.render.GuiRenderer;
+import net.vulkanmod.vulkan.VRenderSystem;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -43,6 +44,19 @@ public class GlStateManagerImmediateM {
     private static void vulkanmod$end(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
             GuiRenderer.immediateEnd();
+        }
+    }
+
+    /**
+     * Tracks {@code glLineWidth} so the debug-line capture can feed it to the line
+     * pipeline's dynamic line-width state. Kirino does not answer
+     * {@code glGetFloatv(GL_LINE_WIDTH)}, so the value is mirrored from the setter like
+     * the blend state; only line-topology draws consume it.
+     */
+    @Inject(method = "glLineWidth(F)V", at = @At("HEAD"))
+    private static void vulkanmod$lineWidth(float width, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.setLineWidth(width);
         }
     }
 }

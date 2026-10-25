@@ -3,6 +3,7 @@ package net.vulkanmod;
 import net.minecraft.client.Minecraft;
 import net.vulkanmod.config.Config;
 import net.vulkanmod.render.CloudRenderer;
+import net.vulkanmod.render.DebugLinesRenderer;
 import net.vulkanmod.render.EntityRenderer;
 import net.vulkanmod.render.GuiRenderer;
 import net.vulkanmod.render.SkyRenderer;
@@ -100,6 +101,7 @@ public class Initializer {
             SkyRenderer.init();
             CloudRenderer.init();
             WorldBorderRenderer.init();
+            DebugLinesRenderer.init();
             EntityRenderer.init();
             GuiRenderer.init();
 

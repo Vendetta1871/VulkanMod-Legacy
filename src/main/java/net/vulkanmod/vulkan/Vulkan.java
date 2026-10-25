@@ -452,6 +452,10 @@ public class Vulkan {
 
             VkPhysicalDeviceFeatures deviceFeatures = VkPhysicalDeviceFeatures.create();
             deviceFeatures.samplerAnisotropy(true);
+            // The debug-line capture draws GL_LINES/GL_LINE_STRIP with glLineWidth up to
+            // 6; wideLines lets the line pipeline honour a dynamic width > 1. Supported by
+            // every desktop driver (Volta included).
+            deviceFeatures.wideLines(true);
 
             VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.create();
 

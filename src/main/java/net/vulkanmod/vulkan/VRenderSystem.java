@@ -33,6 +33,11 @@ public class VRenderSystem {
 
     public static boolean cull = true;
 
+    // Input-assembly topology of the pipeline variant selected at draw time. GL's
+    // immediate modes map onto it 1:1; the default is the triangle list every world/GUI
+    // pass uses. The debug-line capture switches it to a line topology for its draws.
+    public static int topology = 3; // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+
     // GL default: the fixed-function alpha test is enabled (GREATER 0.1)
     public static boolean alphaTest = true;
     public static int alphaTestFunc = 516; // GL_GREATER
@@ -532,6 +537,9 @@ public class VRenderSystem {
     public static void enableCull() { cull = true; }
     public static void disableCull() { cull = false; }
 
+    public static void setTopology(int topology) { VRenderSystem.topology = topology; }
+    public static int getTopology() { return topology; }
+
     public static void polygonOffset(float v, float v1) {
         depthBias[0] = v;
         depthBias[1] = v1;
@@ -585,6 +593,7 @@ public class VRenderSystem {
         fogEnabled = true;
         lineWidth = 1.0f;
         pointSize = 1.0f;
+        topology = 3; // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
         currentPipeline = null;
         for (TexUnit u : TEX_UNITS) {
             if (u != null) {

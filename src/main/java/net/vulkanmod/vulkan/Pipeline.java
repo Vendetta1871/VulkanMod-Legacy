@@ -125,7 +125,7 @@ public class Pipeline {
 
             VkPipelineInputAssemblyStateCreateInfo inputAssembly = VkPipelineInputAssemblyStateCreateInfo.create();
             inputAssembly.sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO);
-            inputAssembly.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+            inputAssembly.topology(state.topology);
             inputAssembly.primitiveRestartEnable(false);
 
             // ===> VIEWPORT & SCISSOR
@@ -202,7 +202,16 @@ public class Pipeline {
 
             VkPipelineDynamicStateCreateInfo dynamicStates = VkPipelineDynamicStateCreateInfo.create();
             dynamicStates.sType(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
-            dynamicStates.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
+            // Line topologies honour glLineWidth through the dynamic line-width state
+            // (the wideLines device feature is enabled for this); triangle pipelines keep
+            // the static width so they never need a vkCmdSetLineWidth before drawing.
+            if (state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP) {
+                dynamicStates.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_VIEWPORT,
+                        VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_LINE_WIDTH));
+            } else {
+                dynamicStates.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_VIEWPORT,
+                        VK_DYNAMIC_STATE_SCISSOR));
+            }
 
             VkGraphicsPipelineCreateInfo.Buffer pipelineInfo = VkGraphicsPipelineCreateInfo.create(1);
             pipelineInfo.sType(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
@@ -847,6 +856,7 @@ public class Pipeline {
         final ColorMask colorMask;
         final LogicOpState logicOpState;
         final boolean cullState;
+        final int topology;
 
         public PipelineState(BlendState blendState, DepthState depthState, LogicOpState logicOpState, ColorMask colorMask) {
             this.blendState = blendState;
@@ -854,6 +864,7 @@ public class Pipeline {
             this.logicOpState = logicOpState;
             this.colorMask = colorMask;
             this.cullState = VRenderSystem.cull;
+            this.topology = VRenderSystem.topology;
         }
 
         @Override
@@ -861,7 +872,7 @@ public class Pipeline {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             PipelineState that = (PipelineState) o;
-            return blendState.equals(that.blendState) && depthState.equals(that.depthState) && logicOpState.equals(that.logicOpState) && (cullState == that.cullState) && colorMask.equals(that.colorMask);
+            return blendState.equals(that.blendState) && depthState.equals(that.depthState) && logicOpState.equals(that.logicOpState) && (cullState == that.cullState) && colorMask.equals(that.colorMask) && topology == that.topology;
         }
 
         @Override
@@ -872,6 +883,7 @@ public class Pipeline {
             result = 31 * result + depthState.hashCode();
             result = 31 * result + logicOpState.hashCode();
             result = 31 * result + (cullState ? 1231 : 1237);
+            result = 31 * result + topology;
             return result;
         }
     }
