@@ -132,9 +132,8 @@ public class Drawer {
             default -> throw new RuntimeException("unknown drawType");
         }
 
-        autoIndexBuffer.checkCapacity(vertexCount);
-
-        drawAutoIndexed(buffer, this.vertexBuffers[currentFrame], autoIndexBuffer.getIndexBuffer(), drawMode, vertexFormat, vertexCount);
+        drawAutoIndexed(buffer, this.vertexBuffers[currentFrame], autoIndexBuffer.getIndexBuffer(vertexCount),
+                drawMode, vertexFormat, vertexCount);
         currentIndex++;
 
     }

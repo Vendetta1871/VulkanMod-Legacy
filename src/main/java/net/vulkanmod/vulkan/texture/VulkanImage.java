@@ -148,7 +148,12 @@ public class VulkanImage {
             transferCmd = queued.getHandle();
         }
 
-        transferDstLayout();
+        // Within a tile batch the whole group of copies shares the one layout round
+        // trip recorded by beginTileBatch/endTileBatch (N11); per-copy transitions
+        // meant eight full-image barriers per animated sprite per tick.
+        if (tileBatchDepth == 0) {
+            transferDstLayout();
+        }
 
         StagingBuffer stagingBuffer = Vulkan.getStagingBuffer(Drawer.getCurrentFrame());
 
@@ -159,11 +164,45 @@ public class VulkanImage {
 
         // Leave the image directly in SHADER_READ_ONLY inside the same command buffer,
         // so the descriptor-time readOnlyLayout() is a no-op and no extra submit is spent.
-        finishTransferLayout();
+        if (tileBatchDepth == 0) {
+            finishTransferLayout();
+        }
 
         if (queued != null) {
             TransferQueue.endIfNeeded(queued);
         }
+    }
+
+    /**
+     * Depth of the tile-upload batch (N11): while nonzero, uploadSubTextureAsync skips
+     * its layout round trip and the group shares the transitions recorded here.
+     */
+    private int tileBatchDepth;
+
+    /**
+     * Opens a group of sub-image copies that share one SHADER_READ -> TRANSFER_DST ->
+     * SHADER_READ round trip instead of paying one pair per mip copy (N11). The caller
+     * must already have opened the command buffer the copies will record into (see
+     * TransferQueue.startRecording); the WAR hazard against frames still sampling the
+     * image is covered by the single opening barrier.
+     */
+    public void beginTileBatch() {
+        if (tileBatchDepth++ != 0) {
+            return;
+        }
+        transferCmd = Drawer.getFrameTransferCmd();
+        if (transferCmd == null) {
+            transferCmd = TransferQueue.getCommandBuffer().getHandle();
+        }
+        transferDstLayout();
+    }
+
+    /** Closes the group; one barrier returns the image to SHADER_READ_ONLY. */
+    public void endTileBatch() {
+        if (--tileBatchDepth != 0) {
+            return;
+        }
+        finishTransferLayout();
     }
 
     /** Debug helper: copies the image contents to the CPU and writes them out as a PNG. */

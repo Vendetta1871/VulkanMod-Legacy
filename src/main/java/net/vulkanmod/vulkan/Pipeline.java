@@ -619,15 +619,38 @@ public class Pipeline {
             // a resize in the middle of the loop would replace the ring buffer and bump
             // the generation after the first UBO already went into the old one, so its
             // dynamic offset would read uninitialized memory in the new buffer (N6).
+            long window = uniformBuffers.getResetCount();
+            int generation = uniformBuffers.getGeneration();
             int total = 0;
             for(UBO ubo : UBOs) {
                 ubo.update();
-                total += uniformBuffers.alignedSize(ubo.getBuffer().remaining());
+                // H10: an UBO whose data is byte-identical to the upload it already made
+                // in this frame window reuses that ring offset - no new slot, no memcpy.
+                if (ubo.needsUpload(window, generation)) {
+                    total += uniformBuffers.alignedSize(ubo.getBuffer().remaining());
+                }
             }
             uniformBuffers.ensureCapacity(total);
+            if (uniformBuffers.getGeneration() != generation) {
+                // The resize dropped every recorded offset, so the skipped uploads must
+                // be counted too before the next loop may not resize mid-way (N6 again).
+                generation = uniformBuffers.getGeneration();
+                total = 0;
+                for(UBO ubo : UBOs) {
+                    total += uniformBuffers.alignedSize(ubo.getBuffer().remaining());
+                }
+                uniformBuffers.ensureCapacity(total);
+                generation = uniformBuffers.getGeneration();
+            }
 
             for(UBO ubo : UBOs) {
-                int offset = uniformBuffers.uploadUBO(ubo.getBuffer(), frame);
+                int offset;
+                if (ubo.needsUpload(window, generation)) {
+                    offset = uniformBuffers.uploadUBO(ubo.getBuffer(), frame);
+                    ubo.recordUpload(window, generation, offset);
+                } else {
+                    offset = ubo.getLastOffset();
+                }
                 // The dynamic-offset array is indexed by the order of the dynamic
                 // bindings in the layout (ascending binding number, contiguous from 0).
                 offsets.put(ubo.getBinding(), offset);

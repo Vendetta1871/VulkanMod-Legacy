@@ -37,6 +37,7 @@
     "render.OpenGlHelperM",
     "render.GlStateManagerLightM",
     "render.GlStateManagerImmediateM",
+    "render.GlStateManagerMatrixM",
     "render.ParticleManagerM",
     "render.FramebufferM"
   ],

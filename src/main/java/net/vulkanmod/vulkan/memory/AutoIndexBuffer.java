@@ -7,25 +7,58 @@ import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
 
 public class AutoIndexBuffer {
-    // Highest vertex count addressable by UINT16 indices; above this the buffer switches to UINT32.
+    // Highest vertex count addressable by UINT16 indices.
     private static final int MAX_SHORT_INDEXABLE = 65536;
 
-    int vertexCount;
-    DrawType drawType;
-    IndexBuffer.IndexType indexType;
-    IndexBuffer indexBuffer;
+    private static final int RANGE_SHORT = 0, RANGE_INT = 1;
+
+    /**
+     * One buffer per index width (N25): almost every draw stays under 65536 vertices and
+     * keeps fetching cheap UINT16 indices even after an occasional huge draw has forced a
+     * UINT32 buffer into existence. The buffer starts in the UINT16 range; the old one
+     * opened at 100000 vertices, so every quad draw fetched 4-byte indices. The UINT32
+     * range is created on first use.
+     */
+    private final IndexBuffer[] indexBuffers = new IndexBuffer[2];
+    private final int[] capacities = new int[2];
+    private final DrawType drawType;
 
     public AutoIndexBuffer(int vertexCount, DrawType type) {
         this.drawType = type;
 
-        createIndexBuffer(vertexCount);
+        createIndexBuffer(RANGE_SHORT, Math.min(vertexCount, MAX_SHORT_INDEXABLE));
     }
 
-    private void createIndexBuffer(int vertexCount) {
-        this.vertexCount = vertexCount;
-        this.indexType = vertexCount > MAX_SHORT_INDEXABLE
-                ? IndexBuffer.IndexType.INT
-                : IndexBuffer.IndexType.SHORT;
+    /**
+     * The shared index buffer for a draw of {@code vertexCount} vertices, grown when the
+     * draw does not fit the current buffer of that index width. In-flight command buffers
+     * may still bind the replaced buffer, so its destroy is deferred (addToFreeable).
+     */
+    public IndexBuffer getIndexBuffer(int vertexCount) {
+        int range = vertexCount > MAX_SHORT_INDEXABLE ? RANGE_INT : RANGE_SHORT;
+        if (vertexCount > capacities[range]) {
+            // Grow to at least the requested size; doubling alone can lag far behind
+            // a large request and would loop through repeated reallocations.
+            int newCapacity = Math.max(vertexCount, Math.max(capacities[range] * 2, 1024));
+            if (range == RANGE_SHORT) {
+                newCapacity = Math.min(newCapacity, MAX_SHORT_INDEXABLE);
+            }
+            System.out.println("Reallocating AutoIndexBuffer (" + (range == RANGE_SHORT ? "UINT16" : "UINT32")
+                    + ") from " + capacities[range] + " to " + newCapacity);
+
+            if (indexBuffers[range] != null) {
+                MemoryManager.addToFreeable(indexBuffers[range]);
+            }
+            createIndexBuffer(range, newCapacity);
+        }
+        return indexBuffers[range];
+    }
+
+    private void createIndexBuffer(int range, int vertexCount) {
+        capacities[range] = vertexCount;
+        IndexBuffer.IndexType indexType = range == RANGE_SHORT
+                ? IndexBuffer.IndexType.SHORT
+                : IndexBuffer.IndexType.INT;
 
         int indexCount;
         ByteBuffer buffer;
@@ -46,25 +79,13 @@ public class AutoIndexBuffer {
             default -> throw new RuntimeException("unknown drawType");
         }
 
-        indexBuffer = new IndexBuffer(indexCount * indexType.size, MemoryTypes.GPU_MEM);
+        IndexBuffer indexBuffer = new IndexBuffer(indexCount * indexType.size, MemoryTypes.GPU_MEM);
         indexBuffer.indexType = indexType;
         indexBuffer.copyBuffer(buffer);
         // The host-side index data is only needed to fill the GPU buffer.
         MemoryUtil.memFree(buffer);
-    }
 
-    public void checkCapacity(int vertexCount) {
-        if(vertexCount > this.vertexCount) {
-            // Grow to at least the requested size; doubling alone can lag far behind
-            // a large request and would loop through repeated reallocations.
-            int newVertexCount = Math.max(vertexCount, this.vertexCount * 2);
-            System.out.println("Reallocating AutoIndexBuffer from " + this.vertexCount + " to " + newVertexCount);
-
-            // In-flight command buffers may still bind the old index buffer; addToFreeable
-            // defers the destroy until they have finished.
-            MemoryManager.addToFreeable(indexBuffer);
-            createIndexBuffer(newVertexCount);
-        }
+        indexBuffers[range] = indexBuffer;
     }
 
     /** Fills a freshly allocated host buffer with {@code indexCount} indices from {@code source}. */
@@ -109,10 +130,6 @@ public class AutoIndexBuffer {
         return genIndices((vertexCount - 2) * 3, type,
                 (index) -> index / 3 + index % 3);
     }
-
-    public IndexBuffer getIndexBuffer() { return indexBuffer; }
-
-    public IndexBuffer.IndexType getIndexType() { return indexType; }
 
     private interface IndexSource {
         int get(int index);

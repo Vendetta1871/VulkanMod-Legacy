@@ -43,6 +43,8 @@ public class TextureBridge {
 
     /** True while the per-tick tile uploads share one transfer command buffer. */
     private static boolean tileBatchOpen;
+    // True while the tick's mirrored tiles hold the atlas image in one layout batch (N11).
+    private static boolean tileLayoutOpen;
 
     /**
      * True while the open tile batch belongs to the block atlas. Other TextureMaps
@@ -70,6 +72,14 @@ public class TextureBridge {
 
     public static void endTileBatch() {
         mirrorTarget = false;
+        // Close the atlas layout batch opened by the first mirrored tile of the tick
+        // before the shared command buffer is submitted (N11).
+        if (tileLayoutOpen) {
+            tileLayoutOpen = false;
+            if (atlasImage != null) {
+                atlasImage.endTileBatch();
+            }
+        }
         if (tileBatchOpen) {
             tileBatchOpen = false;
             TransferQueue.endRecording();
@@ -129,6 +139,12 @@ public class TextureBridge {
                 return;
             }
             int levels = Math.min(frames.length, atlasMipLevels);
+            if (!tileLayoutOpen) {
+                // One SHADER_READ -> TRANSFER_DST -> SHADER_READ round trip per tick
+                // instead of one pair per mip copy (N11). Closed in endTileBatch.
+                atlasImage.beginTileBatch();
+                tileLayoutOpen = true;
+            }
             for (int lvl = 0; lvl < levels; lvl++) {
                 int[] argb = frames[lvl];
                 int lw = width >> lvl, lh = height >> lvl;

@@ -159,6 +159,8 @@ public class Initializer {
      */
     public static void presentFrame() {
         try {
+            // The GUI glyph batch (M11/N18) must land in the frame its draws came from.
+            net.vulkanmod.render.GuiRenderer.flushPendingDraws();
             org.lwjgl.opengl.Display.processMessages();
             org.lwjgl.input.Mouse.updateCursor();
 

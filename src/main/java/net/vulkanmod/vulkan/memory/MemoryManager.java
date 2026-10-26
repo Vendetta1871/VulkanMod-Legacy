@@ -101,6 +101,11 @@ public abstract class MemoryManager {
      * DEVICE_LOCAL|HOST_VISIBLE type when the BAR lets the CPU write into VRAM (ReBAR),
      * and a host-coherent type otherwise - instead of always snooping system RAM over
      * PCIe. The allocation stays vmaMapMemory-able either way.
+     *
+     * <p>HOST_COHERENT is a required flag (M10): nothing in this codebase calls
+     * vmaFlushAllocation, so a non-coherent pick would leave CPU writes invisible to
+     * the GPU. The flag also keeps VMA from falling back to a cached-but-non-coherent
+     * system-RAM type.</p>
      */
     public static void createBufferHostAccess(long size, int usage, LongBuffer pBuffer, PointerBuffer pBufferMemory) {
 
@@ -114,6 +119,7 @@ public abstract class MemoryManager {
             VmaAllocationCreateInfo allocationInfo = VmaAllocationCreateInfo.calloc(stack);
             allocationInfo.usage(VMA_MEMORY_USAGE_AUTO);
             allocationInfo.flags(VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+            allocationInfo.requiredFlags(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
             int result = vmaCreateBuffer(allocator, bufferInfo, allocationInfo, pBuffer, pBufferMemory, null);
             if(result != VK_SUCCESS) {

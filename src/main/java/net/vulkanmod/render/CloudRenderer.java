@@ -11,6 +11,9 @@ import net.vulkanmod.Initializer;
 import net.vulkanmod.vulkan.Drawer;
 import net.vulkanmod.vulkan.Pipeline;
 import net.vulkanmod.vulkan.VRenderSystem;
+import net.vulkanmod.vulkan.memory.AutoIndexBuffer;
+import net.vulkanmod.vulkan.memory.MemoryTypes;
+import net.vulkanmod.vulkan.memory.VertexBuffer;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.joml.Matrix4f;
@@ -39,6 +42,14 @@ public class CloudRenderer {
     private static Pipeline cloudPipeline; // POSITION_TEX_COLOR: texture * vertex color + fog
 
     private static ByteBuffer cloudBuffer;
+
+    // Persistent device-side copies of the constant cloud geometry (M12): each grid is
+    // built once; the per-frame scroll/camera offset rides the modelview (XZ/Y) and the
+    // UvOffset UBO field (UV), the cloud colour the ColorModulator - nothing is rebuilt
+    // or re-uploaded per frame anymore.
+    private static VertexBuffer cloudVbo;
+    private static VertexBuffer cloudFancyVbo;
+    private static int cloudFancyVerts;
 
     private static VulkanImage cloudTexture;
     private static boolean textureFailed;
@@ -155,7 +166,10 @@ public class CloudRenderer {
             r = desat[0]; g = desat[1]; b = desat[2];
         }
 
-        VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        // The cloud colour rides the ColorModulator; the vertices carry only the face
+        // shading factors (M12), so the fragment multiplies colour x shading x texture
+        // exactly like vanilla's per-vertex product.
+        VRenderSystem.setShaderColor(r, g, b, 1.0f);
         VRenderSystem.setShaderPipeline(cloudPipeline);
         // SRC_ALPHA / ONE_MINUS_SRC_ALPHA, matching vanilla's tryBlendFuncSeparate.
         Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
@@ -165,96 +179,101 @@ public class CloudRenderer {
             // renderCloudsFancy scales the modelview by (12,1,12) and builds each cell
             // in that squashed space; the fog distance the shader derives from the
             // view-space position therefore matches the GL fog coordinate.
+            double d0 = (float) cloudTickCounter + partialTicks;
+            double d1 = (eyeX + d0 * 0.03) / 12.0;
+            double d2 = eyeZ / 12.0 + 0.33;
+            float f2 = world.provider.getCloudHeight() - (float) eyeY + 0.33f;
+            int ci = MathHelper.floor(d1 / 2048.0);
+            int cj = MathHelper.floor(d2 / 2048.0);
+            d1 -= (double) (ci * 2048);
+            d2 -= (double) (cj * 2048);
+
+            // The baked volume sits on the cell grid at y=0; the fractional scroll/
+            // camera offset and the layer height ride the modelview, the integer cell
+            // UV offset rides UvOffset (M12).
             Matrix4f mv = new Matrix4f(headMV);
             mv.scale(12.0f, 1.0f, 12.0f);
+            mv.translate(-(float) (d1 - MathHelper.floor(d1)), f2, -(float) (d2 - MathHelper.floor(d2)));
             VRenderSystem.applyModelViewMatrix(mv);
             VRenderSystem.calculateMVP();
+            VRenderSystem.setCloudUvOffset(MathHelper.floor(d1) * 0.00390625f,
+                    MathHelper.floor(d2) * 0.00390625f);
 
-            int vertCount = buildFancyClouds(world, partialTicks, cloudTickCounter,
-                    eyeX, eyeY, eyeZ, r, g, b);
-            if (vertCount > 0) {
-                // Two passes like vanilla: a colorMask-off depth prepass writes the depth
-                // of the near faces first, so the coloured pass rejects the semi-transparent
-                // side fragments hidden behind them instead of double-blending them.
-                VRenderSystem.colorMask(false, false, false, false);
-                drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, vertCount);
-                VRenderSystem.colorMask(true, true, true, true);
-                drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, vertCount);
+            if (cloudFancyVbo == null) {
+                cloudFancyVerts = buildFancyClouds();
+                cloudFancyVbo = uploadStatic(cloudBuffer, cloudFancyVerts, POSITION_TEX_COLOR);
             }
+            // Two passes like vanilla: a colorMask-off depth prepass writes the depth
+            // of the near faces first, so the coloured pass rejects the semi-transparent
+            // side fragments hidden behind them instead of double-blending them.
+            VRenderSystem.colorMask(false, false, false, false);
+            drawStaticQuads(drawer, cloudFancyVbo, cloudFancyVerts);
+            VRenderSystem.colorMask(true, true, true, true);
+            drawStaticQuads(drawer, cloudFancyVbo, cloudFancyVerts);
         } else {
-            VRenderSystem.applyModelViewMatrix(headMV);
+            // The fast grid is baked at y=0 with cell-local UVs; the layer height rides
+            // the modelview and the scroll/camera UV offset UvOffset (M12).
+            double scroll = (float) cloudTickCounter + partialTicks;
+            double d0 = eyeX + scroll * 0.03;
+            int k = MathHelper.floor(d0 / 2048.0);
+            int l = MathHelper.floor(eyeZ / 2048.0);
+            d0 -= (double) (k * 2048);
+            double d1 = eyeZ - (double) (l * 2048);
+            float f6 = world.provider.getCloudHeight() - (float) eyeY + 0.33f;
+
+            Matrix4f mv = new Matrix4f(headMV);
+            mv.translate(0.0f, f6, 0.0f);
+            VRenderSystem.applyModelViewMatrix(mv);
             VRenderSystem.calculateMVP();
-            buildClouds(world, partialTicks, cloudTickCounter, eyeX, eyeY, eyeZ, r, g, b);
-            drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, CLOUD_VERTS);
+            VRenderSystem.setCloudUvOffset((float) (d0 * 4.8828125E-4), (float) (d1 * 4.8828125E-4));
+
+            if (cloudVbo == null) {
+                buildClouds();
+                cloudVbo = uploadStatic(cloudBuffer, CLOUD_VERTS, POSITION_TEX_COLOR);
+            }
+            drawStaticQuads(drawer, cloudVbo, CLOUD_VERTS);
         }
         return true;
     }
 
     /**
-     * Refills the cloud grid, replicating the vanilla fast-cloud loop: 16x16 quads of
-     * 32x32 units in eye-relative XZ, at {@code f6 = cloudHeight - eyeY + 0.33}. The UV
-     * is the eye-relative position scaled by 1/2048 plus the scroll offset, so the tiled
-     * texture is anchored in world space and drifts with {@code cloudTickCounter}.
+     * Builds the fast-cloud grid once (vanilla's 16x16 quads of 32x32 units): the y and
+     * UV offsets the per-frame scroll/camera motion used to bake into every vertex are
+     * now applied by the modelview and UvOffset (M12), so the baked plane sits at y=0
+     * with cell-local UVs and a plain white vertex colour (the colour rides the
+     * ColorModulator).
      */
-    private static void buildClouds(World world, float partialTicks, int cloudTickCounter,
-                                    double eyeX, double eyeY, double eyeZ,
-                                    float r, float g, float b) {
-        double scroll = (float) cloudTickCounter + partialTicks;
-        double d0 = eyeX + scroll * 0.03;
-        int k = MathHelper.floor(d0 / 2048.0);
-        int l = MathHelper.floor(eyeZ / 2048.0);
-        d0 -= (double) (k * 2048);
-        double d1 = eyeZ - (double) (l * 2048);
-        float f6 = world.provider.getCloudHeight() - (float) eyeY + 0.33f;
-        float f7 = (float) (d0 * 4.8828125E-4);
-        float f8 = (float) (d1 * 4.8828125E-4);
-
+    private static void buildClouds() {
         ByteBuffer buf = cloudBuffer;
         buf.position(0);
         for (int i1 = -256; i1 < 256; i1 += 32) {
             for (int j1 = -256; j1 < 256; j1 += 32) {
-                putPosUvColor(buf, i1, f6, j1 + 32,
-                        i1 * 4.8828125E-4f + f7, (j1 + 32) * 4.8828125E-4f + f8, r, g, b, 0.8f);
-                putPosUvColor(buf, i1 + 32, f6, j1 + 32,
-                        (i1 + 32) * 4.8828125E-4f + f7, (j1 + 32) * 4.8828125E-4f + f8, r, g, b, 0.8f);
-                putPosUvColor(buf, i1 + 32, f6, j1,
-                        (i1 + 32) * 4.8828125E-4f + f7, j1 * 4.8828125E-4f + f8, r, g, b, 0.8f);
-                putPosUvColor(buf, i1, f6, j1,
-                        i1 * 4.8828125E-4f + f7, j1 * 4.8828125E-4f + f8, r, g, b, 0.8f);
+                putPosUvColor(buf, i1, 0.0f, j1 + 32,
+                        i1 * 4.8828125E-4f, (j1 + 32) * 4.8828125E-4f, 1.0f, 1.0f, 1.0f, 0.8f);
+                putPosUvColor(buf, i1 + 32, 0.0f, j1 + 32,
+                        (i1 + 32) * 4.8828125E-4f, (j1 + 32) * 4.8828125E-4f, 1.0f, 1.0f, 1.0f, 0.8f);
+                putPosUvColor(buf, i1 + 32, 0.0f, j1,
+                        (i1 + 32) * 4.8828125E-4f, j1 * 4.8828125E-4f, 1.0f, 1.0f, 1.0f, 0.8f);
+                putPosUvColor(buf, i1, 0.0f, j1,
+                        i1 * 4.8828125E-4f, j1 * 4.8828125E-4f, 1.0f, 1.0f, 1.0f, 0.8f);
             }
         }
         buf.position(0);
     }
 
     /**
-     * Refills the buffer with the fancy-cloud volume, replicating the vanilla
-     * {@code renderCloudsFancy} loop: 8x8 cells of 8x8 units (in the {@code scale(12,1,12)}
-     * space the caller set up), each extruded from {@code f2} to {@code f2+4}. The bottom
-     * face is shaded to 0.7, the top to full colour and the X/Z sides to 0.9/0.8; the UV
-     * is the cell coordinate scaled by 1/256 plus the wrapped scroll offset. Returns the
-     * number of vertices written (0 when the layer is entirely out of range).
+     * Builds the fancy-cloud volume once (vanilla's 8x8 cells of 8x8 units in the
+     * {@code scale(12,1,12)} space, each extruded from 0 to 4): the bottom face is
+     * shaded to 0.7, the top to full and the X/Z sides to 0.9/0.8 - as pure grey
+     * factors, the cloud colour rides the ColorModulator (M12). The UV is the cell
+     * coordinate scaled by 1/256; the scroll offset rides UvOffset. Both the bottom and
+     * the top face are always baked: vanilla skips one of them only when the camera is
+     * far from the layer, where the depth prepass of the nearer faces hides the skipped
+     * one anyway. Returns the vertex count.
      */
-    private static int buildFancyClouds(World world, float partialTicks, int cloudTickCounter,
-                                        double eyeX, double eyeY, double eyeZ,
-                                        float r, float g, float b) {
-        double d0 = (float) cloudTickCounter + partialTicks;
-        double d1 = (eyeX + d0 * 0.03) / 12.0;
-        double d2 = eyeZ / 12.0 + 0.33;
-        float f2 = world.provider.getCloudHeight() - (float) eyeY + 0.33f;
-        int i = MathHelper.floor(d1 / 2048.0);
-        int j = MathHelper.floor(d2 / 2048.0);
-        d1 -= (double) (i * 2048);
-        d2 -= (double) (j * 2048);
-
-        // Face shading factors relative to the (already desaturated) cloud colour.
-        float br = r * 0.7f, bg = g * 0.7f, bb = b * 0.7f;   // bottom
-        float xr = r * 0.9f, xg = g * 0.9f, xb = b * 0.9f;   // +/-X sides
-        float zr = r * 0.8f, zg = g * 0.8f, zb = b * 0.8f;   // +/-Z sides
-
-        float f16 = MathHelper.floor(d1) * 0.00390625f;
-        float f17 = MathHelper.floor(d2) * 0.00390625f;
-        float f18 = (float) (d1 - MathHelper.floor(d1));
-        float f19 = (float) (d2 - MathHelper.floor(d2));
+    private static int buildFancyClouds() {
+        // Face shading factors; the colour itself is the ColorModulator (M12).
+        float bottom = 0.7f, xSide = 0.9f, zSide = 0.8f;
 
         ByteBuffer buf = cloudBuffer;
         buf.position(0);
@@ -262,59 +281,55 @@ public class CloudRenderer {
             for (int k1 = -3; k1 <= 4; ++k1) {
                 float f21 = j1 * 8;
                 float f22 = k1 * 8;
-                float f23 = f21 - f18;
-                float f24 = f22 - f19;
-                if (f2 > -5.0f) {
-                    putPosUvColor(buf, f23, f2, f24 + 8, f21 * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, br, bg, bb, 0.8f);
-                    putPosUvColor(buf, f23 + 8, f2, f24 + 8, (f21 + 8) * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, br, bg, bb, 0.8f);
-                    putPosUvColor(buf, f23 + 8, f2, f24, (f21 + 8) * 0.00390625f + f16, f22 * 0.00390625f + f17, br, bg, bb, 0.8f);
-                    putPosUvColor(buf, f23, f2, f24, f21 * 0.00390625f + f16, f22 * 0.00390625f + f17, br, bg, bb, 0.8f);
-                }
-                if (f2 <= 5.0f) {
-                    float top = f2 + 4.0f - 9.765625E-4f;
-                    putPosUvColor(buf, f23, top, f24 + 8, f21 * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, r, g, b, 0.8f);
-                    putPosUvColor(buf, f23 + 8, top, f24 + 8, (f21 + 8) * 0.00390625f + f16, (f22 + 8) * 0.00390625f + f17, r, g, b, 0.8f);
-                    putPosUvColor(buf, f23 + 8, top, f24, (f21 + 8) * 0.00390625f + f16, f22 * 0.00390625f + f17, r, g, b, 0.8f);
-                    putPosUvColor(buf, f23, top, f24, f21 * 0.00390625f + f16, f22 * 0.00390625f + f17, r, g, b, 0.8f);
-                }
+                putPosUvColor(buf, f21, 0.0f, f22 + 8, f21 * 0.00390625f, (f22 + 8) * 0.00390625f, bottom, bottom, bottom, 0.8f);
+                putPosUvColor(buf, f21 + 8, 0.0f, f22 + 8, (f21 + 8) * 0.00390625f, (f22 + 8) * 0.00390625f, bottom, bottom, bottom, 0.8f);
+                putPosUvColor(buf, f21 + 8, 0.0f, f22, (f21 + 8) * 0.00390625f, f22 * 0.00390625f, bottom, bottom, bottom, 0.8f);
+                putPosUvColor(buf, f21, 0.0f, f22, f21 * 0.00390625f, f22 * 0.00390625f, bottom, bottom, bottom, 0.8f);
+
+                float top = 4.0f - 9.765625E-4f;
+                putPosUvColor(buf, f21, top, f22 + 8, f21 * 0.00390625f, (f22 + 8) * 0.00390625f, 1.0f, 1.0f, 1.0f, 0.8f);
+                putPosUvColor(buf, f21 + 8, top, f22 + 8, (f21 + 8) * 0.00390625f, (f22 + 8) * 0.00390625f, 1.0f, 1.0f, 1.0f, 0.8f);
+                putPosUvColor(buf, f21 + 8, top, f22, (f21 + 8) * 0.00390625f, f22 * 0.00390625f, 1.0f, 1.0f, 1.0f, 0.8f);
+                putPosUvColor(buf, f21, top, f22, f21 * 0.00390625f, f22 * 0.00390625f, 1.0f, 1.0f, 1.0f, 0.8f);
+
                 if (j1 > -1) {
                     for (int l1 = 0; l1 < 8; ++l1) {
-                        float u = (f21 + l1 + 0.5f) * 0.00390625f + f16;
-                        float x = f23 + l1;
-                        putPosUvColor(buf, x, f2, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
-                        putPosUvColor(buf, x, f2 + 4.0f, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
-                        putPosUvColor(buf, x, f2 + 4.0f, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
-                        putPosUvColor(buf, x, f2, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        float u = (f21 + l1 + 0.5f) * 0.00390625f;
+                        float x = f21 + l1;
+                        putPosUvColor(buf, x, 0.0f, f22 + 8, u, (f22 + 8) * 0.00390625f, xSide, xSide, xSide, 0.8f);
+                        putPosUvColor(buf, x, 4.0f, f22 + 8, u, (f22 + 8) * 0.00390625f, xSide, xSide, xSide, 0.8f);
+                        putPosUvColor(buf, x, 4.0f, f22, u, f22 * 0.00390625f, xSide, xSide, xSide, 0.8f);
+                        putPosUvColor(buf, x, 0.0f, f22, u, f22 * 0.00390625f, xSide, xSide, xSide, 0.8f);
                     }
                 }
                 if (j1 <= 1) {
                     for (int i2 = 0; i2 < 8; ++i2) {
-                        float u = (f21 + i2 + 0.5f) * 0.00390625f + f16;
-                        float x = f23 + i2 + 1.0f - 9.765625E-4f;
-                        putPosUvColor(buf, x, f2, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
-                        putPosUvColor(buf, x, f2 + 4.0f, f24 + 8, u, (f22 + 8) * 0.00390625f + f17, xr, xg, xb, 0.8f);
-                        putPosUvColor(buf, x, f2 + 4.0f, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
-                        putPosUvColor(buf, x, f2, f24, u, f22 * 0.00390625f + f17, xr, xg, xb, 0.8f);
+                        float u = (f21 + i2 + 0.5f) * 0.00390625f;
+                        float x = f21 + i2 + 1.0f - 9.765625E-4f;
+                        putPosUvColor(buf, x, 0.0f, f22 + 8, u, (f22 + 8) * 0.00390625f, xSide, xSide, xSide, 0.8f);
+                        putPosUvColor(buf, x, 4.0f, f22 + 8, u, (f22 + 8) * 0.00390625f, xSide, xSide, xSide, 0.8f);
+                        putPosUvColor(buf, x, 4.0f, f22, u, f22 * 0.00390625f, xSide, xSide, xSide, 0.8f);
+                        putPosUvColor(buf, x, 0.0f, f22, u, f22 * 0.00390625f, xSide, xSide, xSide, 0.8f);
                     }
                 }
                 if (k1 > -1) {
                     for (int j2 = 0; j2 < 8; ++j2) {
-                        float v = (f22 + j2 + 0.5f) * 0.00390625f + f17;
-                        float z = f24 + j2;
-                        putPosUvColor(buf, f23, f2 + 4.0f, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
-                        putPosUvColor(buf, f23 + 8, f2 + 4.0f, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
-                        putPosUvColor(buf, f23 + 8, f2, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
-                        putPosUvColor(buf, f23, f2, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        float v = (f22 + j2 + 0.5f) * 0.00390625f;
+                        float z = f22 + j2;
+                        putPosUvColor(buf, f21, 4.0f, z, f21 * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
+                        putPosUvColor(buf, f21 + 8, 4.0f, z, (f21 + 8) * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
+                        putPosUvColor(buf, f21 + 8, 0.0f, z, (f21 + 8) * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
+                        putPosUvColor(buf, f21, 0.0f, z, f21 * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
                     }
                 }
                 if (k1 <= 1) {
                     for (int k2 = 0; k2 < 8; ++k2) {
-                        float v = (f22 + k2 + 0.5f) * 0.00390625f + f17;
-                        float z = f24 + k2 + 1.0f - 9.765625E-4f;
-                        putPosUvColor(buf, f23, f2 + 4.0f, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
-                        putPosUvColor(buf, f23 + 8, f2 + 4.0f, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
-                        putPosUvColor(buf, f23 + 8, f2, z, (f21 + 8) * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
-                        putPosUvColor(buf, f23, f2, z, f21 * 0.00390625f + f16, v, zr, zg, zb, 0.8f);
+                        float v = (f22 + k2 + 0.5f) * 0.00390625f;
+                        float z = f22 + k2 + 1.0f - 9.765625E-4f;
+                        putPosUvColor(buf, f21, 4.0f, z, f21 * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
+                        putPosUvColor(buf, f21 + 8, 4.0f, z, (f21 + 8) * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
+                        putPosUvColor(buf, f21 + 8, 0.0f, z, (f21 + 8) * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
+                        putPosUvColor(buf, f21, 0.0f, z, f21 * 0.00390625f, v, zSide, zSide, zSide, 0.8f);
                     }
                 }
             }
@@ -322,6 +337,21 @@ public class CloudRenderer {
         int count = buf.position() / POSITION_TEX_COLOR.getSize();
         buf.position(0);
         return count;
+    }
+
+    /** Uploads freshly built constant geometry into a persistent device-local VBO. */
+    private static VertexBuffer uploadStatic(ByteBuffer data, int vertexCount, VertexFormat format) {
+        int size = format.getSize();
+        VertexBuffer vbo = new VertexBuffer(size * vertexCount, MemoryTypes.GPU_MEM);
+        data.position(0);
+        vbo.copyToVertexBuffer(size, vertexCount, data);
+        return vbo;
+    }
+
+    /** Indexed-quad draw of a persistent VBO through the shared quad index buffer. */
+    private static void drawStaticQuads(Drawer drawer, VertexBuffer vbo, int vertexCount) {
+        AutoIndexBuffer quads = drawer.getQuadsIndexBuffer();
+        drawer.draw(vbo, quads.getIndexBuffer(vertexCount), vertexCount * 3 / 2, 7);
     }
 
     // --- cloud texture ---

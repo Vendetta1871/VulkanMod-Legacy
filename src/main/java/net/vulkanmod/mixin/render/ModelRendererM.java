@@ -40,6 +40,11 @@ public abstract class ModelRendererM {
 
     private float vulkanmod$scale;
 
+    // Soft-implemented field merged into ModelRenderer: this part's rebuilt geometry,
+    // replayed instead of rebuilt on the CPU every frame (M13). It dies with the part,
+    // so a renderer reload (F3+A) drops the cache with the model.
+    private EntityRenderer.PartCache vulkanmod$partCache;
+
     @Inject(method = {"render(F)V", "renderWithRotation(F)V"}, at = @At("HEAD"))
     private void vulkanmod$storeScale(float scale, CallbackInfo ci) {
         this.vulkanmod$scale = scale;
@@ -50,18 +55,32 @@ public abstract class ModelRendererM {
     private void vulkanmod$rebuildOrCallList(int list) {
         if (EntityRenderer.isEntityPass() || EntityRenderer.isHandPass()) {
             net.vulkanmod.debug.FrameProfiler.entityRebuildBegin();
+            float scale = this.vulkanmod$scale;
+            long signature = vulkanmod$geometrySignature();
+            EntityRenderer.PartCache cache = this.vulkanmod$partCache;
+            if (cache != null && cache.scale == scale && cache.signature == signature) {
+                // The boxes have not changed since the cache entry: replay the vertices
+                // under this part's live matrix instead of rebuilding them (M13).
+                EntityRenderer.submitCachedPart(cache.data, cache.vertexCount);
+                net.vulkanmod.debug.FrameProfiler.entityRebuildEnd();
+                return;
+            }
+
             // Accumulate the part's quads (each box.render flushes one quad) and issue them
             // as a single draw - they all share this part's model-view, texture and tint.
+            // Without batching the quads go out one draw each and there is no staging to
+            // snapshot, so nothing is cached.
             boolean batch = EntityRenderer.BATCH_PARTS;
             if (batch) {
                 EntityRenderer.beginPart();
             }
             BufferBuilder buffer = Tessellator.getInstance().getBuffer();
             for (ModelBox box : this.vulkanmod$getCubeList()) {
-                box.render(buffer, this.vulkanmod$scale);
+                box.render(buffer, scale);
             }
             if (batch) {
                 EntityRenderer.endPart();
+                this.vulkanmod$partCache = EntityRenderer.recordPart(scale, signature);
             }
             net.vulkanmod.debug.FrameProfiler.entityRebuildEnd();
         } else if (net.vulkanmod.render.GuiRenderer.isGuiPass()) {
@@ -75,6 +94,27 @@ public abstract class ModelRendererM {
         } else {
             GlStateManager.callList(list);
         }
+    }
+
+    /**
+     * Cheap fingerprint of the part's baked geometry: box count and corner coordinates.
+     * Models that mutate their boxes at render time (books, beds) change the corners and
+     * force a rebuild; texture offsets are baked into the box vertices at construction
+     * and have no setter, so the corners cover every way the geometry can change.
+     * Rotations ride the modelview and never touch the boxes.
+     */
+    private long vulkanmod$geometrySignature() {
+        List<ModelBox> boxes = this.vulkanmod$getCubeList();
+        long h = 0x9E3779B97F4A7C15L * boxes.size();
+        for (ModelBox box : boxes) {
+            h = h * 31 + Float.floatToIntBits(box.posX1);
+            h = h * 31 + Float.floatToIntBits(box.posY1);
+            h = h * 31 + Float.floatToIntBits(box.posZ1);
+            h = h * 31 + Float.floatToIntBits(box.posX2);
+            h = h * 31 + Float.floatToIntBits(box.posY2);
+            h = h * 31 + Float.floatToIntBits(box.posZ2);
+        }
+        return h;
     }
 
     @Inject(method = "compileDisplayList(F)V", at = @At("HEAD"))

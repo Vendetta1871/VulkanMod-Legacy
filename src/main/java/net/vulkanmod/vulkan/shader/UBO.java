@@ -35,6 +35,50 @@ public class UBO extends AlignedStruct {
         buffer.position(0);
     }
 
+    // H10: the UBO ring is a per-frame bump allocator, so an offset uploaded earlier in
+    // the same window keeps its bytes for the whole window. When update() just produced
+    // byte-identical data to that upload, the ring slot and memcpy are skipped and the
+    // old offset is reused.
+    private long lastWindow = -1;
+    private int lastGeneration = -1;
+    private int lastOffset;
+    private byte[] lastBytes = new byte[0];
+
+    /** After update(): true when this draw must go into a fresh ring slot. */
+    public boolean needsUpload(long window, int generation) {
+        int len = buffer.limit();
+        if (window == lastWindow && generation == lastGeneration && len == lastBytes.length) {
+            boolean same = true;
+            for (int i = 0; i < len; ++i) {
+                if (buffer.get(i) != lastBytes[i]) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Remembers the bytes behind the ring offset just handed out. */
+    public void recordUpload(long window, int generation, int offset) {
+        int len = buffer.limit();
+        if (lastBytes.length != len) {
+            lastBytes = new byte[len];
+        }
+        buffer.get(0, lastBytes, 0, len);
+        lastWindow = window;
+        lastGeneration = generation;
+        lastOffset = offset;
+    }
+
+    /** The offset recorded by the last {@link #recordUpload}; valid in its window. */
+    public int getLastOffset() {
+        return lastOffset;
+    }
+
     public int getBinding() {
         return binding;
     }

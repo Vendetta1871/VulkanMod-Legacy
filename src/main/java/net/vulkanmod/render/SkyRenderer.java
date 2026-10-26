@@ -428,8 +428,7 @@ public class SkyRenderer {
     /** Indexed-quad draw of a persistent VBO through the shared quad index buffer. */
     private static void drawStaticQuads(Drawer drawer, VertexBuffer vbo, int vertexCount) {
         AutoIndexBuffer quads = drawer.getQuadsIndexBuffer();
-        quads.checkCapacity(vertexCount);
-        drawer.draw(vbo, quads.getIndexBuffer(), vertexCount * 3 / 2, 7);
+        drawer.draw(vbo, quads.getIndexBuffer(vertexCount), vertexCount * 3 / 2, 7);
     }
 
     /**

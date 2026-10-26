@@ -78,6 +78,35 @@ public class GuiRenderer {
     private static ByteBuffer imBuffer;
     private static final int IM_STRIDE = 20; // POSITION_TEX: 3 + 2 floats
 
+    // --- glyph batching (M11/N18) ---
+    // FontRenderer emits one begin(QUADS)+4-vertex+draw per glyph with the matrix, the
+    // texture and the colour constant across the whole string. Consecutive POSITION_TEX
+    // quad draws that still share all three accumulate here and go out as one Vulkan
+    // draw; any other draw, an immediate-mode run, a blit or the frame end flushes the
+    // batch first, so paint order is preserved. The matrices, colour and blend are
+    // captured when the batch opens - state may move on before the flush (a colour code
+    // or a mod's translate with no draw in between), and the batched vertices belong to
+    // the state they were captured under.
+    private static ByteBuffer glyphBatch;
+    private static int glyphBatchVerts;
+    private static VulkanImage glyphTexture;
+    private static long glyphMatrixVersion;
+    private static float glyphR, glyphG, glyphB, glyphA;
+    private static Pipeline.BlendState glyphBlend;
+    // Alpha test rides the pipeline variant key, so it is part of the batch identity too.
+    private static boolean glyphAlphaTest;
+    private static int glyphAlphaFunc;
+    private static float glyphAlphaRef;
+    private static final org.joml.Matrix4f glyphModelView = new org.joml.Matrix4f();
+    private static final org.joml.Matrix4f glyphProjection = new org.joml.Matrix4f();
+    // Capped at 65536 vertices so the batch stays in the shared UINT16 index range (N25).
+    private static final int GLYPH_BATCH_MAX = 65536;
+
+    // The GUI projection is a pass constant (setupOverlayRendering sets it through
+    // GlStateManager.ortho); re-read it only after a matrix op bumped the version
+    // instead of once per draw (M11).
+    private static long projVersion = -1;
+
     private static boolean loggedFirst;
     private static int errorLogs;
 
@@ -143,6 +172,9 @@ public class GuiRenderer {
     }
 
     public static void setSuppressDraw(boolean value) {
+        if (value) {
+            flushGlyphBatch(); // the blit composites over what was drawn before it
+        }
         suppressDraw = value;
     }
 
@@ -227,6 +259,32 @@ public class GuiRenderer {
             }
         }
 
+        // Glyph batching (M11/N18): FontRenderer's per-glyph quad draws share texture,
+        // colour and matrix across the string; accumulate them into one draw.
+        if (format == POSITION_TEX && drawMode == 7) {
+            if (vertexCount <= GLYPH_BATCH_MAX) {
+                long version = VRenderSystem.getMatrixVersion();
+                if (glyphBatchVerts > 0 && (texture != glyphTexture || version != glyphMatrixVersion
+                        || VRenderSystem.trackedColorR != glyphR || VRenderSystem.trackedColorG != glyphG
+                        || VRenderSystem.trackedColorB != glyphB || VRenderSystem.trackedColorA != glyphA
+                        || VRenderSystem.getAlphaFunc() != (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
+                        || VRenderSystem.getAlphaRef() != glyphAlphaRef)) {
+                    flushGlyphBatch();
+                }
+                if (glyphBatchVerts + vertexCount > GLYPH_BATCH_MAX) {
+                    flushGlyphBatch();
+                }
+                if (glyphBatchVerts == 0) {
+                    startGlyphBatch(texture, version);
+                }
+                appendGlyphBatch(buffer, vertexCount);
+                return;
+            }
+            flushGlyphBatch(); // oversized quad draw: keep the submission order
+        } else {
+            flushGlyphBatch();
+        }
+
         Drawer drawer = Drawer.getInstance();
 
         // OLDMODEL_POSITION_TEX_NORMAL arrives from the TESR dispatcher of builtin item
@@ -284,14 +342,120 @@ public class GuiRenderer {
         }
     }
 
+    /** Opens a glyph batch: captures the state the accumulated quads belong to (M11/N18). */
+    private static void startGlyphBatch(VulkanImage texture, long version) {
+        if (glyphBatch == null) {
+            glyphBatch = MemoryUtil.memAlloc(GLYPH_BATCH_MAX * IM_STRIDE);
+        }
+        glyphBatch.position(0);
+        glyphTexture = texture;
+        glyphMatrixVersion = version;
+        glyphR = VRenderSystem.trackedColorR;
+        glyphG = VRenderSystem.trackedColorG;
+        glyphB = VRenderSystem.trackedColorB;
+        glyphA = VRenderSystem.trackedColorA;
+        glyphBlend = VRenderSystem.getBlendState();
+        glyphAlphaTest = VRenderSystem.alphaTest;
+        glyphAlphaFunc = VRenderSystem.alphaTestFunc;
+        glyphAlphaRef = VRenderSystem.alphaTestRef;
+        VRenderSystem.updateProjectionMatrix();
+        VRenderSystem.updateModelViewMatrix();
+        glyphModelView.set(VRenderSystem.getModelViewMatrix4f());
+        glyphProjection.set(VRenderSystem.getProjectionMatrix4f());
+    }
+
+    /** Copies one glyph's four textured vertices into the batch (positions are raw). */
+    private static void appendGlyphBatch(BufferBuilder buffer, int vertexCount) {
+        ByteBuffer src = buffer.getByteBuffer();
+        int prevPos = src.position();
+        int prevLimit = src.limit();
+        src.position(0);
+        src.limit(vertexCount * POSITION_TEX.getSize());
+        glyphBatch.put(src);
+        src.position(prevPos);
+        src.limit(prevLimit);
+        glyphBatchVerts += vertexCount;
+    }
+
+    /**
+     * Issues the accumulated glyphs under the state captured when the batch opened -
+     * the matrix may have moved on since the last append (a colour code or a translate
+     * with no draw in between), and the vertices belong to the old one.
+     */
+    private static void flushGlyphBatch() {
+        if (glyphBatchVerts <= 0) {
+            return;
+        }
+        int n = glyphBatchVerts;
+        glyphBatchVerts = 0;
+        if (!Drawer.isActive()) {
+            return; // the frame closed without a flush point; dropping beats a stale draw
+        }
+        try {
+            // Draw under the state captured at batch start; the live state may have moved
+            // on (a colour code, an alpha toggle with no draw in between), and the batched
+            // vertices belong to the old one. The live state is restored afterwards so
+            // later draws see what they expect.
+            boolean liveAlphaTest = VRenderSystem.alphaTest;
+            int liveAlphaFunc = VRenderSystem.alphaTestFunc;
+            float liveAlphaRef = VRenderSystem.alphaTestRef;
+            Pipeline.BlendState liveBlend = Drawer.currentBlendState;
+            VRenderSystem.alphaTest = glyphAlphaTest;
+            VRenderSystem.alphaTestFunc = glyphAlphaFunc;
+            VRenderSystem.alphaTestRef = glyphAlphaRef;
+            try {
+                VRenderSystem.applyModelViewMatrix(glyphModelView);
+                VRenderSystem.applyProjectionMatrix(glyphProjection);
+                VRenderSystem.calculateMVP();
+                applyGuiState(guiPipeline, glyphTexture, false);
+                VRenderSystem.setShaderColor(glyphR, glyphG, glyphB, glyphA);
+                Drawer.currentBlendState = glyphBlend;
+                glyphBatch.position(0);
+                Drawer.getInstance().draw(glyphBatch, 7, POSITION_TEX, n);
+            } finally {
+                VRenderSystem.alphaTest = liveAlphaTest;
+                VRenderSystem.alphaTestFunc = liveAlphaFunc;
+                VRenderSystem.alphaTestRef = liveAlphaRef;
+                Drawer.currentBlendState = liveBlend;
+            }
+        } catch (Throwable t) {
+            if (errorLogs++ < 3) {
+                Initializer.LOGGER.error("[gui] glyph batch draw error (verts={})", n, t);
+            }
+        }
+    }
+
+    /**
+     * Flushes a pending glyph batch; called before the frame is closed and presented
+     * (Initializer.presentFrame) so the batch lands in the frame its draws came from.
+     */
+    public static void flushPendingDraws() {
+        flushGlyphBatch();
+    }
+
     /**
      * Mirrors the GUI render state from the live GL / tracked {@code GlStateManager}
      * values and binds the pipeline (and texture, when {@code texture} is non-null).
      * Shared by the BufferBuilder replay and the immediate-mode (font) replay.
      */
     private static void applyGuiState(Pipeline pipeline, VulkanImage texture) {
-        VRenderSystem.updateProjectionMatrix();
-        VRenderSystem.updateModelViewMatrix();
+        applyGuiState(pipeline, texture, true);
+    }
+
+    /** @param readMatrices false when the caller installed its own captured matrices. */
+    private static void applyGuiState(Pipeline pipeline, VulkanImage texture, boolean readMatrices) {
+        if (readMatrices) {
+            // M11: the projection is a pass constant (setupOverlayRendering sets it via
+            // GlStateManager.ortho), so re-read it only after a matrix op bumped the
+            // version instead of once per draw. The modelview moves with every element,
+            // so it stays a fresh query.
+            long version = VRenderSystem.getMatrixVersion();
+            if (version != projVersion) {
+                VRenderSystem.updateProjectionMatrix();
+                projVersion = version;
+            }
+            VRenderSystem.updateModelViewMatrix();
+        }
 
         // The overlay is drawn with fog disabled and the Kirino GL layer does not
         // answer the fog query, so the GUI never fogs (matching vanilla's look).
@@ -356,6 +520,9 @@ public class GuiRenderer {
     // --- Immediate-mode capture entry points (called by GlStateManagerImmediateM) ---
 
     public static void immediateBegin(int mode) {
+        // A pending glyph batch was submitted before this run's draw, so it must go out
+        // first (submission order is the GUI's paint order).
+        flushGlyphBatch();
         // World-space text (name tags, sign text) is drawn by FontRenderer inside the
         // entity pass; it replays with the live world matrices instead of the overlay.
         boolean worldText = !guiPass && EntityRenderer.isEntityPass();

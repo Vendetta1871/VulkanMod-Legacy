@@ -230,6 +230,9 @@ public class EntityRenderer {
         particlePass = false;
         entityPassDepth = 0;
         tesrLight = -1;
+        // A throw inside compileDisplayList would leave the compile flag set and silently
+        // drop every entity capture for the rest of the session (M13).
+        compiling = false;
         // Drop any weather left un-flushed by an aborted frame before re-capturing this one.
         weatherPending = false;
         weatherVerts = 0;
@@ -350,6 +353,11 @@ public class EntityRenderer {
     public static void beginPart() {
         accumulating = true;
         stagingVerts = 0;
+        lastPartVerts = 0;
+        // endPart shrank the limit to the previous part's size; the growth check in
+        // accumulate tests capacity, so a part bigger than its predecessor (a multi-box
+        // part following a one-box part) would put past the shrunken limit.
+        staging.limit(staging.capacity());
     }
 
     /** Closes the accumulation window and issues the part as one draw (its model-view). */
@@ -360,9 +368,57 @@ public class EntityRenderer {
         }
         int n = stagingVerts;
         stagingVerts = 0;
+        lastPartVerts = n;
         staging.position(0);
         staging.limit(n * MODEL_FORMAT.getSize());
         submit(staging, n, MODEL_FORMAT, entityPipeline);
+    }
+
+    /** Vertices the last endPart() submitted; 0 when the part produced nothing. */
+    private static int lastPartVerts;
+
+    /**
+     * Snapshot of one model part's rebuilt geometry (M13): the boxes of a ModelRenderer
+     * are static for the lifetime of the model, so the rebuilt vertices are replayed
+     * from the cache instead of being rebuilt on the CPU every frame.
+     */
+    public static class PartCache {
+        public final ByteBuffer data;
+        public final int vertexCount;
+        public final float scale;
+        public final long signature;
+
+        PartCache(ByteBuffer data, int vertexCount, float scale, long signature) {
+            this.data = data;
+            this.vertexCount = vertexCount;
+            this.scale = scale;
+            this.signature = signature;
+        }
+    }
+
+    /**
+     * Copies the geometry the last endPart() submitted into a cache entry for the
+     * calling part; null when the part produced nothing (nothing worth caching).
+     */
+    public static PartCache recordPart(float scale, long signature) {
+        int n = lastPartVerts;
+        if (n <= 0) {
+            return null;
+        }
+        int bytes = n * MODEL_FORMAT.getSize();
+        ByteBuffer data = org.lwjgl.system.MemoryUtil.memAlloc(bytes);
+        staging.position(0);
+        staging.limit(bytes);
+        data.put(staging);
+        data.flip();
+        return new PartCache(data, n, scale, signature);
+    }
+
+    /** Replays a cached part's geometry under the live part matrix (M13). */
+    public static void submitCachedPart(ByteBuffer data, int vertexCount) {
+        data.position(0);
+        data.limit(vertexCount * MODEL_FORMAT.getSize());
+        submit(data, vertexCount, MODEL_FORMAT, entityPipeline);
     }
 
     /** Replays {@code data} (position 0, {@code vertexCount} verts of {@code format}) in Vulkan. */
@@ -505,7 +561,7 @@ public class EntityRenderer {
         weatherVerts += vertexCount;
 
         if (!weatherPending) {
-            VRenderSystem.modelViewMatrix.asFloatBuffer().position(0).limit(16).get(weatherMV);
+            VRenderSystem.getModelViewMatrix4f().get(weatherMV);
             // Snapshot the tracked GlStateManager state (see submit()): the weather is
             // replayed after the translucent layer, when the live state has moved on.
             weatherTint[0] = VRenderSystem.trackedColorR;
@@ -545,7 +601,7 @@ public class EntityRenderer {
         }
         try {
             VRenderSystem.modelViewMatrix.position(0);
-            VRenderSystem.modelViewMatrix.asFloatBuffer().position(0).limit(16).put(weatherMV);
+            VRenderSystem.getModelViewMatrix4f().put(weatherMV);
             VRenderSystem.updateProjectionMatrix();
             VRenderSystem.calculateMVP();
 

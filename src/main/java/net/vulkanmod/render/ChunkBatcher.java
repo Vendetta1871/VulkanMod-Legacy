@@ -201,8 +201,7 @@ public class ChunkBatcher {
 
         Drawer drawer = Drawer.getInstance();
         AutoIndexBuffer autoIndex = drawer.getQuadsIndexBuffer();
-        autoIndex.checkCapacity(layerMaxVerts);
-        IndexBuffer indexBuffer = autoIndex.getIndexBuffer();
+        IndexBuffer indexBuffer = autoIndex.getIndexBuffer(layerMaxVerts);
 
         drawer.bindPipeline(pipeline);
         drawer.uploadAndBindUBOs(pipeline);

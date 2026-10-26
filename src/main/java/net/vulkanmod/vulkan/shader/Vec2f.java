@@ -17,6 +17,7 @@ public class Vec2f extends Field {
 
     void setFunction() {
         if (this.name.equals("ScreenSize")) this.set = VRenderSystem::getScreenSize;
+        else if (this.name.equals("UvOffset")) this.set = VRenderSystem::getCloudUvOffset;
     }
 
     void update(FloatBuffer fb) {

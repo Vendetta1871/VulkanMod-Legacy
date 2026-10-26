@@ -193,11 +193,10 @@ public class VBO {
 
             Drawer drawer = Drawer.getInstance();
             AutoIndexBuffer autoIndexBuffer = drawer.getQuadsIndexBuffer();
-            autoIndexBuffer.checkCapacity(vertexCount);
 
             // GL_QUADS -> indexed triangles (4 vertices -> 6 indices)
             TerrainRenderer.countDraw(TerrainRenderer.currentLayer, vertexCount);
-            drawer.draw(vertexBuffer, autoIndexBuffer.getIndexBuffer(), vertexCount * 3 / 2, 7);
+            drawer.draw(vertexBuffer, autoIndexBuffer.getIndexBuffer(vertexCount), vertexCount * 3 / 2, 7);
         } catch (Throwable t) {
             net.vulkanmod.render.TerrainRenderer.reportOnce("chunk draw", t);
         }

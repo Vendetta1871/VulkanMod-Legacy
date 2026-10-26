@@ -104,7 +104,11 @@ public class MemoryTypes {
                 GPU_MEM.type = MemoryType.Type.DEVICE_LOCAL;
             }
 
-            if(memoryType.propertyFlags() == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) {
+            // Host-coherent mappable memory. CACHED is a bonus, not a requirement (M10):
+            // matching the exact triple left HOST_MEM null on drivers whose coherent host
+            // type is uncached, forcing the slower fallback.
+            if((memoryType.propertyFlags() & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+                    == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
                 HOST_MEM = new MemoryType() {
                     @Override
                     void createBuffer(Buffer buffer, int size) {
@@ -114,14 +118,12 @@ public class MemoryTypes {
                             LongBuffer pBuffer = stack.mallocLong(1);
                             PointerBuffer pAllocation = stack.pointers(VK_NULL_HANDLE);
 
-                            // Explicit coherent host memory: VMA AUTO + HOST_ACCESS_* can
-                            // pick a non-coherent type, and nothing in this codebase calls
-                            // vmaFlushAllocation, so writes would never reach the GPU.
-                            MemoryManager.createBuffer(size,
-                                    buffer.usage,
-                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-                                    pBuffer,
-                                    pAllocation);
+                            // VMA picks the type (M10): a coherent DEVICE_LOCAL|HOST_VISIBLE
+                            // one when the BAR lets the CPU write into VRAM, a coherent host
+                            // type otherwise. HOST_COHERENT is a hard requirement in the
+                            // create info, so the old "AUTO may pick non-coherent" hazard
+                            // (writes never reaching the GPU without a flush) is closed.
+                            MemoryManager.createBufferHostAccess(size, buffer.usage, pBuffer, pAllocation);
 
                             buffer.setId(pBuffer.get(0));
                             buffer.setAllocation(pAllocation.get(0));

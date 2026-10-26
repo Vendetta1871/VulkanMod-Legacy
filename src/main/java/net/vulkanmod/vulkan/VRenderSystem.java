@@ -103,6 +103,13 @@ public class VRenderSystem {
     public static ByteBuffer TextureMatrix = MemoryUtil.memAlloc(16 * 4);
     public static ByteBuffer MVP = MemoryUtil.memAlloc(16 * 4);
 
+    // Cached FloatBuffer views of the matrix mirrors: asFloatBuffer() allocates a fresh
+    // view per call, which the JFR profile showed as a per-draw DirectFloatBufferU
+    // allocation (updateModelViewMatrix runs once per entity part and chunk draw).
+    // Users must position(0)/limit(16) before reading, as before.
+    private static final FloatBuffer modelViewMatrixF = modelViewMatrix.asFloatBuffer();
+    private static final FloatBuffer projectionMatrixF = projectionMatrix.asFloatBuffer();
+
     public static ByteBuffer ChunkOffset = MemoryUtil.memAlloc(3 * 4);
     public static ByteBuffer lightDirection0 = MemoryUtil.memAlloc(3 * 4);
     public static ByteBuffer lightDirection1 = MemoryUtil.memAlloc(3 * 4);
@@ -163,13 +170,30 @@ public class VRenderSystem {
      */
     public static void updateModelViewMatrix() {
         org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_MODELVIEW_MATRIX,
-                modelViewMatrix.asFloatBuffer().position(0).limit(16));
+                modelViewMatrixF.position(0).limit(16));
         calculateMVP();
     }
 
     public static void updateProjectionMatrix() {
         org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_PROJECTION_MATRIX,
-                projectionMatrix.asFloatBuffer().position(0).limit(16));
+                projectionMatrixF.position(0).limit(16));
+    }
+
+    /**
+     * Bumped by the GlStateManager matrix-method hooks (GlStateManagerMatrixM). The GUI
+     * pass caches the projection matrix on it and batches font glyphs with it: while the
+     * counter holds, no matrix op ran, so a matrix read earlier is still current. Vanilla
+     * GUI code drives every matrix op through GlStateManager; a mod mutating the matrix
+     * stack through raw GL11 inside a GuiScreen would slip past the counter.
+     */
+    private static long matrixVersion;
+
+    public static long getMatrixVersion() {
+        return matrixVersion;
+    }
+
+    public static void bumpMatrixVersion() {
+        ++matrixVersion;
     }
 
     public static void applyMVP(Matrix4f MV, Matrix4f P) {
@@ -206,8 +230,8 @@ public class VRenderSystem {
             0, 0, 0.5f, 1f);
 
     public static void calculateMVP() {
-        SCRATCH_MV.set(modelViewMatrix.asFloatBuffer().position(0));
-        SCRATCH_P.set(projectionMatrix.asFloatBuffer().position(0));
+        SCRATCH_MV.set(modelViewMatrixF.position(0).limit(16));
+        SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
 
         DEPTH_REMAP.mul(SCRATCH_P, SCRATCH_T1).mul(SCRATCH_MV, SCRATCH_T2);
 
@@ -223,8 +247,8 @@ public class VRenderSystem {
     public static void captureCameraMatrices(org.joml.Matrix4f outModelView, org.joml.Matrix4f outProjRemap) {
         updateProjectionMatrix();
         updateModelViewMatrix();
-        outModelView.set(modelViewMatrix.asFloatBuffer().position(0));
-        SCRATCH_P.set(projectionMatrix.asFloatBuffer().position(0));
+        outModelView.set(modelViewMatrixF.position(0).limit(16));
+        SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
         DEPTH_REMAP.mul(SCRATCH_P, outProjRemap);
     }
 
@@ -269,7 +293,7 @@ public class VRenderSystem {
             return; // positional or zero light: the item paths only use directional ones
         }
         updateModelViewMatrix();
-        LIGHT_SCRATCH_MV.set(modelViewMatrix.asFloatBuffer().position(0));
+        LIGHT_SCRATCH_MV.set(modelViewMatrixF.position(0).limit(16));
         LIGHT_SCRATCH_MV.transformDirection(dir.normalize());
         writeDirection(light == 16384 ? lightDirection0 : lightDirection1, dir);
     }
@@ -396,11 +420,11 @@ public class VRenderSystem {
     }
 
     public static FloatBuffer getProjectionMatrix4f() {
-        return projectionMatrix.asFloatBuffer().position(0).limit(16);
+        return projectionMatrixF.position(0).limit(16);
     }
 
     public static FloatBuffer getModelViewMatrix4f() {
-        return modelViewMatrix.asFloatBuffer().position(0).limit(16);
+        return modelViewMatrixF.position(0).limit(16);
     }
 
     public static void setChunkOffset(float f1, float f2, float f3) {
@@ -583,6 +607,18 @@ public class VRenderSystem {
     public static Vector2f getScreenSize() {
         Minecraft mc = Minecraft.getMinecraft();
         return new Vector2f((float) mc.displayWidth, (float) mc.displayHeight);
+    }
+
+    // Cloud UV scroll offset (M12): the persistent cloud VBO carries the cell-local UV,
+    // the per-frame scroll/camera UV offset rides this UBO field instead of the vertices.
+    private static final Vector2f cloudUvOffset = new Vector2f();
+
+    public static void setCloudUvOffset(float u, float v) {
+        cloudUvOffset.set(u, v);
+    }
+
+    public static Vector2f getCloudUvOffset() {
+        return cloudUvOffset;
     }
 
     public static void setWindow(long window) {

@@ -22,6 +22,10 @@ public class UniformBuffers {
     // be reused after a resize.
     private int generation;
 
+    // Bumped by reset() at the start of every frame; identifies the window during which
+    // uploaded UBO offsets keep their bytes (H10 offset reuse).
+    private long resetCount;
+
     private List<UniformBuffer> uniformBuffers;
 
     private final static int minOffset = (int) deviceProperties.limits().minUniformBufferOffsetAlignment();
@@ -97,6 +101,14 @@ public class UniformBuffers {
 
     public void reset() {
         usedBytes = 0;
+        // Identifies the frame window for UBO offset reuse (H10): uploaded offsets keep
+        // their bytes until this reset, and the frame-slot index alone repeats every
+        // three frames.
+        ++resetCount;
+    }
+
+    public long getResetCount() {
+        return resetCount;
     }
 
     public int getUsedBytes() {
