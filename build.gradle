@@ -64,7 +64,13 @@ cleanroom {
                 // loader's SDL is invalid there). Instead the classes/resources dirs and the
                 // Vulkan-related LWJGL jars are handed to the LaunchClassLoader only, through
                 // crl.dev.extrapath, and the coremod registers the mixin config early.
-                jvmArgs '-Dfml.coreMods.load=net.vulkanmod.coremod.VulkanModCore'
+                // Benchmark toggle: -PnoMod runs the stock loader without this mod
+                // (the classes never reach the LaunchClassLoader, so FML cannot find
+                // the mod at all). Used for three-way performance comparisons.
+                def noMod = project.hasProperty('noMod')
+                if (!noMod) {
+                    jvmArgs '-Dfml.coreMods.load=net.vulkanmod.coremod.VulkanModCore'
+                }
                 if (extra_jvm_args) {
                     jvmArgs extra_jvm_args.tokenize()
                 }
@@ -72,10 +78,12 @@ cleanroom {
                         ([sourceSets.main.output.resourcesDir] as Set)) as List
                 def ownSet = ownDirs as Set
                 doFirst {
-                    def vulkanJars = classpath.files.findAll {
-                        it.name ==~ /lwjgl-(vulkan|vma|shaderc).*\.jar/ && !it.name.contains('windows')
+                    if (!noMod) {
+                        def vulkanJars = classpath.files.findAll {
+                            it.name ==~ /lwjgl-(vulkan|vma|shaderc).*\.jar/ && !it.name.contains('windows')
+                        }
+                        jvmArgs "-Dcrl.dev.extrapath=${(ownDirs + vulkanJars).join(File.pathSeparator)}"
                     }
-                    jvmArgs "-Dcrl.dev.extrapath=${(ownDirs + vulkanJars).join(File.pathSeparator)}"
                     classpath = classpath.filter { !ownSet.contains(it) }
                 }
             }
