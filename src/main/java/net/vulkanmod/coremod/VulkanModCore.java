@@ -56,8 +56,13 @@ public class VulkanModCore implements IFMLLoadingPlugin, IEarlyMixinLoader {
     private static boolean isDedicatedServer() {
         // MUST NOT touch any Minecraft class here: loading a class that a queued
         // mixin targets makes Mixin prepare reject the whole config ("loaded too
-        // early"). The launch tweaker list is the safe marker for the client run.
-        Object tweakClasses = net.minecraft.launchwrapper.Launch.blackboard.get("TweakClasses");
-        return tweakClasses != null && tweakClasses.toString().contains("FMLServerTweaker");
+        // early"). FMLLaunchHandler is FML's own relauncher, not a Minecraft class,
+        // and it is already initialised when this runs: both tweakers call
+        // configureForClientLaunch/configureForServerLaunch (which sets the side)
+        // before appendCoreMods() reaches this coremod (L14 - the previous
+        // Launch.blackboard "TweakClasses" string sniff depended on the launcher
+        // populating that key before coremod discovery, which is not guaranteed).
+        return net.minecraftforge.fml.relauncher.FMLLaunchHandler.side()
+                == net.minecraftforge.fml.relauncher.Side.SERVER;
     }
 }

@@ -17,9 +17,12 @@ java {
 }
 
 // Bundles the Vulkan-related LWJGL jars (and their natives) into the shipped mod jar;
-// see the vulkanBundle dependencies below.
+// see the vulkanBundle dependencies below. Non-transitive (N27): the transitive
+// closure pulled org.lwjgl:lwjgl core and ~400 org/lwjgl/system classes into the jar,
+// duplicating the LWJGL Cleanroom already ships (two copies can mix on a loader bump).
+// Every artifact the jar actually needs is declared explicitly below.
 configurations {
-    vulkanBundle
+    vulkanBundle { transitive = false }
 }
 
 dependencies {
@@ -67,7 +70,9 @@ cleanroom {
                 // Benchmark toggle: -PnoMod runs the stock loader without this mod
                 // (the classes never reach the LaunchClassLoader, so FML cannot find
                 // the mod at all). Used for three-way performance comparisons.
-                def noMod = project.hasProperty('noMod')
+                // hasProperty() is true for -PnoMod=false too (N29); only an absent
+                // property or the literal 'false' keeps the mod enabled.
+                def noMod = project.findProperty('noMod') in [null, 'false'] ? false : true
                 if (!noMod) {
                     jvmArgs '-Dfml.coreMods.load=net.vulkanmod.coremod.VulkanModCore'
                 }

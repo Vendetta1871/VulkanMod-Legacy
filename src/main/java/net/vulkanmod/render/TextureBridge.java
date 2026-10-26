@@ -222,13 +222,15 @@ public class TextureBridge {
         int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texId);
 
-        // Vanilla uploads 4 mip levels to the atlas; mirror every level the GL texture
-        // actually exposes (a GL backend that keeps no mip storage reports level 1 empty
-        // and the mirror degrades to the old single-level image).
-        int[] levelWidths = new int[4];
-        int[] levelHeights = new int[4];
+        // Vanilla uploads mipmapLevels+1 levels to the atlas (5 with the default 4);
+        // mirror every level the GL texture actually exposes (a GL backend that keeps
+        // no mip storage reports level 1 empty and the mirror degrades to the old
+        // single-level image). Probing only 4 dropped the last mip (N20).
+        int maxLevels = Math.min(mc.gameSettings.mipmapLevels + 1, 16);
+        int[] levelWidths = new int[maxLevels];
+        int[] levelHeights = new int[maxLevels];
         int levels = 0;
-        for (int lvl = 0; lvl < 4; lvl++) {
+        for (int lvl = 0; lvl < maxLevels; lvl++) {
             levelWidths[lvl] = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, lvl, GL11.GL_TEXTURE_WIDTH);
             levelHeights[lvl] = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, lvl, GL11.GL_TEXTURE_HEIGHT);
             if (levelWidths[lvl] <= 0 || levelHeights[lvl] <= 0) {

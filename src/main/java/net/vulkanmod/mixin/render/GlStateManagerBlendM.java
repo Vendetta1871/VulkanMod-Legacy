@@ -50,16 +50,10 @@ public class GlStateManagerBlendM {
         }
     }
 
-    @Inject(method = "color(FFF)V", at = @At("HEAD"))
-    private static void vulkanmod$color3(float r, float g, float b, CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
-            VRenderSystem.trackedColorR = r;
-            VRenderSystem.trackedColorG = g;
-            VRenderSystem.trackedColorB = b;
-            VRenderSystem.trackedColorA = 1;
-        }
-    }
-
+    /**
+     * Tracks the current vertex colour. Vanilla's {@code color(FFF)} is just
+     * {@code color(r, g, b, 1)} delegating here, so one hook covers both signatures (L14).
+     */
     @Inject(method = "color(FFFF)V", at = @At("HEAD"))
     private static void vulkanmod$color4(float r, float g, float b, float a, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {

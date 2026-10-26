@@ -119,6 +119,14 @@ public class Initializer {
         } catch (Throwable t) {
             initGaveUp = true;
             LOGGER.error("Vulkan initialization failed, falling back to OpenGL", t);
+            // M20: release whatever init managed to create (device, surface, VMA,
+            // instance) before handing the window back to the GL path. A cleanup
+            // failure must not mask the original error.
+            try {
+                net.vulkanmod.vulkan.Vulkan.cleanUp();
+            } catch (Throwable cleanupFailure) {
+                LOGGER.error("Vulkan cleanup after failed init also failed", cleanupFailure);
+            }
         }
     }
 

@@ -313,10 +313,28 @@ public class Vulkan {
      * or when initialization never reached device creation.
      */
     public static void cleanUp() {
-        if(cleanedUp || device == null) {
+        if(cleanedUp) {
             return;
         }
         cleanedUp = true;
+
+        if(device == null) {
+            // M20: initialization can fail before the device exists (instance or
+            // surface creation, vkCreateDevice itself). Destroy whatever was created
+            // so the GL fallback does not leak the instance, messenger and surface.
+            if(instance != null) {
+                if(surface != 0L) {
+                    vkDestroySurfaceKHR(instance, surface, null);
+                    surface = 0L;
+                }
+                if(debugMessenger != 0L) {
+                    destroyDebugUtilsMessengerEXT(instance, debugMessenger, null);
+                    debugMessenger = 0L;
+                }
+                vkDestroyInstance(instance, null);
+            }
+            return;
+        }
 
         vkDeviceWaitIdle(device);
         Pipeline.savePipelineCache();
@@ -561,6 +579,14 @@ public class Vulkan {
             // Without the feature Drawer.drawIndexedIndirect replays the commands one by one.
             deviceFeatures.multiDrawIndirect(supportedFeatures.multiDrawIndirect());
             multiDrawIndirectSupported = supportedFeatures.multiDrawIndirect();
+            // GlStateManager.colorLogicOp/logicOp mirror (N22): enable the feature when
+            // present so a logic-op pipeline variant is valid if vanilla ever reaches it.
+            deviceFeatures.logicOp(supportedFeatures.logicOp());
+            // M3: vkCmdSetLineWidth must stay inside limits.lineWidthRange
+            // (VUID-vkCmdSetLineWidth-lineWidth-00788). Without wideLines the range is
+            // [1,1], so a mirrored glLineWidth above 1 has to clamp to 1.
+            VRenderSystem.setMaxLineWidth(supportedFeatures.wideLines()
+                    ? deviceProperties.limits().lineWidthRange(1) : 1.0f);
 
             VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.create();
 

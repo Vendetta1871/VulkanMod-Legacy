@@ -118,6 +118,18 @@ public class VulkanImage {
     }
 
     private void uploadTexture(int width, int height, int formatSize, ByteBuffer buffer) {
+        // N26: inside the frame window the full upload rides the frame's transfer
+        // command buffer, exactly like uploadSubTextureAsync. A separate TransferQueue
+        // submit would execute immediately - before the copies already recorded into
+        // the frame buffer for the same image (those run at frame start) - reversing
+        // the issue order of the two paths. Riding one command buffer keeps them in
+        // recording order. Outside the frame window the synchronous path below is
+        // fenced on its own and nothing can be pending.
+        if (Drawer.getFrameTransferCmd() != null) {
+            uploadSubTextureAsync(0, width, height, 0, 0, formatSize, 0, 0, width, buffer);
+            return;
+        }
+
         try(MemoryStack stack = stackPush()) {
             long imageSize = width * height * formatSize;
 
@@ -134,6 +146,22 @@ public class VulkanImage {
 
     }
 
+    /**
+     * Copies a sub-region (or the whole image) into this texture.
+     *
+     * <p>Frame-start semantics (N26): inside the frame window the copy rides the
+     * frame's transfer command buffer, which is submitted ahead of the frame's draw
+     * commands in the same submit. Every copy recorded during the frame therefore
+     * executes before every draw of the frame - a texture updated mid-frame shows
+     * the update in the whole frame, including draws recorded before the update
+     * call (GL would keep the old texture for those). The current callers (atlas
+     * mirror, lightmap, DynamicTexture) update once per frame ahead of the draws
+     * that read them, so the difference is not observable; nothing may rely on a
+     * mid-frame update affecting only later draws.</p>
+     *
+     * <p>Both upload paths ride the same frame command buffer inside the window, so
+     * copies of one image always execute in issue order.</p>
+     */
     public void uploadSubTextureAsync(int mipLevel, int width, int height, int xOffset, int yOffset, int formatSize, int unpackSkipRows, int unpackSkipPixels, int unpackRowLength, ByteBuffer buffer) {
         long imageSize = buffer.limit();
 

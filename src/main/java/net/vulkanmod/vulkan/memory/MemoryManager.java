@@ -44,6 +44,12 @@ public abstract class MemoryManager {
     private static final Long2LongOpenHashMap buffers = new Long2LongOpenHashMap();
     private static final Long2LongOpenHashMap images = new Long2LongOpenHashMap();
 
+    // L9: allocations carrying a persistent Map() mapping. VMA forbids
+    // vmaDestroyBuffer on a mapped allocation, so every destroy path unmaps first
+    // through this set.
+    private static final it.unimi.dsi.fastutil.longs.LongOpenHashSet mappedAllocations =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
     private static int deviceMemory = 0;
     private static int nativeMemory = 0;
 
@@ -211,10 +217,11 @@ public abstract class MemoryManager {
 
     }
 
-    public static PointerBuffer Map(long allocation) {
+    public synchronized static PointerBuffer Map(long allocation) {
         PointerBuffer data = MemoryUtil.memAllocPointer(1);
 
         vmaMapMemory(allocator, allocation, data);
+        mappedAllocations.add(allocation);
 
         return data;
     }
@@ -230,6 +237,12 @@ public abstract class MemoryManager {
         // Unregister here too: ad-hoc callers (readback/staging dumps) destroy buffers
         // directly, and destroyAllResources must not destroy them a second time.
         buffers.remove(buffer);
+        // L9: VMA requires the allocation to be unmapped before destruction - the old
+        // "vmaDestroyBuffer unmaps for you" assumption was wrong. HOST_MEM buffers keep
+        // a persistent Map() mapping for their whole lifetime.
+        if(mappedAllocations.remove(allocation)) {
+            vmaUnmapMemory(allocator, allocation);
+        }
         vmaDestroyBuffer(allocator, buffer, allocation);
 
     }
@@ -301,8 +314,8 @@ public abstract class MemoryManager {
                 Buffer.BufferInfo info = pending.info();
                 freeBuffer(info.id(), info.allocation());
 
-                // Release the mapped-pointer buffer Map() allocated; vmaDestroyBuffer
-                // above already unmapped the allocation (chunk VBOs churn constantly).
+                // Release the mapped-pointer buffer Map() allocated; freeBuffer has
+                // just unmapped the allocation (chunk VBOs churn constantly).
                 if(pending.data() != null) {
                     MemoryUtil.memFree(pending.data());
                 }

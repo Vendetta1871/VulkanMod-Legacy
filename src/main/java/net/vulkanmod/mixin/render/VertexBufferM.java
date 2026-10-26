@@ -65,14 +65,17 @@ public abstract class VertexBufferM {
 
     @Inject(method = "bindBuffer()V", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$bindBuffer(CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
+        // Only the BLOCK buffer is Vulkan-owned. Cancelling the bind for the sky/star
+        // (or mod) buffers too left vanilla's GL bufferData writing into whatever buffer
+        // happened to be bound - buffer 0 or someone else's (N19).
+        if (Initializer.isVulkanActive() && vulkanmod$getVertexFormat() == DefaultVertexFormats.BLOCK) {
             ci.cancel();
         }
     }
 
     @Inject(method = "unbindBuffer()V", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$unbindBuffer(CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
+        if (Initializer.isVulkanActive() && vulkanmod$getVertexFormat() == DefaultVertexFormats.BLOCK) {
             ci.cancel();
         }
     }

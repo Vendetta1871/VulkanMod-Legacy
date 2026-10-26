@@ -16,6 +16,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * wrote depth like the solid one. Every 1.12.2 render path toggles this state through
  * GlStateManager, so tracking it here keeps VRenderSystem correct at every layer
  * without any glGet* round-trips.
+ *
+ * <p>The per-call {@code CallbackInfo} allocation of these HEAD injections was
+ * measured with a 180 s JFR recording over the STATE autotest (N28): the mixin hook
+ * frames never made the hot-path samples (2 of 10118, and those were stack-frame
+ * names in unrelated stacks), so the hooks stay as written - replacing them with an
+ * accessor that reads GlStateManager's own cached state once per pass would add
+ * complexity without a measurable gain.</p>
  */
 @Mixin(GlStateManager.class)
 public class GlStateManagerDepthM {

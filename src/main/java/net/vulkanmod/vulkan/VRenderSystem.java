@@ -130,6 +130,13 @@ public class VRenderSystem {
     private static boolean fogEnabled = true;
 
     private static float lineWidth = 1.0f;
+
+    /**
+     * The widest line the device accepts for vkCmdSetLineWidth (M3): limits
+     * lineWidthRange[1] when the wideLines feature is enabled, 1.0 otherwise.
+     * Written once at device creation by {@code Vulkan.createLogicalDevice}.
+     */
+    private static float maxLineWidth = 1.0f;
     private static float pointSize = 1.0f;
     private static double gameTime = 0.0;
 
@@ -497,7 +504,11 @@ public class VRenderSystem {
     // --- Line / point / game time ---
 
     public static void setLineWidth(float v) { lineWidth = v; }
-    public static float getLineWidth() { return lineWidth; }
+
+    /** Clamped to the device's line-width range before it reaches vkCmdSetLineWidth (M3). */
+    public static float getLineWidth() { return Math.min(lineWidth, maxLineWidth); }
+
+    public static void setMaxLineWidth(float max) { maxLineWidth = Math.max(1.0f, max); }
     public static float getShaderLineWidth() { return lineWidth; }
 
     public static void setPointSize(float v) { pointSize = v; }

@@ -38,6 +38,7 @@
     "render.GlStateManagerLightM",
     "render.GlStateManagerImmediateM",
     "render.GlStateManagerMatrixM",
+    "render.GameSettingsM",
     "render.ParticleManagerM",
     "render.FramebufferM"
   ],

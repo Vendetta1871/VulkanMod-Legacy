@@ -35,12 +35,16 @@ public class Config {
             return null;
         }
 
+        // L14: a corrupt or unreadable file must not kill the game - fall back to the
+        // defaults (the caller writes a fresh file over the broken one).
         try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
             return GSON.fromJson(reader, Config.class);
         } catch (JsonSyntaxException e) {
-            throw new RuntimeException("Failed to parse VulkanMod config: " + path, e);
+            net.vulkanmod.Initializer.LOGGER.error("Failed to parse VulkanMod config, using defaults: {}", path, e);
+            return null;
         } catch (IOException e) {
-            throw new RuntimeException("Failed to load VulkanMod config: " + path, e);
+            net.vulkanmod.Initializer.LOGGER.error("Failed to load VulkanMod config, using defaults: {}", path, e);
+            return null;
         }
     }
 

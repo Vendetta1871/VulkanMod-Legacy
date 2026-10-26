@@ -1373,16 +1373,26 @@ public class Pipeline {
 
         public LogicOpState(boolean enable, int op) {
             this.enabled = enable;
-            this.logicOp = op;
+            this.logicOp = toVkLogicOp(op);
+        }
+
+        /**
+         * The GL logic-op enums (GL_CLEAR..GL_SET = 0x1500..0x1510) map onto the Vulkan
+         * values by subtracting the base (N22); the packed state key gives the op only
+         * 5 bits, so the raw enum spilled into the color-mask and topology fields.
+         * Values already in Vulkan range (rebuilt from a packed key) pass through.
+         */
+        private static int toVkLogicOp(int op) {
+            if (op >= 0x1500) {
+                int vk = op - 0x1500;
+                assert vk <= VK_LOGIC_OP_SET;
+                return vk;
+            }
+            return op;
         }
 
         public void setLogicOp(int glLogicOp) {
-            // GL_OR_REVERSE is 0x150B; other ops can be mapped as they become needed.
-            if (glLogicOp == 0x150B) {
-                this.logicOp = VK_LOGIC_OP_OR_REVERSE;
-            } else {
-                this.logicOp = glLogicOp;
-            }
+            this.logicOp = toVkLogicOp(glLogicOp);
         }
 
         public int getLogicOp() {
