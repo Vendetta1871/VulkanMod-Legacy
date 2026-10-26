@@ -265,22 +265,24 @@ public class Vulkan {
         }
 
 //        vkDeviceWaitIdle(device);
-        createSwapChain();
-
+        // The old framebuffers reference the old image views and depth view, so they
+        // must go first: createSwapChain() already destroys the old views and the old
+        // swapchain internally, and layers (e.g. MangoHud) track those objects to keep
+        // per-swapchain state - handing them a destroyed-view window is undefined.
+        int oldW = swapChainExtent.width(), oldH = swapChainExtent.height();
         swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
 
-//        swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
+        createSwapChain();
 
         MemoryManager.freeImage(depthImage, depthImageMemory);
         vkDestroyImageView(device, depthImageView, null);
 
-//        vkDestroySwapchainKHR(device, swapChain, null);
-
-//        createSwapChain();
         createImageViews();
         createDepthResources();
         createFramebuffers();
 
+        Initializer.LOGGER.info("[swapchain] recreated {}x{} -> {}x{}", oldW, oldH,
+                swapChainExtent.width(), swapChainExtent.height());
         return true;
     }
 
