@@ -30,7 +30,6 @@ public class TerrainRenderer {
     private static final FloatBuffer float1 = MemoryUtil.memAllocFloat(1);
     private static final IntBuffer int1 = MemoryUtil.memAllocInt(1);
     private static final ByteBuffer bool1 = MemoryUtil.memAlloc(1);
-    private static final ByteBuffer bool4 = MemoryUtil.memAlloc(4);
 
     /** The layer of the chunk pass currently being recorded (null outside world rendering). */
     public static BlockRenderLayer currentLayer;
@@ -235,9 +234,9 @@ public class TerrainRenderer {
      * position attribute (three floats at offset 0, stride {@code stride}) of one upload.
      */
     public static void checkVertexRange(java.nio.ByteBuffer data, int vertexCount, int stride) {
-        // Only chunk meshes use the BLOCK format (stride 36); the sky/star VBOs share this
+        // Only chunk meshes use the BLOCK format (stride 28); the sky/star VBOs share this
         // upload path with a position-only format and legitimately span +/-384.
-        if (!LOG_STATS || data == null || vertexCount <= 0 || stride != 36) {
+        if (!LOG_STATS || data == null || vertexCount <= 0 || stride != 28) {
             return;
         }
         java.nio.FloatBuffer fb = data.duplicate().position(0)
@@ -459,9 +458,15 @@ public class TerrainRenderer {
     }
 
     /**
-     * Mirrors the fixed-function state that is constant for every chunk layer within a frame
-     * (fog, depth, color mask, cull). The Kirino {@code glGet*} queries here are slow, so this
-     * runs only on the first layer of each frame (see {@link #fixedStateCached}).
+     * Mirrors the fog state, the only fixed-function state that is constant for every
+     * chunk layer within a frame. The Kirino {@code glGet*} queries here are slow, so
+     * this runs only on the first layer of each frame (see {@link #fixedStateCached}).
+     *
+     * <p>Depth, color mask and cull are deliberately not queried here: a once-per-frame
+     * snapshot handed the later layers the first layer's state (the translucent layer
+     * wrote depth like the solid one). They are tracked from the vanilla
+     * {@code GlStateManager} calls by {@code GlStateManagerDepthM}/{@code GlStateManagerBlendM}
+     * instead, so every layer draws with the state vanilla set for it.</p>
      */
     private static void snapshotFixedState() {
         if (fixedStateCached) {
@@ -490,27 +495,6 @@ public class TerrainRenderer {
             VRenderSystem.setFogEnd(float1.get(0));
             GL11.glGetFloatv(GL11.GL_FOG_DENSITY, float1);
             VRenderSystem.setFogDensity(float1.get(0));
-        }
-
-        // Depth
-        if (boolState(GL11.GL_DEPTH_TEST)) {
-            VRenderSystem.enableDepthTest();
-        } else {
-            VRenderSystem.disableDepthTest();
-        }
-        VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
-        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
-        VRenderSystem.depthFunc(int1.get(0));
-
-        // Color mask
-        GL11.glGetBooleanv(GL11.GL_COLOR_WRITEMASK, bool4);
-        VRenderSystem.colorMask(bool4.get(0) != 0, bool4.get(1) != 0, bool4.get(2) != 0, bool4.get(3) != 0);
-
-        // Cull face
-        if (boolState(GL11.GL_CULL_FACE)) {
-            VRenderSystem.enableCull();
-        } else {
-            VRenderSystem.disableCull();
         }
     }
 

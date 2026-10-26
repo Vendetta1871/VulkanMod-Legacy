@@ -5,7 +5,7 @@ import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.GuiRenderer;
 import net.vulkanmod.vulkan.VRenderSystem;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -26,16 +26,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * GUI. The next frame's HEAD closes the pass again.</p>
  */
 @Mixin(net.minecraft.client.renderer.EntityRenderer.class)
-public class EntityRendererM {
+public abstract class EntityRendererM {
 
-    @Shadow
-    private float fogColorRed;
+    // Accessors instead of @Shadow: shadowed fields never reach the refmap and would
+    // not bind under the SRG runtime names.
+    @Accessor("fogColorRed")
+    abstract float vulkanmod$getFogColorRed();
 
-    @Shadow
-    private float fogColorGreen;
+    @Accessor("fogColorGreen")
+    abstract float vulkanmod$getFogColorGreen();
 
-    @Shadow
-    private float fogColorBlue;
+    @Accessor("fogColorBlue")
+    abstract float vulkanmod$getFogColorBlue();
 
     /**
      * The frame clear color. Vanilla clears the world framebuffer with
@@ -49,7 +51,8 @@ public class EntityRendererM {
     @Inject(method = "updateFogColor(F)V", at = @At("TAIL"))
     private void vulkanmod$captureClearColor(float partialTicks, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
-            VRenderSystem.setClearColor(fogColorRed, fogColorGreen, fogColorBlue);
+            VRenderSystem.setClearColor(vulkanmod$getFogColorRed(), vulkanmod$getFogColorGreen(),
+                    vulkanmod$getFogColorBlue());
         }
     }
 

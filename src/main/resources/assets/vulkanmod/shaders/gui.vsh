@@ -14,8 +14,13 @@ layout(binding = 0) uniform UniformBufferObject {
 };
 
 layout(location = 0) out vec2 texCoord0;
+layout(location = 1) out float vertexDistance;
 
 void main() {
+    vec4 viewPos = ModelViewMat * vec4(Position, 1.0);
     gl_Position = MVP * vec4(Position, 1.0);
     texCoord0 = UV0;
+    // World-space text (name tags, sign text) renders with the live world matrices
+    // and the frame's fog; the GUI pass sets FOG_NONE so this stays unused there.
+    vertexDistance = length(viewPos.xyz);
 }

@@ -39,7 +39,8 @@ public class MemoryTypes {
 
                             MemoryManager.createBuffer(size,
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | buffer.usage,
-                                    VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+                                    // Property flag, not the heap bit of the same value (M10).
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                     pBuffer,
                                     pAllocation);
 
@@ -113,6 +114,9 @@ public class MemoryTypes {
                             LongBuffer pBuffer = stack.mallocLong(1);
                             PointerBuffer pAllocation = stack.pointers(VK_NULL_HANDLE);
 
+                            // Explicit coherent host memory: VMA AUTO + HOST_ACCESS_* can
+                            // pick a non-coherent type, and nothing in this codebase calls
+                            // vmaFlushAllocation, so writes would never reach the GPU.
                             MemoryManager.createBuffer(size,
                                     buffer.usage,
                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
@@ -197,8 +201,10 @@ public class MemoryTypes {
         for(int i = 0; i < Vulkan.memoryProperties.memoryTypeCount(); ++i) {
             VkMemoryType memoryType = Vulkan.memoryProperties.memoryTypes(i);
 
-            //gpu-cpu shared memory
-            if((memoryType.propertyFlags() & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) != 0) {
+            //gpu-cpu shared memory: both bits are required, a type with only one of them
+            //is neither device-only nor mappable-device memory.
+            if((memoryType.propertyFlags() & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                    == (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
                 GPU_MEM = new MemoryType() {
                     @Override
                     void createBuffer(Buffer buffer, int size) {

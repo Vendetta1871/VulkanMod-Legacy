@@ -5,13 +5,13 @@ import net.minecraft.client.renderer.EntityRenderer;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureMap;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.mixin.render.EntityRendererAccessor;
 import net.vulkanmod.vulkan.TransferQueue;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryUtil;
 
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 
 /**
@@ -45,11 +45,22 @@ public class TextureBridge {
     private static boolean tileBatchOpen;
 
     /**
+     * True while the open tile batch belongs to the block atlas. Other TextureMaps
+     * (book pages, paintings) also animate sprites through the same upload hook; their
+     * tiles must not be mirrored into the block atlas image.
+     */
+    private static boolean mirrorTarget;
+
+    /** Number of mip levels the mirrored atlas image was created with (vanilla uploads 4). */
+    private static int atlasMipLevels = 1;
+
+    /**
      * Opens the shared transfer command buffer for the tile uploads of one animation tick
      * (TextureMapM brackets {@code TextureMap.updateAnimations} with these), so a tick with a
      * dozen animated sprites costs one queue submit instead of a dozen.
      */
-    public static void beginTileBatch() {
+    public static void beginTileBatch(boolean blockAtlas) {
+        mirrorTarget = blockAtlas && !NO_TILEMIRROR && Initializer.isVulkanActive();
         if (NO_TILEMIRROR || tileBatchOpen || !Initializer.isVulkanActive()) {
             return;
         }
@@ -58,6 +69,7 @@ public class TextureBridge {
     }
 
     public static void endTileBatch() {
+        mirrorTarget = false;
         if (tileBatchOpen) {
             tileBatchOpen = false;
             TransferQueue.endRecording();
@@ -70,49 +82,80 @@ public class TextureBridge {
     /** Reusable CPU staging buffer for the 16x16 RGBA lightmap. */
     private static ByteBuffer lightmapBuffer;
 
-    /** Cached handle of the private {@code EntityRenderer.lightmapTexture} field. */
-    private static Field lightmapField;
-
     /** Called after the atlas is (re)stitched, see TextureMapM. */
     public static void markAtlasDirty() {
         atlasDirty = true;
     }
 
     /**
+     * Drops the Vulkan mirrors cached against a GL texture whose content or lifetime
+     * changed (re-upload under the same id, deletion, id reuse). The mirrors are freed
+     * with the in-flight-frame delay inside {@link VulkanImage#free()}.
+     */
+    public static void invalidateGlTexture(int texId) {
+        if (texId <= 0) {
+            return;
+        }
+        // FQN: the net.minecraft.client.renderer.EntityRenderer import shadows ours here.
+        net.vulkanmod.render.EntityRenderer.onTextureDeleted(texId);
+        GuiRenderer.onTextureDeleted(texId);
+    }
+
+    /**
      * Mirrors one animated sprite frame straight into the Vulkan atlas from the CPU pixel
      * data vanilla has just uploaded to GL (see TextureAtlasSpriteM), instead of re-downloading
-     * the whole atlas with glGetTexImage. The int[] is TYPE_INT_ARGB, the same source the GL
+     * the whole atlas with glGetTexImage. The int[]s are TYPE_INT_ARGB, the same source the GL
      * upload uses, so the mirrored bytes match the GL atlas one-for-one.
+     *
+     * <p>{@code frames} holds the mip levels vanilla uploads for this frame (4 for a plain
+     * frame advance, 1 for the CPU-blended interpolated frames - vanilla leaves the upper
+     * levels of those stale too, so mirroring exactly what is uploaded reproduces the GL
+     * atlas). Tiles are power-of-two aligned in the atlas, so level i of a tile lands at
+     * (x &gt;&gt; i, y &gt;&gt; i) exactly like vanilla's stitched atlas mips.</p>
      */
-    public static void uploadSpriteTile(int[] argb, int width, int height, int x, int y) {
+    public static void uploadSpriteTile(int[][] frames, int width, int height, int x, int y) {
         try {
             if (NO_TILEMIRROR) {
                 atlasDirty = true;
                 return;
             }
-            // Atlas not created yet, or mipmap-padded frame data: fall back to the full download.
-            if (atlasImage == null || argb.length != width * height) {
+            // Sprite of another atlas (book pages, paintings): GL upload happened, nothing to mirror.
+            if (!mirrorTarget) {
+                return;
+            }
+            // Atlas not created yet: fall back to the full download.
+            if (atlasImage == null) {
                 atlasDirty = true;
                 return;
             }
-            int size = width * height * 4;
-            if (tileBuffer == null || tileBuffer.capacity() < size) {
-                if (tileBuffer != null) {
-                    MemoryUtil.memFree(tileBuffer);
+            int levels = Math.min(frames.length, atlasMipLevels);
+            for (int lvl = 0; lvl < levels; lvl++) {
+                int[] argb = frames[lvl];
+                int lw = width >> lvl, lh = height >> lvl;
+                if (argb == null || argb.length != lw * lh) {
+                    // Frame data does not match the expected mip size: full download.
+                    atlasDirty = true;
+                    return;
                 }
-                tileBuffer = MemoryUtil.memAlloc(size);
-            }
-            tileBuffer.clear();
-            for (int pixel : argb) {
-                tileBuffer.put((byte) (pixel >> 16));
-                tileBuffer.put((byte) (pixel >> 8));
-                tileBuffer.put((byte) pixel);
-                tileBuffer.put((byte) (pixel >>> 24));
-            }
-            tileBuffer.position(0);
-            tileBuffer.limit(size);
+                int size = lw * lh * 4;
+                if (tileBuffer == null || tileBuffer.capacity() < width * height * 4) {
+                    if (tileBuffer != null) {
+                        MemoryUtil.memFree(tileBuffer);
+                    }
+                    tileBuffer = MemoryUtil.memAlloc(width * height * 4);
+                }
+                tileBuffer.clear();
+                for (int pixel : argb) {
+                    tileBuffer.put((byte) (pixel >> 16));
+                    tileBuffer.put((byte) (pixel >> 8));
+                    tileBuffer.put((byte) pixel);
+                    tileBuffer.put((byte) (pixel >>> 24));
+                }
+                tileBuffer.position(0);
+                tileBuffer.limit(size);
 
-            atlasImage.uploadSubTextureAsync(0, width, height, x, y, 4, 0, 0, width, tileBuffer);
+                atlasImage.uploadSubTextureAsync(lvl, lw, lh, x >> lvl, y >> lvl, 4, 0, 0, lw, tileBuffer);
+            }
         } catch (Exception | LinkageError e) {
             Initializer.LOGGER.error("Failed to mirror sprite tile, falling back to atlas download", e);
             atlasDirty = true;
@@ -162,35 +205,59 @@ public class TextureBridge {
 
         int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texId);
-        int width = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
-        int height = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
 
-        ByteBuffer pixels = MemoryUtil.memAlloc(width * height * 4);
-        GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+        // Vanilla uploads 4 mip levels to the atlas; mirror every level the GL texture
+        // actually exposes (a GL backend that keeps no mip storage reports level 1 empty
+        // and the mirror degrades to the old single-level image).
+        int[] levelWidths = new int[4];
+        int[] levelHeights = new int[4];
+        int levels = 0;
+        for (int lvl = 0; lvl < 4; lvl++) {
+            levelWidths[lvl] = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, lvl, GL11.GL_TEXTURE_WIDTH);
+            levelHeights[lvl] = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, lvl, GL11.GL_TEXTURE_HEIGHT);
+            if (levelWidths[lvl] <= 0 || levelHeights[lvl] <= 0) {
+                break;
+            }
+            levels = lvl + 1;
+        }
+
+        ByteBuffer[] levelPixels = new ByteBuffer[levels];
+        for (int lvl = 0; lvl < levels; lvl++) {
+            int size = levelWidths[lvl] * levelHeights[lvl] * 4;
+            levelPixels[lvl] = MemoryUtil.memAlloc(size);
+            GL11.glGetTexImage(GL11.GL_TEXTURE_2D, lvl, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, levelPixels[lvl]);
+            levelPixels[lvl].position(0);
+            levelPixels[lvl].limit(size);
+        }
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevBinding);
-        pixels.position(0);
-        pixels.limit(width * height * 4);
 
-        if (atlasImage == null || width != atlasWidth || height != atlasHeight) {
+        int width = levelWidths[0];
+        int height = levelHeights[0];
+
+        if (atlasImage == null || width != atlasWidth || height != atlasHeight || levels != atlasMipLevels) {
             if (atlasImage != null) {
                 atlasImage.free();
             }
-            // NEAREST filtering (vanilla atlas), clamped addressing; single mip level.
-            atlasImage = new VulkanImage(1, width, height, 4, false, true);
+            // NEAREST filtering (vanilla atlas), clamped addressing, vanilla's mip chain.
+            atlasImage = new VulkanImage(levels, width, height, 4, false, true);
             atlasWidth = width;
             atlasHeight = height;
+            atlasMipLevels = levels;
         }
 
-        atlasImage.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
-        MemoryUtil.memFree(pixels);
+        for (int lvl = 0; lvl < levels; lvl++) {
+            atlasImage.uploadSubTextureAsync(lvl, levelWidths[lvl], levelHeights[lvl],
+                    0, 0, 4, 0, 0, levelWidths[lvl], levelPixels[lvl]);
+            MemoryUtil.memFree(levelPixels[lvl]);
+        }
         atlasGlId = texId;
 
         VTextureSelector.bindTexture(atlasImage);
         atlasDirty = false;
         if (!atlasLogged) {
             atlasLogged = true;
-            Initializer.LOGGER.info("[texture] atlas uploaded: glId={} {}x{} id={}", texId, width, height,
-                    System.identityHashCode(atlasImage));
+            Initializer.LOGGER.info("[texture] atlas uploaded: glId={} {}x{} levels={} id={}", texId, width, height,
+                    levels, System.identityHashCode(atlasImage));
         }
     }
 
@@ -309,20 +376,13 @@ public class TextureBridge {
     }
 
     private static DynamicTexture getLightmapTexture() {
-        try {
-            EntityRenderer entityRenderer = Minecraft.getMinecraft().entityRenderer;
-            if (entityRenderer == null) {
-                return null;
-            }
-            if (lightmapField == null) {
-                lightmapField = EntityRenderer.class.getDeclaredField("lightmapTexture");
-                lightmapField.setAccessible(true);
-            }
-            Object texture = lightmapField.get(entityRenderer);
-            return texture instanceof DynamicTexture ? (DynamicTexture) texture : null;
-        } catch (ReflectiveOperationException e) {
-            return null;
+        EntityRenderer entityRenderer = Minecraft.getMinecraft().entityRenderer;
+        // Mixin accessor instead of reflection: the refmap remaps the field name for the
+        // SRG runtime, and there is no failed-lookup-throws-every-call path left.
+        if (entityRenderer instanceof EntityRendererAccessor accessor) {
+            return accessor.vulkanmod$getLightmapTexture();
         }
+        return null;
     }
 
     private TextureBridge() {

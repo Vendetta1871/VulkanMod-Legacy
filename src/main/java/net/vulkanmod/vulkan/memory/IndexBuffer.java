@@ -4,6 +4,8 @@ import java.nio.ByteBuffer;
 
 import static net.vulkanmod.vulkan.Vulkan.copyStagingtoLocalBuffer;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT16;
+import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT32;
 
 public class IndexBuffer extends Buffer {
 
@@ -63,13 +65,15 @@ public class IndexBuffer extends Buffer {
 
 
     public enum IndexType {
-        SHORT(2),
-        INT(4);
+        SHORT(2, VK_INDEX_TYPE_UINT16),
+        INT(4, VK_INDEX_TYPE_UINT32);
 
         public final int size;
+        public final int vkType;
 
-        IndexType(int size) {
+        IndexType(int size, int vkType) {
             this.size = size;
+            this.vkType = vkType;
         }
     }
 

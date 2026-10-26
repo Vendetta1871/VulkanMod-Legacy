@@ -17,6 +17,11 @@ public class UniformBuffers {
     private int bufferSize;
     private int usedBytes;
 
+    // Bumped whenever the per-frame buffers are replaced (a resize creates new VkBuffers).
+    // The descriptor-set caches key on it: sets written against the old buffers must not
+    // be reused after a resize.
+    private int generation;
+
     private List<UniformBuffer> uniformBuffers;
 
     private final static int minOffset = (int) deviceProperties.limits().minUniformBufferOffsetAlignment();
@@ -36,15 +41,23 @@ public class UniformBuffers {
         }
     }
 
-    public void uploadUBO(ByteBuffer buffer, int offset, int frame)  {
+    /**
+     * Copies {@code buffer} (position 0, remaining = data size) into the frame slot's
+     * ring at the next aligned offset and returns that offset. The caller passes it as
+     * the dynamic offset when binding the descriptor set, so the UBO data needs no
+     * per-draw descriptor write.
+     */
+    public int uploadUBO(ByteBuffer buffer, int frame) {
         int size = buffer.remaining();
         int alignedSize = align(size, minOffset);
         if (alignedSize > this.bufferSize - this.usedBytes) {
             resizeBuffer((int) ((this.bufferSize + alignedSize) * 2));
         }
 
+        int offset = usedBytes;
         uniformBuffers.get(frame).uploadUBO(buffer, offset);
         usedBytes += alignedSize;
+        return offset;
     }
 
     private void resizeBuffer(int newSize) {
@@ -54,8 +67,17 @@ public class UniformBuffers {
         }
 
         this.bufferSize = newSize;
+        ++generation;
 
         System.out.println("resized UniformBuffer to: " + newSize);
+    }
+
+    public int getGeneration() {
+        return generation;
+    }
+
+    public int getBufferSize() {
+        return bufferSize;
     }
 
     public void reset() {

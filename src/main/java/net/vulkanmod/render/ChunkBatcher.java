@@ -206,7 +206,7 @@ public class ChunkBatcher {
 
         drawer.bindPipeline(pipeline);
         drawer.uploadAndBindUBOs(pipeline);
-        drawer.drawIndexedIndirect(arena.bufferId(), indexBuffer.getId(), indexBuffer.getOffset(),
+        drawer.drawIndexedIndirect(arena.bufferId(), indexBuffer,
                 indirectBuffers[curFrame], (long) layerStart * CMD_BYTES, layerCount);
     }
 

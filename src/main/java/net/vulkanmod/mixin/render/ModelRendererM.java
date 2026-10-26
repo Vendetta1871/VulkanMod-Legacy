@@ -7,7 +7,7 @@ import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.Tessellator;
 import net.vulkanmod.render.EntityRenderer;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -31,10 +31,12 @@ import java.util.List;
  * {@code ModelRenderer.render} inside {@code renderHand}.</p>
  */
 @Mixin(ModelRenderer.class)
-public class ModelRendererM {
+public abstract class ModelRendererM {
 
-    @Shadow
-    public List<ModelBox> cubeList;
+    // Accessor instead of @Shadow: shadowed fields never reach the refmap and would
+    // not bind under the SRG runtime names.
+    @Accessor("cubeList")
+    abstract List<ModelBox> vulkanmod$getCubeList();
 
     private float vulkanmod$scale;
 
@@ -55,7 +57,7 @@ public class ModelRendererM {
                 EntityRenderer.beginPart();
             }
             BufferBuilder buffer = Tessellator.getInstance().getBuffer();
-            for (ModelBox box : this.cubeList) {
+            for (ModelBox box : this.vulkanmod$getCubeList()) {
                 box.render(buffer, this.vulkanmod$scale);
             }
             if (batch) {
@@ -67,7 +69,7 @@ public class ModelRendererM {
             // boxes through the TESR dispatcher during the GUI pass; rebuild them the
             // same way so the batch reaches the GUI capture instead of a display list.
             BufferBuilder buffer = Tessellator.getInstance().getBuffer();
-            for (ModelBox box : this.cubeList) {
+            for (ModelBox box : this.vulkanmod$getCubeList()) {
                 box.render(buffer, this.vulkanmod$scale);
             }
         } else {

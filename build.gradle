@@ -16,6 +16,12 @@ java {
     }
 }
 
+// Bundles the Vulkan-related LWJGL jars (and their natives) into the shipped mod jar;
+// see the vulkanBundle dependencies below.
+configurations {
+    vulkanBundle
+}
+
 dependencies {
     implementation cleanroom.userdev(cleanroom_version)
 
@@ -31,6 +37,19 @@ dependencies {
     runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-linux"
     runtimeOnly "org.lwjgl:lwjgl-vma:${lwjgl_version}:natives-windows"
     runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-windows"
+
+    // Cleanroom ships lwjgl core/sdl/opengl/stb/openal/jemalloc/freetype but NOT the
+    // Vulkan extensions, so the release jar must carry them and their natives itself
+    // (merged into the jar below). LWJGL's loader finds the packaged libraries under
+    // the <os>/<arch>/ paths the classifier jars use.
+    // lwjgl-vulkan itself has no native library - libvulkan comes from the system.
+    vulkanBundle "org.lwjgl:lwjgl-vulkan:${lwjgl_version}"
+    vulkanBundle "org.lwjgl:lwjgl-vma:${lwjgl_version}"
+    vulkanBundle "org.lwjgl:lwjgl-shaderc:${lwjgl_version}"
+    ['natives-linux', 'natives-windows', 'natives-linux-arm64'].each { nativeClassifier ->
+        vulkanBundle "org.lwjgl:lwjgl-vma:${lwjgl_version}:${nativeClassifier}"
+        vulkanBundle "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:${nativeClassifier}"
+    }
 }
 
 cleanroom {
@@ -69,5 +88,20 @@ jar {
         attributes 'FMLCorePlugin': coremod_plugin_class,
                 'FMLCorePluginContainsFMLMod': true,
                 'ForceLoadAsMod': true
+    }
+}
+
+// Merge the LWJGL Vulkan bindings and natives into the mod jar. The natives keep
+// the <os>/<arch>/<package>/ layout LWJGL's loader searches inside the jar.
+// The configuration must stay unresolved until after the cleanroom plugin's own
+// afterEvaluate hook (it calls withDependencies() on every configuration and throws
+// on already-resolved ones), so the resolution is deferred to our afterEvaluate,
+// which runs after the plugin's.
+afterEvaluate {
+    jar {
+        from(configurations.vulkanBundle.files.collect { zipTree(it) }) {
+            exclude 'META-INF/**'
+            exclude 'module-info.class'
+        }
     }
 }

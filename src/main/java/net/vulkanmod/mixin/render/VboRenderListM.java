@@ -4,6 +4,7 @@ import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.VboRenderList;
 import net.minecraft.util.BlockRenderLayer;
 import net.vulkanmod.debug.FrameProfiler;
+import net.vulkanmod.render.IRenderChunks;
 import net.vulkanmod.render.TerrainRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -16,12 +17,17 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * pass, right before the per-chunk draws of {@link VboRenderList}.
  */
 @Mixin(VboRenderList.class)
-public class VboRenderListM {
+public abstract class VboRenderListM {
 
     @Inject(method = "renderChunkLayer", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$onChunkLayerStart(BlockRenderLayer layer, CallbackInfo ci) {
         // Diagnostic: skip the entire per-chunk pass (loop + draws) to bound terrain cost.
         if (TerrainRenderer.NO_TERRAIN) {
+            // Vanilla empties the visible-chunk list at the end of renderChunkLayer;
+            // cancelling before that would let it grow without bound (OOM), so clear it.
+            // The list field lives on the ChunkRenderContainer superclass - reach it
+            // through the interface ChunkRenderContainerM implements.
+            ((IRenderChunks) (Object) this).vulkanmod$getRenderChunks().clear();
             ci.cancel();
             return;
         }

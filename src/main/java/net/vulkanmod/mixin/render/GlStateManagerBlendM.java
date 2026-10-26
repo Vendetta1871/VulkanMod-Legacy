@@ -70,6 +70,19 @@ public class GlStateManagerBlendM {
         }
     }
 
+    /**
+     * Tracks the texture id bound to GL_TEXTURE_2D. Every draw-time bind in 1.12.2
+     * (entity skins, the block atlas, the font, GUI atlases) goes through this method,
+     * so the entity/GUI texture mirrors can resolve their Vulkan image from the tracked
+     * value instead of a {@code glGetInteger(GL_TEXTURE_BINDING_2D)} round-trip per draw.
+     */
+    @Inject(method = "bindTexture(I)V", at = @At("HEAD"))
+    private static void vulkanmod$bindTexture(int texture, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.trackedBoundTexture = texture;
+        }
+    }
+
     @Inject(method = "enableTexture2D", at = @At("HEAD"))
     private static void vulkanmod$enableTexture2D(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {

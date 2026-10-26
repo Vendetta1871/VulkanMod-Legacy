@@ -1,7 +1,5 @@
 package net.vulkanmod.vulkan.texture;
 
-import it.unimi.dsi.fastutil.bytes.Byte2LongMap;
-import it.unimi.dsi.fastutil.bytes.Byte2LongOpenHashMap;
 import net.vulkanmod.vulkan.*;
 import net.vulkanmod.vulkan.memory.MemoryManager;
 import net.vulkanmod.vulkan.memory.StagingBuffer;
@@ -13,6 +11,7 @@ import org.lwjgl.vulkan.*;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
+import java.util.HashMap;
 
 import static net.vulkanmod.vulkan.Vulkan.*;
 import static net.vulkanmod.vulkan.memory.MemoryManager.*;
@@ -27,8 +26,16 @@ public class VulkanImage {
     private long allocation;
     private long textureImageView;
 
-    private Byte2LongMap samplers;
     private long textureSampler;
+
+    /**
+     * Samplers carry no per-image state once the LOD clamp depends only on the mipmap
+     * flag (maxLod 0 without mips; LOD_CLAMP_NONE with them, where the hardware clamps
+     * the LOD to the image's actual level count), so they are shared process-wide by
+     * (blur, clamp, mipmap). Key includes clamp: two images differing only in addressing
+     * must not share a sampler.
+     */
+    private static final HashMap<Byte, Long> SHARED_SAMPLERS = new HashMap<>();
 
     private int mipLevels;
     private int width;
@@ -44,7 +51,10 @@ public class VulkanImage {
     }
 
     private int currentLayout;
-    private TransferQueue.CommandBuffer commandBuffer;
+    /** Command buffer the barriers/copies of the current upload are recorded into. */
+    private VkCommandBuffer transferCmd;
+    /** Pool command buffer of a synchronous upload; null for frame-window/async ones. */
+    private TransferQueue.CommandBuffer queuedCmd;
 
     public VulkanImage(int width, int height, int formatSize, boolean blur, boolean clamp, ByteBuffer buffer) {
         this(1, width, height, formatSize, blur, clamp);
@@ -57,11 +67,9 @@ public class VulkanImage {
         this.height = height;
         this.formatSize = formatSize;
 
-        this.samplers = new Byte2LongOpenHashMap(8);
-
         createTextureImage(mipLevels, width, height);
         createTextureImageView(mipLevels);
-        createTextureSampler(blur, clamp, mipLevels > 1);
+        textureSampler = getOrCreateSampler(blur, clamp, mipLevels > 1);
     }
 
     public VulkanImage(int miplevel, int width, int height) {
@@ -92,7 +100,9 @@ public class VulkanImage {
 
             MemoryManager.createImage(width, height, miplevel,
                     VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    // TRANSFER_SRC: the mirror readback (copyToBuffer) copies these
+                    // images out; validation rejects the copy without the usage bit.
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                     pTextureImage,
                     pAllocation);
@@ -111,7 +121,8 @@ public class VulkanImage {
         try(MemoryStack stack = stackPush()) {
             long imageSize = width * height * formatSize;
 
-            commandBuffer = TransferQueue.beginCommands();
+            queuedCmd = TransferQueue.beginCommands();
+            transferCmd = queuedCmd.getHandle();
             transferDstLayout();
 
             StagingBuffer stagingBuffer = Vulkan.getStagingBuffer(Drawer.getCurrentFrame());
@@ -123,38 +134,20 @@ public class VulkanImage {
 
     }
 
-    public void uploadSubTexture(int mipLevel, int width, int height, int xOffset, int yOffset, int formatSize, int unpackSkipRows, int unpackSkipPixels, int unpackRowLength, ByteBuffer buffer) {
-        try(MemoryStack stack = stackPush()) {
-
-            long imageSize = buffer.limit();
-
-            transferDstLayout();
-
-            LongBuffer pStagingBuffer = stack.mallocLong(1);
-            PointerBuffer pStagingAllocation = stack.pointers(0L);
-
-            createBuffer(imageSize,
-                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-                    pStagingBuffer,
-                    pStagingAllocation);
-
-            MapAndCopy(pStagingAllocation.get(0), imageSize,
-                    (data) -> VUtil.memcpy(data.getByteBuffer(0, (int)imageSize), buffer, imageSize)
-            );
-
-            copyBufferToImage(pStagingBuffer.get(0), id, mipLevel, width, height, xOffset, yOffset, (unpackRowLength * unpackSkipRows + unpackSkipPixels) * 4, unpackRowLength, height);
-
-            freeBuffer(pStagingBuffer.get(0), pStagingAllocation.get(0));
-//            MemoryManager.addToFreeable(pStagingBuffer.get(0), pStagingAllocation.get(0));
-
-        }
-    }
-
     public void uploadSubTextureAsync(int mipLevel, int width, int height, int xOffset, int yOffset, int formatSize, int unpackSkipRows, int unpackSkipPixels, int unpackRowLength, ByteBuffer buffer) {
         long imageSize = buffer.limit();
 
-        commandBuffer = TransferQueue.getCommandBuffer();
+        // Inside the frame window the copy rides the frame's transfer command buffer
+        // (one submit per frame, fenced by the frame fence); outside it the copy gets
+        // its own TransferQueue command buffer and fence.
+        TransferQueue.CommandBuffer queued = null;
+
+        transferCmd = Drawer.getFrameTransferCmd();
+        if (transferCmd == null) {
+            queued = TransferQueue.getCommandBuffer();
+            transferCmd = queued.getHandle();
+        }
+
         transferDstLayout();
 
         StagingBuffer stagingBuffer = Vulkan.getStagingBuffer(Drawer.getCurrentFrame());
@@ -164,8 +157,13 @@ public class VulkanImage {
         copyBufferToImageAsync(stagingBuffer.getBufferId(), id, mipLevel, width, height, xOffset, yOffset,
                 (int) (stagingBuffer.getOffset() + (unpackRowLength * unpackSkipRows + unpackSkipPixels) * 4), unpackRowLength, height);
 
-        long fence = TransferQueue.endIfNeeded(commandBuffer);
-        if (fence != -1) Synchronization.addFence(fence);
+        // Leave the image directly in SHADER_READ_ONLY inside the same command buffer,
+        // so the descriptor-time readOnlyLayout() is a no-op and no extra submit is spent.
+        finishTransferLayout();
+
+        if (queued != null) {
+            TransferQueue.endIfNeeded(queued);
+        }
     }
 
     /** Debug helper: copies the image contents to the CPU and writes them out as a PNG. */
@@ -217,8 +215,8 @@ public class VulkanImage {
                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, null, null, barrier);
             currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-            long fence = TransferQueue.endCommands(transferCommand);
-            vkWaitForFences(device, fence, true, VUtil.UINT64_MAX);
+            TransferQueue.endCommands(transferCommand);
+            vkWaitForFences(device, transferCommand.getFence(), true, VUtil.UINT64_MAX);
 
             java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(width, height,
                     java.awt.image.BufferedImage.TYPE_INT_RGB);
@@ -270,7 +268,10 @@ public class VulkanImage {
 
             VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.create(1);
             barrier.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-            barrier.oldLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+            // Keep the existing contents: UNDEFINED is only legal before the first
+            // upload, it would let the driver discard every mip level of the atlas
+            // (and on AMD with DCC it actually does).
+            barrier.oldLayout(this.currentLayout);
             barrier.newLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             barrier.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
             barrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
@@ -286,15 +287,20 @@ public class VulkanImage {
             int sourceStage;
             int destinationStage;
 
-            barrier.srcAccessMask(0);
+            if (this.currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                barrier.srcAccessMask(0);
+                sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            } else {
+                // WAR hazard: the copy must not overwrite texels that frames still in
+                // flight are sampling (the lightmap and the atlas tiles are re-uploaded
+                // while earlier frames are still rendering).
+                barrier.srcAccessMask(VK_ACCESS_SHADER_READ_BIT);
+                sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+            }
             barrier.dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
-
-            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
-            //VkCommandBuffer commandBuffer = beginImmediateCmd();
-
-            vkCmdPipelineBarrier(commandBuffer.getHandle(),
+            vkCmdPipelineBarrier(transferCmd,
                     sourceStage, destinationStage,
                     0,
                     null,
@@ -306,16 +312,19 @@ public class VulkanImage {
         currentLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
 
-    public void readOnlyLayout() {
+    /**
+     * TRANSFER_DST -&gt; SHADER_READ_ONLY barrier recorded into the transfer command buffer
+     * the last copy went to, so the transition needs no extra submit and is ordered
+     * against the copy by construction.
+     */
+    private void finishTransferLayout() {
         if (this.currentLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
-
-        TransferQueue.CommandBuffer commandBuffer = TransferQueue.beginCommands();
 
         try(MemoryStack stack = stackPush()) {
 
             VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.create(1);
             barrier.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-            barrier.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            barrier.oldLayout(this.currentLayout);
             barrier.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             barrier.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
             barrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
@@ -328,35 +337,110 @@ public class VulkanImage {
 
             barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
 
-            int sourceStage;
-            int destinationStage;
-
             barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
             barrier.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
 
-            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            destinationStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
-
-            vkCmdPipelineBarrier(commandBuffer.getHandle(),
-                    sourceStage, destinationStage,
+            // The terrain/entity shaders sample these textures from both stages.
+            vkCmdPipelineBarrier(transferCmd,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
                     0,
                     null,
                     null,
                     barrier);
         }
 
-        long fence = TransferQueue.endCommands(commandBuffer);
-        if (fence != 0) Synchronization.addFence(fence);
+        this.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
 
+    /**
+     * Fallback transition for images left in TRANSFER_DST by the synchronous upload
+     * path; the async path already ends every copy in SHADER_READ_ONLY (see
+     * {@link #finishTransferLayout()}), so this is normally a no-op.
+     */
+    public void readOnlyLayout() {
+        if (this.currentLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
+        // Nothing was ever uploaded: there is no content to make readable yet, and the
+        // next transferDstLayout() starts from UNDEFINED anyway.
+        if (this.currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) return;
+
+        TransferQueue.CommandBuffer commandBuffer = TransferQueue.beginCommands();
+
+        try(MemoryStack stack = stackPush()) {
+
+            VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.create(1);
+            barrier.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+            barrier.oldLayout(this.currentLayout);
+            barrier.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            barrier.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+            barrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+            barrier.image(this.id);
+
+            barrier.subresourceRange().baseMipLevel(0);
+            barrier.subresourceRange().levelCount(mipLevels);
+            barrier.subresourceRange().baseArrayLayer(0);
+            barrier.subresourceRange().layerCount(1);
+
+            barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
+
+            barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            barrier.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
+
+            vkCmdPipelineBarrier(commandBuffer.getHandle(),
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                    0,
+                    null,
+                    null,
+                    barrier);
+        }
+
+        TransferQueue.endCommands(commandBuffer);
 
         this.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
     private void createTextureImageView(int mipLevels) {
         textureImageView = createImageView(id, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, mipLevels);
+        LIVE_VIEWS.add(textureImageView);
     }
 
-    private void createTextureSampler(boolean blur, boolean clamp, boolean mipmap) {
+    /**
+     * Destroys the process-wide shared samplers (called from Vulkan.cleanUp at teardown).
+     */
+    public static void destroySharedSamplers() {
+        for(long sampler : SHARED_SAMPLERS.values()) {
+            vkDestroySampler(device, sampler, null);
+        }
+        SHARED_SAMPLERS.clear();
+    }
+
+    /** Texture views still alive; destroyed at shutdown before their images (M17). */
+    private static final it.unimi.dsi.fastutil.longs.LongOpenHashSet LIVE_VIEWS =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
+    /**
+     * Destroys every texture image view not already freed through {@link #free()}.
+     * Must run before {@link net.vulkanmod.vulkan.memory.MemoryManager#destroyAllResources()}
+     * tears down the images they reference.
+     */
+    public static void destroyAllViews() {
+        for(long view : LIVE_VIEWS) {
+            vkDestroyImageView(device, view, null);
+        }
+        LIVE_VIEWS.clear();
+    }
+
+    private static long getOrCreateSampler(boolean blur, boolean clamp, boolean mipmap) {        byte key = (byte) ((blur ? 1 : 0) | (clamp ? 2 : 0) | (mipmap ? 4 : 0));
+        Long sampler = SHARED_SAMPLERS.get(key);
+        if (sampler != null) return sampler;
+
+        long created = createSampler(blur, clamp, mipmap);
+        SHARED_SAMPLERS.put(key, created);
+        return created;
+    }
+
+    private static long createSampler(boolean blur, boolean clamp, boolean mipmap) {
 
         try(MemoryStack stack = stackPush()) {
 
@@ -368,7 +452,9 @@ public class VulkanImage {
                 samplerInfo.minFilter(VK_FILTER_LINEAR);
             } else {
                 samplerInfo.magFilter(VK_FILTER_NEAREST);
-                samplerInfo.minFilter(VK_FILTER_NEAREST);
+                // NEAREST_MIPMAP_LINEAR: nearest texel within a level, linear between
+                // levels - the filtering vanilla applies to the block atlas.
+                samplerInfo.minFilter(mipmap ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
             }
 
 
@@ -389,15 +475,11 @@ public class VulkanImage {
             samplerInfo.compareEnable(false);
             samplerInfo.compareOp(VK_COMPARE_OP_ALWAYS);
 
-            if(mipmap) {
-                samplerInfo.mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR);
-                samplerInfo.maxLod(mipLevels);
-                samplerInfo.minLod(0.0F);
-            } else {
-                samplerInfo.mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR);
-                samplerInfo.maxLod(0.0F);
-                samplerInfo.minLod(0.0F);
-            }
+            samplerInfo.mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR);
+            // Without mips pin level 0; with them let the hardware clamp the LOD to the
+            // sampled image's own level count, so one sampler fits every mipmapped image.
+            samplerInfo.maxLod(mipmap ? VK_LOD_CLAMP_NONE : 0.0F);
+            samplerInfo.minLod(0.0F);
 
             LongBuffer pTextureSampler = stack.mallocLong(1);
 
@@ -405,19 +487,12 @@ public class VulkanImage {
                 throw new RuntimeException("Failed to create texture sampler");
             }
 
-            textureSampler = pTextureSampler.get(0);
-
-            byte mask = (byte) ((blur ? 1 : 0) | (mipmap ? 2 : 0));
-            samplers.put(mask, textureSampler);
+            return pTextureSampler.get(0);
         }
     }
 
     public void updateTextureSampler(boolean blur, boolean clamp, boolean mipmap) {
-        byte mask = (byte) ((blur ? 1 : 0) | (mipmap ? 2 : 0));
-        long sampler = this.samplers.get(mask);
-
-        if(sampler == 0L) createTextureSampler(blur, clamp, mipmap);
-        else this.textureSampler = sampler;
+        this.textureSampler = getOrCreateSampler(blur, clamp, mipmap);
     }
 
     private void copyBufferToImage(long buffer, long image, int mipLevel, int width, int height) {
@@ -443,11 +518,11 @@ public class VulkanImage {
             region.imageOffset().set(xOffset, yOffset, 0);
             region.imageExtent(VkExtent3D.create().set(width, height, 1));
 
-            vkCmdCopyBufferToImage(commandBuffer.getHandle(), buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+            vkCmdCopyBufferToImage(transferCmd, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
 
-            long fence = TransferQueue.endCommands(commandBuffer);
-
-            vkWaitForFences(device, fence, true, VUtil.UINT64_MAX);
+            TransferQueue.endCommands(queuedCmd);
+            vkWaitForFences(device, queuedCmd.getFence(), true, VUtil.UINT64_MAX);
+            queuedCmd = null;
 
         }
     }
@@ -467,7 +542,7 @@ public class VulkanImage {
             region.imageOffset().set(xOffset, yOffset, 0);
             region.imageExtent(VkExtent3D.create().set(width, height, 1));
 
-            vkCmdCopyBufferToImage(commandBuffer.getHandle(), buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+            vkCmdCopyBufferToImage(transferCmd, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
         }
     }
 
@@ -490,9 +565,8 @@ public class VulkanImage {
 
             vkCmdCopyImageToBuffer(commandBuffer.getHandle(), image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, region);
 
-            long fence = TransferQueue.endCommands(commandBuffer);
-
-            vkWaitForFences(device, fence, true, VUtil.UINT64_MAX);
+            TransferQueue.endCommands(commandBuffer);
+            vkWaitForFences(device, commandBuffer.getFence(), true, VUtil.UINT64_MAX);
         }
     }
 
@@ -571,19 +645,28 @@ public class VulkanImage {
         return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
     }
 
-    /** Frees the image, its view and all cached samplers (used when the atlas is resized). */
+    /**
+     * Frees the image and its view once the frames in flight that may still sample it
+     * have finished (same Frames+1 delay as the buffers in MemoryManager). The samplers
+     * are shared process-wide and stay alive.
+     */
     public void free() {
-        for(long sampler : samplers.values()) {
-            vkDestroySampler(device, sampler, null);
+        final long imageId = this.id;
+        final long imageAllocation = this.allocation;
+        final long view = this.textureImageView;
+
+        this.id = 0;
+        this.allocation = 0;
+        this.textureImageView = 0;
+        this.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (imageId != 0) {
+            LIVE_VIEWS.remove(view);
+            MemoryManager.addToFreeable(() -> {
+                vkDestroyImageView(device, view, null);
+                MemoryManager.freeImage(imageId, imageAllocation);
+            });
         }
-        samplers.clear();
-        textureSampler = 0;
-
-        vkDestroyImageView(device, textureImageView, null);
-        textureImageView = 0;
-
-        MemoryManager.freeImage(id, allocation);
-        id = 0;
     }
 
     public long getId() { return id;}

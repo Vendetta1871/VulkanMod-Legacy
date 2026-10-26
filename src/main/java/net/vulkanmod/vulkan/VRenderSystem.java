@@ -47,6 +47,11 @@ public class VRenderSystem {
     // answer glGetFloatv(GL_CURRENT_COLOR)); consumed by the GUI pass ---
     public static float trackedColorR = 1, trackedColorG = 1, trackedColorB = 1, trackedColorA = 1;
 
+    // --- GL texture id bound to GL_TEXTURE_2D, mirrored from GlStateManager.bindTexture
+    // (the draw-time bind paths all route through it); consumed by the entity/GUI texture
+    // mirrors instead of a glGetInteger(GL_TEXTURE_BINDING_2D) per draw ---
+    public static int trackedBoundTexture = 0;
+
     // --- Fixed-function texturing enable bit mirrored from GlStateManager.enableTexture2D/
     // disableTexture2D (GL default: enabled). Some GUI rectangles (GuiSlot's scrollbar and
     // its top/bottom fades) are drawn with texturing OFF so that only the vertex colour
@@ -421,7 +426,16 @@ public class VRenderSystem {
     // --- Fixed-function alpha test (GREATER 0.1), fed to the GUI shaders ---
 
     public static void setAlphaTest(boolean enabled) { alphaTest = enabled; }
-    public static int getAlphaTest() { return alphaTest ? 1 : 0; }
+
+    /**
+     * The discard flag for the GUI shaders, which hardcode the vanilla "GREATER 0.1"
+     * test. It discards only while the test is enabled and the live func/ref still
+     * match that assumption; any other func (ALWAYS for the fade passes, a foreign ref)
+     * turns the shader-side discard off, exactly like the GL fixed-function test would.
+     */
+    public static int getAlphaTest() {
+        return alphaTest && alphaTestFunc == 516 && alphaTestRef <= 0.1f ? 1 : 0;
+    }
 
     public static void setAlphaFunc(int func, float ref) { alphaTestFunc = func; alphaTestRef = ref; }
 
@@ -540,13 +554,15 @@ public class VRenderSystem {
     public static void setTopology(int topology) { VRenderSystem.topology = topology; }
     public static int getTopology() { return topology; }
 
-    public static void polygonOffset(float v, float v1) {
-        depthBias[0] = v;
-        depthBias[1] = v1;
+    public static void polygonOffset(float factor, float units) {
+        depthBias[0] = factor;
+        depthBias[1] = units;
     }
 
     public static void enablePolygonOffset() {
-        Drawer.setDepthBias(depthBias[0], depthBias[1]);
+        // GL: offset = units*r + factor*m; Vulkan: offset = constantFactor + slopeFactor*m,
+        // so GL units map to the constant factor and GL factor to the slope factor.
+        Drawer.setDepthBias(depthBias[1], depthBias[0]);
     }
 
     public static void disablePolygonOffset() {

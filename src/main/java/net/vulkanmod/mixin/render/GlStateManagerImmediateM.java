@@ -13,8 +13,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * Mirrors the immediate-mode vertex stream into {@link GuiRenderer}. {@code FontRenderer}
  * draws each font glyph with {@code glBegin(GL_TRIANGLE_STRIP)} / {@code glTexCoord2f} /
  * {@code glVertex3f} / {@code glEnd}, which never touches the {@code BufferBuilder}, so
- * the {@code WorldVertexBufferUploader} hook cannot see text. GuiRenderer only accumulates
- * while a GUI pass is active, so entity/world immediate-mode use is left untouched.
+ * the {@code WorldVertexBufferUploader} hook cannot see text. GuiRenderer accumulates
+ * during a GUI pass and during the entity pass (world-space name tags and sign text);
+ * immediate-mode use in other passes is left untouched.
  */
 @Mixin(GlStateManager.class)
 public class GlStateManagerImmediateM {

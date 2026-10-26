@@ -7,28 +7,32 @@ import net.vulkanmod.render.CloudRenderer;
 import net.vulkanmod.render.SkyRenderer;
 import net.vulkanmod.render.WorldBorderRenderer;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Draws the Vulkan sky and clouds at the head of {@code RenderGlobal.renderSky} and
- * {@code renderClouds}. The GL sky and clouds keep running afterwards (their output is
- * never presented) so the GL state machine stays consistent for everything that renders
- * after them.
+ * {@code renderClouds} and cancels the vanilla GL layer when the Vulkan renderer has
+ * fully replaced it (the GL sky and clouds would render into buffers that are never
+ * presented). Custom (modded) sky/cloud renderers keep the GL path.
  */
 @Mixin(RenderGlobal.class)
-public class RenderGlobalM {
+public abstract class RenderGlobalM {
 
-    @Shadow
-    private int cloudTickCounter;
+    // Accessor instead of @Shadow: shadowed fields never reach the refmap and would
+    // not bind under the SRG runtime names.
+    @Accessor("cloudTickCounter")
+    abstract int vulkanmod$getCloudTickCounter();
 
-    @Inject(method = "renderSky(FI)V", at = @At("HEAD"))
+    @Inject(method = "renderSky(FI)V", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$renderSky(float partialTicks, int pass, CallbackInfo ci) {
         FrameProfiler.skyBegin();
-        if (Initializer.isVulkanActive()) {
-            SkyRenderer.render(partialTicks, pass);
+        if (Initializer.isVulkanActive() && SkyRenderer.render(partialTicks, pass)) {
+            // The TAIL hook below never runs for a cancelled method; close the profile span here.
+            FrameProfiler.skyEnd();
+            ci.cancel();
         }
     }
 
@@ -37,12 +41,14 @@ public class RenderGlobalM {
         FrameProfiler.skyEnd();
     }
 
-    @Inject(method = "renderClouds(FIDDD)V", at = @At("HEAD"))
+    @Inject(method = "renderClouds(FIDDD)V", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$renderClouds(float partialTicks, int pass, double x, double y, double z,
                                         CallbackInfo ci) {
         FrameProfiler.cloudsBegin();
-        if (Initializer.isVulkanActive()) {
-            CloudRenderer.render(partialTicks, pass, this.cloudTickCounter, x, y, z);
+        if (Initializer.isVulkanActive()
+                && CloudRenderer.render(partialTicks, pass, this.vulkanmod$getCloudTickCounter(), x, y, z)) {
+            FrameProfiler.cloudsEnd();
+            ci.cancel();
         }
     }
 
@@ -73,7 +79,7 @@ public class RenderGlobalM {
         }
     }
 
-    @Inject(method = "renderEntities", at = @At("TAIL"))
+    @Inject(method = "renderEntities", at = @At("RETURN"))
     private void vulkanmod$renderEntitiesEnd(net.minecraft.entity.Entity renderViewEntity,
                                              net.minecraft.client.renderer.culling.ICamera camera, float partialTicks,
                                              CallbackInfo ci) {

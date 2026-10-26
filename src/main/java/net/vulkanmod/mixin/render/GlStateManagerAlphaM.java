@@ -37,10 +37,9 @@ public class GlStateManagerAlphaM {
         if (!Initializer.isVulkanActive()) {
             return;
         }
-        // The GUI shaders hardcode GREATER 0.1; anything else (ALWAYS, or a ref that
-        // discards everything) turns the discard off. The entity shaders consume the
-        // live func/ref through getAlphaRef() instead.
+        // alphaFunc only changes the func/ref in GL; it must not touch the enable bit
+        // (vanilla sets the func of an already-disabled or already-enabled test). The
+        // "GREATER 0.1" decision the GUI shaders hardcode is made in getAlphaTest().
         VRenderSystem.setAlphaFunc(func, ref);
-        VRenderSystem.setAlphaTest(func == 516 && ref <= 0.1f);
     }
 }

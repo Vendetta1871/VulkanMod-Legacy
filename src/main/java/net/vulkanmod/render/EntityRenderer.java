@@ -171,6 +171,16 @@ public class EntityRenderer {
 
     public static void setHandPass(boolean value) {
         handPass = value;
+        if (value) {
+            // The hand pass runs with its own projection (setupOverlayRendering /
+            // hand FOV); the cached world snapshot must not leak into it (H8).
+            frameStateCached = false;
+        }
+    }
+
+    /** Forces a fresh projection/fog snapshot on the next captured draw (see H8). */
+    public static void invalidateFrameState() {
+        frameStateCached = false;
     }
 
     /** True while {@code renderHand} runs: held items, the first-person arms and the overlays. */
@@ -379,26 +389,16 @@ public class EntityRenderer {
         VRenderSystem.updateModelViewMatrix();
         VRenderSystem.calculateMVP();
 
-        VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
-        if (boolState(GL11.GL_DEPTH_TEST)) {
-            VRenderSystem.enableDepthTest();
-        } else {
-            VRenderSystem.disableDepthTest();
-        }
-        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
-        VRenderSystem.depthFunc(int1.get(0));
-
-        // Solid entities keep back-face culling on; mirror the live state.
-        if (boolState(GL11.GL_CULL_FACE)) {
-            VRenderSystem.enableCull();
-        } else {
-            VRenderSystem.disableCull();
-        }
+        // Depth, cull and colour come straight from the GlStateManager tracking mixins
+        // (GlStateManagerDepthM, GlStateManagerBlendM) into VRenderSystem, where the
+        // pipeline bind already reads them: every 1.12.2 render path drives this state
+        // through GlStateManager, so no mirror and no glGet* round-trip is needed.
 
         // The current GL colour is the entity tint (white for most mobs, the dye colour
         // for a sheep), matching the ColorMaterial diffuse of the fixed-function path,
         // modulated by the entity's single constant lightmap sample.
-        GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
+        float4.put(0, VRenderSystem.trackedColorR).put(1, VRenderSystem.trackedColorG)
+              .put(2, VRenderSystem.trackedColorB).put(3, VRenderSystem.trackedColorA);
         tint[0] = float4.get(0);
         tint[1] = float4.get(1);
         tint[2] = float4.get(2);
@@ -496,17 +496,17 @@ public class EntityRenderer {
 
         if (!weatherPending) {
             VRenderSystem.modelViewMatrix.asFloatBuffer().position(0).limit(16).get(weatherMV);
-            GL11.glGetFloatv(GL11.GL_CURRENT_COLOR, float4);
-            weatherTint[0] = float4.get(0);
-            weatherTint[1] = float4.get(1);
-            weatherTint[2] = float4.get(2);
-            weatherTint[3] = float4.get(3);
+            // Snapshot the tracked GlStateManager state (see submit()): the weather is
+            // replayed after the translucent layer, when the live state has moved on.
+            weatherTint[0] = VRenderSystem.trackedColorR;
+            weatherTint[1] = VRenderSystem.trackedColorG;
+            weatherTint[2] = VRenderSystem.trackedColorB;
+            weatherTint[3] = VRenderSystem.trackedColorA;
             weatherBlend = VRenderSystem.getBlendState();
-            weatherDepthMask = boolState(GL11.GL_DEPTH_WRITEMASK);
-            weatherDepthTest = boolState(GL11.GL_DEPTH_TEST);
-            GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1);
-            weatherDepthFunc = int1.get(0);
-            weatherCull = boolState(GL11.GL_CULL_FACE);
+            weatherDepthMask = VRenderSystem.depthMask;
+            weatherDepthTest = VRenderSystem.depthTest;
+            weatherDepthFunc = VRenderSystem.depthFun;
+            weatherCull = VRenderSystem.cull;
         }
         weatherPending = true;
     }
@@ -624,11 +624,16 @@ public class EntityRenderer {
      * rather than held for the whole entity.
      */
     private static VulkanImage entityTexture() {
-        int texId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        // The tracked bind (GlStateManagerBlendM) replaces the per-draw
+        // glGetInteger(GL_TEXTURE_BINDING_2D); every draw-time bind routes through
+        // GlStateManager.bindTexture. Stale mirrors are dropped by the invalidation
+        // hooks (AbstractTextureM delete, ThreadDownloadImageDataM / DynamicTextureM
+        // re-upload), so no per-draw size query is needed either.
+        int texId = VRenderSystem.trackedBoundTexture;
         if (texId == 0) {
             return null;
         }
-        if (cachedEntityTexture != null && texId == cachedTextureId && matchesLiveSize(cachedEntityTexture)) {
+        if (cachedEntityTexture != null && texId == cachedTextureId) {
             return cachedEntityTexture;
         }
         // The block atlas is already mirrored for the terrain (tile-by-tile, animated);
@@ -639,11 +644,12 @@ public class EntityRenderer {
             return cachedEntityTexture;
         }
         VulkanImage image = textureCache.get(texId);
-        if (image == null || !matchesLiveSize(image)) {
-            image = downloadTexture(texId);
-            if (image != null) {
-                textureCache.put(texId, image);
+        if (image == null) {
+            VulkanImage fresh = downloadTexture(texId);
+            if (fresh != null) {
+                textureCache.put(texId, fresh);
             }
+            image = fresh;
         }
         if (image != null) {
             cachedEntityTexture = image;
@@ -665,20 +671,12 @@ public class EntityRenderer {
         return redOverlayActive ? 0.3f : 0.0f;
     }
 
-    /**
-     * A cached image is only trusted while the live texture still has the same size: GL
-     * reuses deleted texture ids (see {@code AbstractTextureM}); the queried texture is
-     * the current binding, so no rebind is needed.
-     */
-    private static boolean matchesLiveSize(VulkanImage image) {
-        int w = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
-        int h = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
-        return w == image.getWidth() && h == image.getHeight();
-    }
-
     /** Forgets the Vulkan image mirrored from a GL texture that is being deleted. */
     public static void onTextureDeleted(int texId) {
-        textureCache.remove(texId);
+        VulkanImage image = textureCache.remove(texId);
+        if (image != null) {
+            image.free();
+        }
         if (cachedTextureId == texId) {
             cachedEntityTexture = null;
             cachedTextureId = -1;
@@ -686,7 +684,9 @@ public class EntityRenderer {
     }
 
     private static VulkanImage downloadTexture(int texId) {
-        int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        // The tracked bind is the live one (see entityTexture()); the temporary rebind
+        // below restores it, so the tracked value stays correct throughout.
+        int prevBinding = VRenderSystem.trackedBoundTexture;
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texId);
         int width = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
         int height = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);

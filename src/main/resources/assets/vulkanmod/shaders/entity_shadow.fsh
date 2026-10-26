@@ -33,7 +33,7 @@ void main() {
     // GL fog replaces only the fragment RGB; the alpha (the blend
     // weight of translucent draws) passes through untouched.
     if (FogMode == 1) {
-        float f = clamp((FogEnd - vertexDistance) / (FogEnd - FogStart), 0.0, 1.0);
+        float f = clamp((FogEnd - vertexDistance) / max(FogEnd - FogStart, 1e-4), 0.0, 1.0);
         color.rgb = mix(FogColor.rgb, color.rgb, f);
     }
     else if (FogMode == 2) {

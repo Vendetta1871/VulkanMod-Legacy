@@ -938,11 +938,17 @@ public class AutoTest {
         try {
             net.minecraft.entity.passive.EntityCow cow = new net.minecraft.entity.passive.EntityCow(mc.world);
             net.minecraft.util.math.Vec3d look = mc.player.getLook(1.0f);
-            double x = mc.player.posX + look.x * 4.0;
+            double x = mc.player.posX + look.x * 3.0;
             double y = mc.player.posY;
-            double z = mc.player.posZ + look.z * 4.0;
+            double z = mc.player.posZ + look.z * 3.0;
             cow.setPosition(x, y, z);
             cow.rotationYawHead = mc.player.rotationYaw;
+            // A custom name makes vanilla draw a name tag (immediate-mode FontRenderer
+            // text inside the entity pass), which the entity captures then verify.
+            cow.setCustomNameTag("Bessie");
+            // Vanilla only draws a mob's name tag when it is crosshair-targeted or the
+            // always-render flag is set (a name tag item sets it in-game).
+            cow.setAlwaysRenderNameTag(true);
             mc.world.spawnEntity(cow);
             Initializer.LOGGER.info("[autotest] spawned cow at ({},{},{})",
                     String.format("%.1f", x), String.format("%.1f", y), String.format("%.1f", z));

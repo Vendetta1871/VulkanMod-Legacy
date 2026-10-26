@@ -1,5 +1,6 @@
 package net.vulkanmod.mixin.render;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureMap;
 import net.minecraft.client.resources.IResourceManager;
 import net.vulkanmod.render.TextureBridge;
@@ -12,7 +13,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * Marks the block atlas for a full re-download after it has been (re)stitched, e.g. on a
  * resource pack reload. Per-tick animation changes are mirrored tile-by-tile by
  * {@link TextureAtlasSpriteM}; the bracketing here gives those mirrors a shared transfer
- * command buffer so one tick submits at most once.
+ * command buffer so one tick submits at most once, and tells the mirror whether the
+ * animated atlas is the block one - tiles of other atlases (books, paintings) must not
+ * land in the block atlas image.
  */
 @Mixin(TextureMap.class)
 public class TextureMapM {
@@ -26,7 +29,7 @@ public class TextureMapM {
     // all belong together: record them into one transfer command buffer and submit once.
     @Inject(method = "updateAnimations", at = @At("HEAD"))
     private void vulkanmod$beginTileBatch(CallbackInfo ci) {
-        TextureBridge.beginTileBatch();
+        TextureBridge.beginTileBatch((Object) this == Minecraft.getMinecraft().getTextureMapBlocks());
     }
 
     @Inject(method = "updateAnimations", at = @At("TAIL"))

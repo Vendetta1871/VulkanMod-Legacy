@@ -2,10 +2,8 @@ package net.vulkanmod.mixin.render;
 
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.vulkanmod.Initializer;
-import net.vulkanmod.render.EntityRenderer;
-import net.vulkanmod.render.GuiRenderer;
+import net.vulkanmod.render.TextureBridge;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -21,14 +19,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(AbstractTexture.class)
 public class AbstractTextureM {
 
-    @Shadow
-    protected int glTextureId;
-
     @Inject(method = "deleteGlTexture", at = @At("HEAD"))
     private void vulkanmod$textureDeleted(CallbackInfo ci) {
+        int glTextureId = ((AbstractTextureAccessor) (Object) this).vulkanmod$getGlTextureId();
         if (Initializer.isVulkanActive() && glTextureId > 0) {
-            GuiRenderer.onTextureDeleted(glTextureId);
-            EntityRenderer.onTextureDeleted(glTextureId);
+            TextureBridge.invalidateGlTexture(glTextureId);
         }
     }
 }

@@ -39,9 +39,23 @@ public class VBO {
      * leaves behind).
      */
     public void upload(ByteBuffer data, VertexFormat format, int vertexCount) {
-        if (TerrainRenderer.BATCH) {
+        // Only the BLOCK layout (28-byte stride) matches the batched arena vertex format;
+        // other layers (sky, stars use 12-byte POSITION) would read past the source in
+        // interleaveSlot, so they keep the standalone-buffer path even in BATCH mode.
+        if (TerrainRenderer.BATCH && format == net.minecraft.client.renderer.vertex.DefaultVertexFormats.BLOCK) {
             uploadBatched(data, format, vertexCount);
             return;
+        }
+
+        // A section can switch paths between uploads (e.g. BATCH toggled); release
+        // whatever the previous upload left behind.
+        if (arenaOffset >= 0) {
+            ChunkBatcher.arena().free(arenaOffset, arenaBytes);
+            arenaOffset = -1;
+        }
+        if (slot >= 0) {
+            ChunkBatcher.freeSlot(slot);
+            slot = -1;
         }
 
         if (vertexBuffer != null) {
@@ -61,12 +75,8 @@ public class VBO {
         TerrainRenderer.checkVertexRange(data, vertexCount, format.getSize());
 
         try {
-            // Uploads outside the Vulkan frame window (rare; e.g. immediate chunk updates
-            // issued between frames) must not overwrite staging regions still in flight.
-            if (!Drawer.isActive()) {
-                net.vulkanmod.vulkan.Synchronization.waitFences();
-            }
-
+            // Staging safety for uploads outside the frame window is enforced inside
+            // StagingBuffer.copyBuffer (see Drawer.ensureStagingFree).
             vertexBuffer = new VertexBuffer(format.getSize() * vertexCount, MemoryTypes.GPU_MEM);
             vertexBuffer.copyToVertexBuffer(format.getSize(), vertexCount, data);
         } catch (Throwable t) {
@@ -153,7 +163,9 @@ public class VBO {
             return;
         }
 
-        if (TerrainRenderer.BATCH) {
+        // The path is chosen per buffer, not per global mode: in BATCH mode only BLOCK-format
+        // sections live in the arena (vertexBuffer == null); other layers keep their own buffer.
+        if (vertexBuffer == null) {
             net.vulkanmod.debug.FrameProfiler.chunkRecordBegin();
             drawBatched();
             net.vulkanmod.debug.FrameProfiler.chunkRecordEnd();
@@ -212,17 +224,15 @@ public class VBO {
     }
 
     public void close() {
-        if (TerrainRenderer.BATCH) {
-            if (arenaOffset >= 0) {
-                ChunkBatcher.arena().free(arenaOffset, arenaBytes);
-                arenaOffset = -1;
-            }
-            if (slot >= 0) {
-                ChunkBatcher.freeSlot(slot);
-                slot = -1;
-            }
-            vertexCount = 0;
-            return;
+        // Release both possible storages unconditionally: a section may have been
+        // uploaded through either path over its lifetime.
+        if (arenaOffset >= 0) {
+            ChunkBatcher.arena().free(arenaOffset, arenaBytes);
+            arenaOffset = -1;
+        }
+        if (slot >= 0) {
+            ChunkBatcher.freeSlot(slot);
+            slot = -1;
         }
 
         if (vertexBuffer != null) {

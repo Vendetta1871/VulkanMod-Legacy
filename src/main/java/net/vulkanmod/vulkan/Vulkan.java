@@ -27,6 +27,7 @@ import static org.lwjgl.system.MemoryStack.stackGet;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.NULL;
 import static org.lwjgl.util.vma.Vma.vmaCreateAllocator;
+import static org.lwjgl.util.vma.Vma.vmaDestroyAllocator;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
@@ -52,8 +53,12 @@ public class Vulkan {
 
     public static final int INDEX_SIZE = Short.BYTES;
 
-    private static final boolean ENABLE_VALIDATION_LAYERS = false;
-//    private static final boolean ENABLE_VALIDATION_LAYERS = true;
+    // VULKANMOD_VALIDATION=1 runs the client with the Khronos validation layer (the
+    // audit's recommended check after renderer changes); off by default.
+    private static final boolean ENABLE_VALIDATION_LAYERS = System.getenv("VULKANMOD_VALIDATION") != null;
+
+    // Set at device creation from the physical device's feature bits (see M3).
+    public static boolean multiDrawIndirectSupported;
 
     public static final Set<String> VALIDATION_LAYERS;
     static {
@@ -154,12 +159,11 @@ public class Vulkan {
     public static VkPhysicalDeviceProperties deviceProperties;
     public static VkPhysicalDeviceMemoryProperties memoryProperties;
 
-    public static SwapChainSupportDetails swapChainSupport;
-
     private static VkQueue graphicsQueue;
     private static VkQueue presentQueue;
 
-    private static final int frameQueueSize = Initializer.CONFIG.frameQueueSize;
+    // Config value validated: at least double buffering, sane upper bound.
+    private static final int frameQueueSize = Math.min(Math.max(2, Initializer.CONFIG.frameQueueSize), 8);
 
     private static long swapChain;
     private static List<Long> swapChainImages;
@@ -180,7 +184,7 @@ public class Vulkan {
 
     private static long allocator;
 
-    private static boolean vsync = false;
+    private static boolean vsync = Initializer.CONFIG.vsync;
 
     private static StagingBuffer[] stagingBuffers;
 
@@ -244,9 +248,21 @@ public class Vulkan {
         }
     }
 
-    public static void recreateSwapChain() {
+    /**
+     * Recreates the swapchain and its attachments. Returns false (nothing recreated)
+     * when the surface currently has no extent - a minimized window would make
+     * vkCreateSwapchainKHR fail on every retry.
+     */
+    public static boolean recreateSwapChain() {
 
-        Synchronization.waitFences();
+        TransferQueue.waitPendingFences();
+
+        try(MemoryStack stack = stackPush()) {
+            VkSurfaceCapabilitiesKHR capabilities = querySwapChainSupport(physicalDevice, stack).capabilities;
+            if(capabilities.currentExtent().width() == 0 || capabilities.currentExtent().height() == 0) {
+                return false;
+            }
+        }
 
 //        vkDeviceWaitIdle(device);
         createSwapChain();
@@ -264,16 +280,75 @@ public class Vulkan {
         createImageViews();
         createDepthResources();
         createFramebuffers();
+
+        return true;
     }
 
+    private static boolean cleanedUp;
+
+    /**
+     * Destroys every Vulkan object owned by the renderer. Must run while the window
+     * (and therefore the surface) still exists - see WindowCloseM. Safe to call twice
+     * or when initialization never reached device creation.
+     */
     public static void cleanUp() {
+        if(cleanedUp || device == null) {
+            return;
+        }
+        cleanedUp = true;
+
         vkDeviceWaitIdle(device);
+        Pipeline.savePipelineCache();
+
+        Drawer drawer = Drawer.getInstance();
+        if(drawer != null) {
+            drawer.cleanUpSyncObjects();
+        }
+
+        swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
+        swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
+        vkDestroySwapchainKHR(device, swapChain, null);
+        swapChain = 0L;
+
+        MemoryManager.freeImage(depthImage, depthImageMemory);
+        vkDestroyImageView(device, depthImageView, null);
+
+        // Pipelines reference the render pass and the shared samplers, so they are
+        // destroyed before both.
+        Pipeline.cleanUpAll();
+        net.vulkanmod.vulkan.texture.VulkanImage.destroySharedSamplers();
+        if(renderPass != 0L) {
+            vkDestroyRenderPass(device, renderPass, null);
+            renderPass = 0L;
+        }
+
+        vkDestroyFence(device, immediateFence, null);
+
+        // Destroying the pools also frees the command buffers allocated from them.
         vkDestroyCommandPool(device, commandPool, null);
         vkDestroyCommandPool(device, TransferQueue.getCommandPool(), null);
-
         TransferQueue.cleanUp();
 
+        // vmaDestroyAllocator does NOT destroy allocations that are still alive, so
+        // every texture view, image and buffer still registered must go first, while
+        // the device is valid - otherwise vkDestroyDevice reports leaked objects.
+        net.vulkanmod.vulkan.texture.VulkanImage.destroyAllViews();
+        MemoryManager.destroyAllResources();
+
+        // The allocator must go while the device is still valid - destroying the
+        // device first leaks everything it still owns and aborts.
+        vmaDestroyAllocator(allocator);
+
         vkDestroyDevice(device, null);
+
+        if(surface != 0L) {
+            vkDestroySurfaceKHR(instance, surface, null);
+            surface = 0L;
+        }
+        if(debugMessenger != 0L) {
+            destroyDebugUtilsMessengerEXT(instance, debugMessenger, null);
+            debugMessenger = 0L;
+        }
         vkDestroyInstance(instance, null);
     }
 
@@ -450,12 +525,20 @@ public class Vulkan {
                 queueCreateInfo.pQueuePriorities(stack.floats(1.0f));
             }
 
-            VkPhysicalDeviceFeatures deviceFeatures = VkPhysicalDeviceFeatures.create();
-            deviceFeatures.samplerAnisotropy(true);
+            // Only enable features the physical device actually supports; requesting an
+            // unsupported one fails vkCreateDevice on strict drivers.
+            VkPhysicalDeviceFeatures supportedFeatures = VkPhysicalDeviceFeatures.calloc(stack);
+            vkGetPhysicalDeviceFeatures(physicalDevice, supportedFeatures);
+
+            VkPhysicalDeviceFeatures deviceFeatures = VkPhysicalDeviceFeatures.calloc(stack);
+            deviceFeatures.samplerAnisotropy(supportedFeatures.samplerAnisotropy());
             // The debug-line capture draws GL_LINES/GL_LINE_STRIP with glLineWidth up to
-            // 6; wideLines lets the line pipeline honour a dynamic width > 1. Supported by
-            // every desktop driver (Volta included).
-            deviceFeatures.wideLines(true);
+            // 6; wideLines lets the line pipeline honour a dynamic width > 1.
+            deviceFeatures.wideLines(supportedFeatures.wideLines());
+            // ChunkBatcher submits one indirect call with drawCount > 1 per chunk layer.
+            // Without the feature Drawer.drawIndexedIndirect replays the commands one by one.
+            deviceFeatures.multiDrawIndirect(supportedFeatures.multiDrawIndirect());
+            multiDrawIndirectSupported = supportedFeatures.multiDrawIndirect();
 
             VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.create();
 
@@ -539,18 +622,24 @@ public class Vulkan {
 
             long oldSwapchain = swapChain != 0L ? swapChain : VK_NULL_HANDLE;
 
-            swapChainSupport = querySwapChainSupport(physicalDevice, null);
+            SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice, stack);
+
+            if(swapChainSupport.formats == null || swapChainSupport.formats.capacity() == 0) {
+                throw new RuntimeException("Surface reports no supported formats");
+            }
 
             VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
             int presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
             VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
 
-//            IntBuffer imageCount = stack.ints(Math.max(swapChainSupport.capabilities.minImageCount(), 2));
-            IntBuffer imageCount = stack.ints(frameQueueSize);
-
-            if(swapChainSupport.capabilities.maxImageCount() > 0 && imageCount.get(0) > swapChainSupport.capabilities.maxImageCount()) {
-                imageCount.put(0, swapChainSupport.capabilities.maxImageCount());
+            // The configured frame count is only a hint: the surface's minimum (and,
+            // when set, maximum) image count always wins.
+            int requestedImages = Math.max(frameQueueSize, swapChainSupport.capabilities.minImageCount());
+            int maxImages = swapChainSupport.capabilities.maxImageCount();
+            if(maxImages > 0 && requestedImages > maxImages) {
+                requestedImages = maxImages;
             }
+            IntBuffer imageCount = stack.ints(requestedImages);
 
             VkSwapchainCreateInfoKHR createInfo = VkSwapchainCreateInfoKHR.create();
 
@@ -641,8 +730,6 @@ public class Vulkan {
             colorAttachment.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
             colorAttachment.finalLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
-            int y = attachments.get(0).samples();
-
             VkAttachmentReference colorAttachmentRef = attachmentRefs.get(0);
             colorAttachmentRef.attachment(0);
             colorAttachmentRef.layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -669,19 +756,24 @@ public class Vulkan {
             subpass.pColorAttachments(VkAttachmentReference.create(1).put(0, colorAttachmentRef));
             subpass.pDepthStencilAttachment(depthAttachmentRef);
 
+            // Order the previous frames' attachment writes against this subpass: the depth
+            // image is shared by all frames in flight, so the clear/depth-test of frame N+1
+            // must not run before frame N's depth writes (late fragment tests) finished;
+            // the layout transition out of PRESENT_SRC may otherwise happen before the
+            // imageAvailable wait of the submit.
             VkSubpassDependency.Buffer dependency = VkSubpassDependency.create(1);
             dependency.srcSubpass(VK_SUBPASS_EXTERNAL);
             dependency.dstSubpass(0);
-            dependency.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
-            dependency.srcAccessMask(0);
+            dependency.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+            dependency.srcAccessMask(VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
             dependency.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
-            dependency.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+            dependency.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
             VkRenderPassCreateInfo renderPassInfo = VkRenderPassCreateInfo.create();
             renderPassInfo.sType(VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO);
             renderPassInfo.pAttachments(attachments);
             renderPassInfo.pSubpasses(subpass);
-            //renderPassInfo.pDependencies(dependency);
+            renderPassInfo.pDependencies(dependency);
 
             LongBuffer pRenderPass = stack.mallocLong(1);
 
@@ -797,10 +889,15 @@ public class Vulkan {
         if (vsync) {
             return VK_PRESENT_MODE_FIFO_KHR;
         }
+        // MAILBOX is the tear-free low-latency mode; IMMEDIATE tears, so it is
+        // only the fallback for surfaces without mailbox.
+        if (mailbox) {
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
         if (immediate) {
             return VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
-        return mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+        return VK_PRESENT_MODE_FIFO_KHR;
     }
 
     private static VkExtent2D chooseSwapExtent(VkSurfaceCapabilitiesKHR capabilities) {
@@ -855,7 +952,7 @@ public class Vulkan {
     }
 
     public static VkViewport.Buffer viewport(MemoryStack stack) {
-        VkViewport.Buffer viewport = VkViewport.create(1);
+        VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
         viewport.x(0.0f);
         viewport.y(swapChainExtent.height());
         viewport.width(swapChainExtent.width());
@@ -867,8 +964,8 @@ public class Vulkan {
     }
 
     public static VkRect2D.Buffer scissor(MemoryStack stack) {
-        VkRect2D.Buffer scissor = VkRect2D.create(1);
-        scissor.offset(VkOffset2D.create().set(0, 0));
+        VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+        scissor.offset(VkOffset2D.calloc(stack).set(0, 0));
         scissor.extent(swapChainExtent);
 
         return scissor;
@@ -925,21 +1022,32 @@ public class Vulkan {
         }
     }
 
+    /**
+     * Buffer-to-buffer copy. Inside the frame window it is recorded into the frame's
+     * transfer command buffer (submitted and fenced with the frame, no CPU wait);
+     * outside it goes through the TransferQueue with a fence of its own.
+     */
     public static void copyStagingtoLocalBuffer(long srcBuffer, long srcOffset, long dstBuffer, long dstOffset, long size) {
 
         try(MemoryStack stack = stackPush()) {
 
-            TransferQueue.CommandBuffer commandBuffer = TransferQueue.beginCommands();
+            VkCommandBuffer frameCmd = Drawer.getFrameTransferCmd();
 
             VkBufferCopy.Buffer copyRegion = VkBufferCopy.create(1);
             copyRegion.size(size);
             copyRegion.srcOffset(srcOffset);
             copyRegion.dstOffset(dstOffset);
 
+            if(frameCmd != null) {
+                vkCmdCopyBuffer(frameCmd, srcBuffer, dstBuffer, copyRegion);
+                return;
+            }
+
+            TransferQueue.CommandBuffer commandBuffer = TransferQueue.beginCommands();
+
             vkCmdCopyBuffer(commandBuffer.getHandle(), srcBuffer, dstBuffer, copyRegion);
 
-            long fence = TransferQueue.endCommands(commandBuffer);
-            if(fence != -1) Synchronization.addFence(fence);
+            TransferQueue.endCommands(commandBuffer);
         }
     }
 
@@ -970,7 +1078,7 @@ public class Vulkan {
 
     public static VkCommandBuffer beginImmediateCmd() {
         try (MemoryStack stack = stackPush()) {
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.create();
+            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack);
             beginInfo.sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
 
             vkBeginCommandBuffer(immediateCmdBuffer, beginInfo);
@@ -982,11 +1090,14 @@ public class Vulkan {
         try (MemoryStack stack = stackPush()) {
             vkEndCommandBuffer(immediateCmdBuffer);
 
-            VkSubmitInfo.Buffer submitInfo = VkSubmitInfo.create(1);
+            VkSubmitInfo.Buffer submitInfo = VkSubmitInfo.calloc(1, stack);
             submitInfo.sType(VK_STRUCTURE_TYPE_SUBMIT_INFO);
             submitInfo.pCommandBuffers(stack.pointers(immediateCmdBuffer));
 
-            vkQueueSubmit(graphicsQueue, submitInfo, immediateFence);
+            int result = vkQueueSubmit(graphicsQueue, submitInfo, immediateFence);
+            if(result != VK_SUCCESS) {
+                throw new RuntimeException("Failed to submit immediate command buffer: " + result);
+            }
 
             vkWaitForFences(device, immediateFence, true, VUtil.UINT64_MAX);
             vkResetFences(device, immediateFence);
@@ -1038,16 +1149,13 @@ public class Vulkan {
         if(extensionsSupported) {
             try(MemoryStack stack = stackPush()) {
                 SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device, stack);
-                swapChainAdequate = swapChainSupport.formats.hasRemaining() && swapChainSupport.presentModes.hasRemaining() ;
+                swapChainAdequate = swapChainSupport.formats != null && swapChainSupport.formats.hasRemaining()
+                        && swapChainSupport.presentModes != null && swapChainSupport.presentModes.hasRemaining();
             }
         }
 
-        boolean anisotropicFilterSuppoted = false;
-        try(MemoryStack stack = stackPush()) {
-            VkPhysicalDeviceFeatures supportedFeatures = VkPhysicalDeviceFeatures.create();
-            vkGetPhysicalDeviceFeatures(device, supportedFeatures);
-            anisotropicFilterSuppoted = supportedFeatures.samplerAnisotropy();
-        }
+        // Feature support (anisotropy, wideLines, multiDrawIndirect) is queried and gated
+        // at device creation in createDevice; nothing to check here.
 
         return indices.isComplete() && extensionsSupported && swapChainAdequate;
     }
@@ -1081,47 +1189,26 @@ public class Vulkan {
 
         SwapChainSupportDetails details = new SwapChainSupportDetails();
 
-        if(stack != null) {
-            details.capabilities = VkSurfaceCapabilitiesKHR.create();
-            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, details.capabilities);
+        // Everything is allocated on the caller's stack: the details (and the static
+        // field pointing at them) are only ever read inside the caller's stack scope.
+        details.capabilities = VkSurfaceCapabilitiesKHR.calloc(stack);
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, details.capabilities);
 
-            IntBuffer count = stack.ints(0);
+        IntBuffer count = stack.ints(0);
 
-            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, null);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, null);
 
-            if(count.get(0) != 0) {
-                details.formats = VkSurfaceFormatKHR.create(count.get(0));
-                vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, details.formats);
-            }
-
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device,surface, count, null);
-
-            if(count.get(0) != 0) {
-                details.presentModes = stack.mallocInt(count.get(0));
-                vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, count, details.presentModes);
-            }
-        }
-        else {
-            details.capabilities = VkSurfaceCapabilitiesKHR.malloc();
-            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, details.capabilities);
-
-            IntBuffer count = MemoryStack.stackInts(0);
-
-            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, null);
-
-            if(count.get(0) != 0) {
-                details.formats = VkSurfaceFormatKHR.malloc(count.get(0));
-                vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, details.formats);
-            }
-
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device,surface, count, null);
-
-            if(count.get(0) != 0) {
-                details.presentModes = MemoryUtil.memAllocInt(count.get(0));
-                vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, count, details.presentModes);
-            }
+        if(count.get(0) != 0) {
+            details.formats = VkSurfaceFormatKHR.calloc(count.get(0), stack);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, details.formats);
         }
 
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device,surface, count, null);
+
+        if(count.get(0) != 0) {
+            details.presentModes = stack.mallocInt(count.get(0));
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, count, details.presentModes);
+        }
 
         return details;
     }
@@ -1142,7 +1229,9 @@ public class Vulkan {
 
             IntBuffer presentSupport = stack.ints(VK_FALSE);
 
-            for(int i = 0;i < queueFamilies.capacity() || !indices.isComplete();i++) {
+            // Stop at the family count: a GPU without a present-capable queue must return
+            // incomplete indices (isDeviceSuitable() rejects it), not run off the array.
+            for(int i = 0;i < queueFamilies.capacity() && !indices.isComplete();i++) {
 
                 if((queueFamilies.get(i).queueFlags() & VK_QUEUE_GRAPHICS_BIT) != 0) {
                     indices.graphicsFamily = i;

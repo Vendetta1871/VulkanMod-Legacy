@@ -67,20 +67,30 @@ public class CloudRenderer {
     /**
      * Called at the head of {@code RenderGlobal.renderClouds}, before the GL clouds run.
      * The eye coordinates and cloud tick counter are the ones vanilla is about to use.
+     *
+     * @return true when the Vulkan clouds replaced the vanilla GL layer, so the caller
+     *         can cancel {@code RenderGlobal.renderClouds}; false when the GL path has
+     *         to run (custom cloud renderer, inactive renderer, texture load failure).
      */
-    public static void render(float partialTicks, int pass, int cloudTickCounter,
-                              double eyeX, double eyeY, double eyeZ) {
+    public static boolean render(float partialTicks, int pass, int cloudTickCounter,
+                                 double eyeX, double eyeY, double eyeZ) {
         Minecraft mc = Minecraft.getMinecraft();
         World world = mc.world;
         if (world == null || !Drawer.isActive() || Drawer.skipRendering) {
-            return;
+            return false;
         }
         if (!world.provider.isSurfaceWorld()) {
-            return;
+            return false;
+        }
+        // A modded cloud renderer draws its own GL geometry; like the sky renderer it
+        // cannot be replayed generically, so the GL path stays.
+        if (world.provider.getCloudRenderer() != null) {
+            return false;
         }
 
+        boolean drawn = false;
         try {
-            renderClouds(mc, world, partialTicks, pass, cloudTickCounter, eyeX, eyeY, eyeZ);
+            drawn = renderClouds(mc, world, partialTicks, pass, cloudTickCounter, eyeX, eyeY, eyeZ);
         } catch (Throwable t) {
             TerrainRenderer.reportOnce("clouds", t);
         } finally {
@@ -89,12 +99,13 @@ public class CloudRenderer {
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
             TextureBridge.restoreAtlasBinding();
         }
+        return drawn;
     }
 
-    private static void renderClouds(Minecraft mc, World world, float partialTicks, int pass,
-                                     int cloudTickCounter, double eyeX, double eyeY, double eyeZ) {
+    private static boolean renderClouds(Minecraft mc, World world, float partialTicks, int pass,
+                                        int cloudTickCounter, double eyeX, double eyeY, double eyeZ) {
         if (!ensureCloudTexture()) {
-            return;
+            return false;
         }
 
         Drawer drawer = Drawer.getInstance();
@@ -166,6 +177,7 @@ public class CloudRenderer {
             buildClouds(world, partialTicks, cloudTickCounter, eyeX, eyeY, eyeZ, r, g, b);
             drawer.draw(cloudBuffer, 7, POSITION_TEX_COLOR, CLOUD_VERTS);
         }
+        return true;
     }
 
     /**

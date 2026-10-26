@@ -1,11 +1,13 @@
 package net.vulkanmod.render;
 
 import net.vulkanmod.vulkan.Drawer;
+import net.vulkanmod.vulkan.TransferQueue;
 import net.vulkanmod.vulkan.Vulkan;
 import net.vulkanmod.vulkan.memory.MemoryManager;
 import net.vulkanmod.vulkan.memory.StagingBuffer;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkCommandBuffer;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
@@ -146,11 +148,8 @@ public class ChunkArena {
 
     /** Copies {@code bytes} from {@code data} into the arena at {@code offset} (staging upload). */
     public void upload(int offset, ByteBuffer data, int bytes) {
-        // Uploads issued outside the Vulkan frame window must not clobber staging regions
-        // still in flight from the previous frame (same guard as the per-chunk VBO path).
-        if (!Drawer.isActive()) {
-            net.vulkanmod.vulkan.Synchronization.waitFences();
-        }
+        // Staging safety for uploads outside the frame window is enforced inside
+        // StagingBuffer.copyBuffer (see Drawer.ensureStagingFree).
         StagingBuffer staging = Vulkan.getStagingBuffer(Drawer.getCurrentFrame());
         staging.copyBuffer(bytes, data);
         copyStagingtoLocalBuffer(staging.getBufferId(), staging.getOffset(), buffer, offset, bytes);
@@ -169,10 +168,36 @@ public class ChunkArena {
 
         // Move the live region to the new buffer device-to-device; offsets stay valid.
         if (highWater > 0) {
-            copyStagingtoLocalBuffer(oldBuffer, 0, this.buffer, 0, highWater);
+            VkCommandBuffer frameCmd = Drawer.getFrameTransferCmd();
+            if (frameCmd != null) {
+                // The copy rides the frame's transfer command buffer together with the
+                // plain uploads of the same frame. Transfer commands do not order
+                // against each other, so bracket it with TRANSFER->TRANSFER barriers:
+                // RAW against the uploads it must copy (they wrote the old buffer),
+                // WAW against the uploads that follow into reused arena regions.
+                transferBarrier(frameCmd);
+                copyStagingtoLocalBuffer(oldBuffer, 0, this.buffer, 0, highWater);
+                transferBarrier(frameCmd);
+            } else {
+                copyStagingtoLocalBuffer(oldBuffer, 0, this.buffer, 0, highWater);
+                // Immediate submit: retire it before returning, so the next copy issued
+                // on this queue cannot overlap it.
+                TransferQueue.waitPendingFences();
+            }
         }
         // Defer freeing the old buffer until the copy has retired.
         MemoryManager.addToFreeable(oldBuffer, oldMemory);
+    }
+
+    private static void transferBarrier(VkCommandBuffer commandBuffer) {
+        // Stage-mask-only barrier: a global TRANSFER write-after-write/write-after-read
+        // dependency between the copies recorded before and after it.
+        vkCmdPipelineBarrier(commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, (org.lwjgl.vulkan.VkMemoryBarrier.Buffer) null,
+                (org.lwjgl.vulkan.VkBufferMemoryBarrier.Buffer) null,
+                (org.lwjgl.vulkan.VkImageMemoryBarrier.Buffer) null);
     }
 
     public long bufferId() {

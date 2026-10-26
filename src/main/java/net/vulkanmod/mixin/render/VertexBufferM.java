@@ -1,14 +1,14 @@
 package net.vulkanmod.mixin.render;
 
-import net.minecraft.client.renderer.GlStateManager;
-import net.minecraft.client.renderer.OpenGlHelper;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.render.VBO;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Overwrite;
-import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.gen.Accessor;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.nio.ByteBuffer;
 
@@ -20,92 +20,69 @@ import java.nio.ByteBuffer;
  *
  * <p>While the Vulkan renderer is not active (during startup, or when its
  * initialization failed) the original OpenGL path is kept.</p>
+ *
+ * <p>The vanilla methods are intercepted with cancellable {@code @Inject}s rather than
+ * {@code @Overwrite}s: an overwrite must match the runtime (SRG) name of the target,
+ * which the build cannot remap, and it would also replace any other mod's injection
+ * into the same method. Only the chunk (BLOCK) format is routed to Vulkan; the sky and
+ * star buffers keep their GL upload until ported.</p>
  */
 @Mixin(net.minecraft.client.renderer.vertex.VertexBuffer.class)
-public class VertexBufferM {
-
-    @Shadow
-    private int glBufferId;
-
-    @Shadow
-    private int count;
-
-    @Shadow
-    private VertexFormat vertexFormat;
+public abstract class VertexBufferM {
 
     private VBO vulkanmod$vbo;
 
-    /**
-     * @author
-     */
-    @Overwrite
-    public void bufferData(ByteBuffer buffer) {
-        int vertexCount = buffer.limit() / this.vertexFormat.getSize();
+    // Accessor instead of @Shadow: shadowed fields never reach the refmap and would
+    // not bind under the SRG runtime names.
+    @Accessor("vertexFormat")
+    abstract VertexFormat vulkanmod$getVertexFormat();
 
-        if (Initializer.isVulkanActive()) {
-            if (this.vulkanmod$vbo == null) {
-                this.vulkanmod$vbo = new VBO();
-            }
-            this.vulkanmod$vbo.upload(buffer, this.vertexFormat, vertexCount);
-        } else {
-            // Renderer not up yet (e.g. sky/star buffers created in Minecraft.init)
-            OpenGlHelper.glBindBuffer(OpenGlHelper.GL_ARRAY_BUFFER, this.glBufferId);
-            OpenGlHelper.glBufferData(OpenGlHelper.GL_ARRAY_BUFFER, buffer, 35044); // GL_STATIC_DRAW
-            OpenGlHelper.glBindBuffer(OpenGlHelper.GL_ARRAY_BUFFER, 0);
-        }
-
-        this.count = vertexCount;
-    }
-
-    /**
-     * @author
-     */
-    @Overwrite
-    public void drawArrays(int mode) {
-        if (!Initializer.isVulkanActive()) {
-            GlStateManager.glDrawArrays(mode, 0, this.count);
+    @Inject(method = "bufferData(Ljava/nio/ByteBuffer;)V", at = @At("HEAD"), cancellable = true)
+    private void vulkanmod$bufferData(ByteBuffer buffer, CallbackInfo ci) {
+        if (!Initializer.isVulkanActive() || vulkanmod$getVertexFormat() != DefaultVertexFormats.BLOCK) {
             return;
         }
+        if (this.vulkanmod$vbo == null) {
+            this.vulkanmod$vbo = new VBO();
+        }
+        VertexFormat format = vulkanmod$getVertexFormat();
+        this.vulkanmod$vbo.upload(buffer, format, buffer.limit() / format.getSize());
+        ci.cancel();
+    }
 
-        // Only the chunk (BLOCK) format has a Vulkan pipeline so far; the sky and
-        // star buffers keep their GL data and stay invisible until ported.
-        if (this.vertexFormat == DefaultVertexFormats.BLOCK && this.vulkanmod$vbo != null) {
+    @Inject(method = "drawArrays(I)V", at = @At("HEAD"), cancellable = true)
+    private void vulkanmod$drawArrays(int mode, CallbackInfo ci) {
+        if (!Initializer.isVulkanActive()) {
+            return;
+        }
+        if (vulkanmod$getVertexFormat() == DefaultVertexFormats.BLOCK && this.vulkanmod$vbo != null) {
             this.vulkanmod$vbo.draw();
         }
+        // The sky and star buffers have no Vulkan pipeline: skip their GL draw, they
+        // are rendered by SkyRenderer instead.
+        ci.cancel();
     }
 
-    /**
-     * @author
-     */
-    @Overwrite
-    public void bindBuffer() {
-        if (!Initializer.isVulkanActive()) {
-            OpenGlHelper.glBindBuffer(OpenGlHelper.GL_ARRAY_BUFFER, this.glBufferId);
+    @Inject(method = "bindBuffer()V", at = @At("HEAD"), cancellable = true)
+    private void vulkanmod$bindBuffer(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            ci.cancel();
         }
     }
 
-    /**
-     * @author
-     */
-    @Overwrite
-    public void unbindBuffer() {
-        if (!Initializer.isVulkanActive()) {
-            OpenGlHelper.glBindBuffer(OpenGlHelper.GL_ARRAY_BUFFER, 0);
+    @Inject(method = "unbindBuffer()V", at = @At("HEAD"), cancellable = true)
+    private void vulkanmod$unbindBuffer(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            ci.cancel();
         }
     }
 
-    /**
-     * @author
-     */
-    @Overwrite
-    public void deleteGlBuffers() {
+    @Inject(method = "deleteGlBuffers()V", at = @At("HEAD"))
+    private void vulkanmod$deleteGlBuffers(CallbackInfo ci) {
         if (this.vulkanmod$vbo != null) {
             this.vulkanmod$vbo.close();
             this.vulkanmod$vbo = null;
         }
-        if (this.glBufferId >= 0) {
-            OpenGlHelper.glDeleteBuffers(this.glBufferId);
-            this.glBufferId = -1;
-        }
+        // Vanilla then deletes the GL buffer id it still owns.
     }
 }

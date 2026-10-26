@@ -76,6 +76,14 @@ public class WorldBorderRenderer {
             return;
         }
 
+        // The depth/cull state is tracked from the vanilla GlStateManager calls; save
+        // what the frame had on entry so the restore below cannot hardcode values the
+        // following pass (the translucent layer) does not expect.
+        boolean depthTest = VRenderSystem.depthTest;
+        boolean depthMask = VRenderSystem.depthMask;
+        int depthFun = VRenderSystem.depthFun;
+        boolean cull = VRenderSystem.cull;
+
         try {
             renderBorder(mc, world, entity, partialTicks);
         } catch (Throwable t) {
@@ -85,8 +93,18 @@ public class WorldBorderRenderer {
             // as-is at draw time, so restore them the way the cloud pass does.
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
             VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-            VRenderSystem.depthMask(true);
-            VRenderSystem.enableCull();
+            VRenderSystem.depthMask(depthMask);
+            VRenderSystem.depthFunc(depthFun);
+            if (depthTest) {
+                VRenderSystem.enableDepthTest();
+            } else {
+                VRenderSystem.disableDepthTest();
+            }
+            if (cull) {
+                VRenderSystem.enableCull();
+            } else {
+                VRenderSystem.disableCull();
+            }
             VRenderSystem.disablePolygonOffset();
             TextureBridge.restoreAtlasBinding();
         }
@@ -129,14 +147,9 @@ public class WorldBorderRenderer {
         snapshotFog();
 
         // --- state mirrored from vanilla's renderWorldBorder sequence ---
+        // Depth test/func are already tracked from the vanilla GlStateManager calls
+        // (GlStateManagerDepthM); only the border-specific overrides are applied here.
         VRenderSystem.depthMask(false);
-        if (boolState(GL11.GL_DEPTH_TEST)) {
-            VRenderSystem.enableDepthTest();
-        } else {
-            VRenderSystem.disableDepthTest();
-        }
-        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, (java.nio.IntBuffer) int1());
-        VRenderSystem.depthFunc(int1().get(0));
         VRenderSystem.disableCull();
 
         // Status colour (green normally, red while warning); the alpha is the distance

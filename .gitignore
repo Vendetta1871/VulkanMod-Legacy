@@ -27,6 +27,12 @@ run/*/options.txt
 .idea/
 *.iml
 .vscode/
+
+# Agent/audit notes (local only)
+AGENTS.md
+AUDIT.md
+
 run/client/.mixin.out/
 run/*/*.png
 run/client/vm_mvp_dump.txt
+run/client/config/vulkanmod/

@@ -19,6 +19,7 @@ import org.lwjgl.vulkan.*;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -51,10 +52,22 @@ public class Pipeline {
     private String path;
     private long descriptorSetLayout;
     private long pipelineLayout;
-    private Map<PipelineState, Long> graphicsPipelines = new HashMap<>();
+    // Graphics pipeline variants keyed by the packed state long (see packStateKey):
+    // allocation-free per-draw lookup instead of PipelineState object churn.
+    private Map<Long, Long> graphicsPipelines = new HashMap<>();
+    private long lastStateKey = Long.MIN_VALUE;
+    private long lastStateHandle;
     private VertexFormat vertexFormat;
 
     private final long[] descriptorPools = new long[imagesSize];
+    // Descriptor set cached per frame slot, valid while the bound texture triple and the
+    // UBO buffer generation are unchanged (the UBO bindings are dynamic, so per-draw data
+    // changes do not invalidate them). Cleared on pool reset/resize.
+    private final long[] cachedSets = new long[imagesSize];
+    private final VulkanImage[] cachedTex0 = new VulkanImage[imagesSize];
+    private final VulkanImage[] cachedTex1 = new VulkanImage[imagesSize];
+    private final VulkanImage[] cachedTex2 = new VulkanImage[imagesSize];
+    private final int[] cachedGen = new int[imagesSize];
     private int descriptorCount = 500;
     // Pools replaced by a mid-frame resize: {long[] handles, Integer framesAged}. Static
     // so one per-frame pass can age every pipeline's pools, including pipelines that stop
@@ -71,14 +84,94 @@ public class Pipeline {
     private long vertShaderModule = 0;
     private long fragShaderModule = 0;
 
+    /** Every live Pipeline, so Vulkan.cleanUp can destroy them all at teardown. */
+    private static final java.util.ArrayList<Pipeline> INSTANCES = new java.util.ArrayList<>();
+
+    /** Destroys every pipeline's shader modules, descriptor pools, variants and layout. */
+    public static void cleanUpAll() {
+        for(Pipeline pipeline : INSTANCES) {
+            pipeline.cleanUp();
+        }
+        INSTANCES.clear();
+
+        // The shared cache is only referenced at pipeline-creation time, so it goes last.
+        vkDestroyPipelineCache(device, pipelineCache, null);
+    }
+
     public Pipeline(VertexFormat vertexFormat, String path) {
         this.path = path;
 
+        this.vertexFormat = vertexFormat;
+
         createDescriptorSetLayout(path);
         createPipelineLayout();
-        graphicsPipelines.computeIfAbsent(new PipelineState(DEFAULT_BLEND_STATE, DEFAULT_DEPTH_STATE, DEFAULT_LOGICOP_STATE, DEFAULT_COLORMASK),
-                (pipelineState) -> createGraphicsPipeline(vertexFormat, pipelineState));
+        long defaultKey = packStateKey(DEFAULT_BLEND_STATE, DEFAULT_DEPTH_STATE.depthTest,
+                DEFAULT_DEPTH_STATE.depthMask, DEFAULT_DEPTH_STATE.function, DEFAULT_LOGICOP_STATE,
+                DEFAULT_COLORMASK.colorMask, VRenderSystem.cull, VRenderSystem.topology);
+        graphicsPipelines.put(defaultKey, createGraphicsPipeline(vertexFormat, unpackStateKey(defaultKey)));
+        lastStateKey = defaultKey;
+        lastStateHandle = graphicsPipelines.get(defaultKey);
         createDescriptorPool(descriptorCount);
+
+        INSTANCES.add(this);
+    }
+
+    /**
+     * Packs the full dynamic pipeline state (blend, depth, logic-op, color-mask, cull,
+     * topology) into a long map key, so a per-draw state lookup allocates nothing.
+     * Field widths: blend enabled 1 bit, four Vulkan blend factors (0..15) 4 bits each,
+     * depth test/mask 1 bit each, Vulkan compare op (0..8) 4 bits, cull 1 bit, logic-op
+     * enabled 1 bit, logic op (0..16) 5 bits, color mask 4 bits, topology (0..5) 3 bits.
+     */
+    public static long packStateKey(BlendState blend, boolean depthTest, boolean depthMask,
+                                    int vkDepthFunc, LogicOpState logicOp,
+                                    int colorMask, boolean cull, int topology) {
+        long key = 0;
+        if (blend.enabled) key |= 1L;
+        key |= (long) blend.srcRgbFactor << 1;
+        key |= (long) blend.dstRgbFactor << 5;
+        key |= (long) blend.srcAlphaFactor << 9;
+        key |= (long) blend.dstAlphaFactor << 13;
+        if (depthTest) key |= 1L << 17;
+        if (depthMask) key |= 1L << 18;
+        key |= (long) vkDepthFunc << 19;
+        if (cull) key |= 1L << 23;
+        if (logicOp.enabled) key |= 1L << 24;
+        key |= (long) logicOp.getLogicOp() << 25;
+        key |= (long) colorMask << 30;
+        key |= (long) topology << 34;
+        return key;
+    }
+
+    /** Rebuilds the state objects from a packed key, for a cache-miss pipeline creation. */
+    private static PipelineState unpackStateKey(long key) {
+        boolean blendEnabled = (key & 1L) != 0;
+        BlendState blend = new BlendState(blendEnabled,
+                (int) (key >>> 1) & 0xF, (int) (key >>> 5) & 0xF,
+                (int) (key >>> 9) & 0xF, (int) (key >>> 13) & 0xF);
+        DepthState depth = new DepthState((key & (1L << 17)) != 0, (key & (1L << 18)) != 0,
+                (int) (key >>> 19) & 0xF, true);
+        LogicOpState logicOp = new LogicOpState((key & (1L << 24)) != 0, (int) (key >>> 25) & 0x1F);
+        ColorMask colorMask = new ColorMask((int) (key >>> 30) & 0xF);
+        return new PipelineState(blend, depth, logicOp, colorMask,
+                (key & (1L << 23)) != 0, (int) (key >>> 34) & 0x7);
+    }
+
+    /** Handle of the pipeline variant for a packed state key, creating it on first use. */
+    public long getHandle(long stateKey) {
+        if (stateKey == lastStateKey) {
+            return lastStateHandle;
+        }
+        Long handle = graphicsPipelines.get(stateKey);
+        if (handle == null) {
+            handle = createGraphicsPipeline(vertexFormat, unpackStateKey(stateKey));
+            graphicsPipelines.put(stateKey, handle);
+            // Persist the driver cache whenever it grew, so the next launch starts warm.
+            savePipelineCache();
+        }
+        lastStateKey = stateKey;
+        lastStateHandle = handle;
+        return handle;
     }
 
     private long createGraphicsPipeline(VertexFormat vertexFormat, PipelineState state) {
@@ -94,6 +187,10 @@ public class Pipeline {
 
                 vertShaderModule = createShaderModule(vertShaderSPIRV.bytecode());
                 fragShaderModule = createShaderModule(fragShaderSPIRV.bytecode());
+
+                // vkCreateShaderModule copies the SPIR-V, so the shaderc results can go.
+                vertShaderSPIRV.free();
+                fragShaderSPIRV.free();
             }
 
             ByteBuffer entryPoint = stack.UTF8("main");
@@ -299,7 +396,7 @@ public class Pipeline {
                 VkDescriptorSetLayoutBinding uboLayoutBinding = bindings.get(ubo.getBinding());
                 uboLayoutBinding.binding(ubo.getBinding());
                 uboLayoutBinding.descriptorCount(1);
-                uboLayoutBinding.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+                uboLayoutBinding.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
                 uboLayoutBinding.pImmutableSamplers(null);
                 uboLayoutBinding.stageFlags(ubo.getFlags());
 
@@ -382,7 +479,7 @@ public class Pipeline {
             int i;
             for(i = 0; i < UBOs.size(); ++i) {
                 VkDescriptorPoolSize uniformBufferPoolSize = poolSizes.get(i);
-                uniformBufferPoolSize.type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+                uniformBufferPoolSize.type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
                 uniformBufferPoolSize.descriptorCount(descriptorCount);
             }
 
@@ -436,11 +533,206 @@ public class Pipeline {
         graphicsPipelines.clear();
 
         vkDestroyPipelineLayout(device, pipelineLayout, null);
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, null);
     }
 
-    public long createDescriptorSets(VkCommandBuffer commandBuffer, int frame, UniformBuffers uniformBuffers) {
-        DescriptorSetsUnit dsUnit = new DescriptorSetsUnit(commandBuffer, frame, uniformBuffers);
-        return dsUnit.descriptorSet;
+    /**
+     * Uploads this pipeline's UBO data into the frame slot's ring buffer and binds the
+     * descriptor set with the resulting dynamic offsets.
+     *
+     * <p>The UBO bindings are {@code UNIFORM_BUFFER_DYNAMIC} and point at the whole
+     * per-frame UBO buffer, so the descriptor set only depends on (frame slot, bound
+     * textures, buffer generation) - not on the per-draw data. It is therefore allocated
+     * and written once per texture change instead of once per draw, and the per-draw
+     * cost collapses to the UBO memcpy plus {@code vkCmdBindDescriptorSets} with the
+     * fresh offsets.</p>
+     */
+    public void bindDescriptorSets(VkCommandBuffer commandBuffer, int frame, UniformBuffers uniformBuffers) {
+
+        try(MemoryStack stack = stackPush()) {
+
+            // vkCmdBindDescriptorSets takes the dynamic offsets as uint32_t entries
+            // (NOT VkDeviceSize), so the offsets are an IntBuffer.
+            IntBuffer offsets = stack.callocInt(UBOs.size());
+            for(UBO ubo : UBOs) {
+                ubo.update();
+                int offset = uniformBuffers.uploadUBO(ubo.getBuffer(), frame);
+                // The dynamic-offset array is indexed by the order of the dynamic
+                // bindings in the layout (ascending binding number, contiguous from 0).
+                offsets.put(ubo.getBinding(), offset);
+            }
+
+            long descriptorSet = getDescriptorSet(frame, uniformBuffers);
+
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipelineLayout, 0, stack.longs(descriptorSet), offsets);
+        }
+    }
+
+    private long getDescriptorSet(int frame, UniformBuffers uniformBuffers) {
+
+        VulkanImage texture0 = VTextureSelector.getBoundTexture();
+        if (texture0 == null) texture0 = VTextureSelector.getWhiteTexture();
+        VulkanImage texture1 = null, texture2 = null;
+        if (samplers.size() > 1) {
+            texture1 = VTextureSelector.getLightTexture();
+            if (texture1 == null) texture1 = VTextureSelector.getWhiteTexture();
+        }
+        if (samplers.size() > 2) {
+            texture2 = VTextureSelector.getOverlayTexture();
+            if (texture2 == null) texture2 = VTextureSelector.getWhiteTexture();
+        }
+
+        // Keep the per-draw layout guarantee: a cached set records
+        // SHADER_READ_ONLY_OPTIMAL, so every bound image must be in it.
+        texture0.readOnlyLayout();
+        if (texture1 != null) texture1.readOnlyLayout();
+        if (texture2 != null) texture2.readOnlyLayout();
+
+        int generation = uniformBuffers.getGeneration();
+        long set = cachedSets[frame];
+        if (set != 0 && cachedTex0[frame] == texture0 && cachedTex1[frame] == texture1
+                && cachedTex2[frame] == texture2 && cachedGen[frame] == generation) {
+            return set;
+        }
+
+        set = allocateDescriptorSet(frame);
+        writeDescriptorSet(set, frame, uniformBuffers, texture0, texture1, texture2);
+
+        cachedSets[frame] = set;
+        cachedTex0[frame] = texture0;
+        cachedTex1[frame] = texture1;
+        cachedTex2[frame] = texture2;
+        cachedGen[frame] = generation;
+        return set;
+    }
+
+    private long allocateDescriptorSet(int frame) {
+        try(MemoryStack stack = stackPush()) {
+
+            LongBuffer layouts = stack.mallocLong(1);
+            layouts.put(0, descriptorSetLayout);
+
+            VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack);
+            allocInfo.sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
+            allocInfo.descriptorPool(descriptorPools[frame]);
+            allocInfo.pSetLayouts(layouts);
+
+            LongBuffer pDescriptorSet = stack.mallocLong(1);
+
+            int result = vkAllocateDescriptorSets(device, allocInfo, pDescriptorSet);
+            if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+                descriptorCount *= 2;
+                // The old pools may still back sets referenced by in-flight command
+                // buffers, so they cannot be destroyed here; keep them until every
+                // frame-in-flight boundary has passed its fence (see
+                // {@link #processPendingDescriptorPools()}).
+                pendingPoolDestruction.add(new Object[]{descriptorPools.clone(), 0});
+                createDescriptorPool(descriptorCount);
+                // The pools were replaced: sets cached against the old ones must not be
+                // reused (the freshly allocated set is written below).
+                java.util.Arrays.fill(cachedSets, 0);
+                result = vkAllocateDescriptorSets(device, allocInfo, pDescriptorSet);
+                if (result != VK_SUCCESS) {
+                    throw new RuntimeException("Failed to allocate descriptor sets after pool resize. Result:" + result);
+                }
+                System.out.println("resized DescriptorPool to: " + descriptorCount);
+                return pDescriptorSet.get(0);
+            }
+            if (result != VK_SUCCESS) {
+                throw new RuntimeException("Failed to allocate descriptor sets. Result:" + result);
+            }
+
+            return pDescriptorSet.get(0);
+        }
+    }
+
+    private void writeDescriptorSet(long descriptorSet, int frame, UniformBuffers uniformBuffers,
+                                    VulkanImage texture0, VulkanImage texture1, VulkanImage texture2) {
+        try(MemoryStack stack = stackPush()) {
+
+            VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.calloc(UBOs.size() + samplers.size() + ssbos.size(), stack);
+
+            // 'binding' numbers the descriptor set layout (contiguous UBOs, samplers,
+            // SSBOs, see createDescriptorSetLayout); 'writes' indexes the write array.
+            // They diverge when an SSBO has no registered buffer: its binding stays
+            // reserved but no write is emitted (M23 - a zeroed VkWriteDescriptorSet
+            // would make vkUpdateDescriptorSets read garbage).
+            int binding = 0;
+            int writes = 0;
+            for(UBO ubo : UBOs) {
+                // Dynamic UBO: the descriptor covers the whole per-frame buffer (offset 0);
+                // the per-draw region is selected by the dynamic offset at bind time. The
+                // range is the UBO's own size, so offset+range always stays inside it.
+                VkDescriptorBufferInfo.Buffer uboInfo = VkDescriptorBufferInfo.calloc(1, stack);
+                uboInfo.buffer(uniformBuffers.getId(frame));
+                uboInfo.offset(0);
+                uboInfo.range(ubo.getSize());
+
+                VkWriteDescriptorSet uboDescriptorWrite = descriptorWrites.get(writes);
+                uboDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+                uboDescriptorWrite.dstBinding(ubo.getBinding());
+                uboDescriptorWrite.dstArrayElement(0);
+                uboDescriptorWrite.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
+                uboDescriptorWrite.descriptorCount(1);
+                uboDescriptorWrite.pBufferInfo(uboInfo);
+                uboDescriptorWrite.dstSet(descriptorSet);
+
+                ++binding;
+                ++writes;
+            }
+
+            VulkanImage[] textures = { texture0, texture1, texture2 };
+            for (int s = 0; s < samplers.size(); ++s) {
+                VulkanImage texture = textures[s];
+
+                VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(1, stack);
+                imageInfo.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                imageInfo.imageView(texture.getTextureImageView());
+                imageInfo.sampler(texture.getTextureSampler());
+
+                VkWriteDescriptorSet samplerDescriptorWrite = descriptorWrites.get(writes);
+                samplerDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+                samplerDescriptorWrite.dstBinding(binding);
+                samplerDescriptorWrite.dstArrayElement(0);
+                samplerDescriptorWrite.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+                samplerDescriptorWrite.descriptorCount(1);
+                samplerDescriptorWrite.pImageInfo(imageInfo);
+                samplerDescriptorWrite.dstSet(descriptorSet);
+
+                ++binding;
+                ++writes;
+            }
+
+            for(String name : ssbos) {
+                net.vulkanmod.vulkan.shader.SSBOResources.Binding b =
+                        net.vulkanmod.vulkan.shader.SSBOResources.get(name);
+                // Reserve the binding even without a buffer, but emit no write for it.
+                final int ssboBinding = binding++;
+                if (b == null) {
+                    continue;
+                }
+
+                VkDescriptorBufferInfo.Buffer ssboInfo = VkDescriptorBufferInfo.calloc(1, stack);
+                ssboInfo.buffer(b.buffer());
+                ssboInfo.offset(b.offset());
+                ssboInfo.range(b.range());
+
+                VkWriteDescriptorSet ssboWrite = descriptorWrites.get(writes);
+                ssboWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+                ssboWrite.dstBinding(ssboBinding);
+                ssboWrite.dstArrayElement(0);
+                ssboWrite.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                ssboWrite.descriptorCount(1);
+                ssboWrite.pBufferInfo(ssboInfo);
+                ssboWrite.dstSet(descriptorSet);
+
+                ++writes;
+            }
+
+            descriptorWrites.limit(writes);
+            vkUpdateDescriptorSets(device, descriptorWrites, null);
+        }
     }
 
     private static VkVertexInputBindingDescription.Buffer getBindingDescription(VertexFormat vertexFormat) {
@@ -601,11 +893,26 @@ public class Pipeline {
         }
     }
 
+    // Driver pipeline cache persisted across launches (config/vulkanmod/pipeline-cache.vkc).
+    private static final java.nio.file.Path PIPELINE_CACHE_FILE =
+            java.nio.file.Paths.get("config", "vulkanmod", "pipeline-cache.vkc");
+
     private static long createPipelineCache() {
+        // The persisted blob can be megabytes, so it goes into a dedicated off-heap
+        // buffer rather than the 64 KB MemoryStack. vkCreatePipelineCache copies it.
+        byte[] initial = loadPipelineCacheData();
+        ByteBuffer initialData = null;
         try(MemoryStack stack = stackPush()) {
 
             VkPipelineCacheCreateInfo cacheCreateInfo = VkPipelineCacheCreateInfo.create();
             cacheCreateInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
+
+            if (initial != null) {
+                initialData = org.lwjgl.system.MemoryUtil.memAlloc(initial.length);
+                initialData.put(initial);
+                initialData.flip();
+                cacheCreateInfo.pInitialData(initialData);
+            }
 
             LongBuffer pPipelineCache = stack.mallocLong(1);
 
@@ -614,6 +921,75 @@ public class Pipeline {
             }
 
             return pPipelineCache.get(0);
+        } finally {
+            if (initialData != null) {
+                org.lwjgl.system.MemoryUtil.memFree(initialData);
+            }
+        }
+    }
+
+    /**
+     * Reads the persisted cache and validates its header: the first 16 bytes are
+     * version (VK_PIPELINE_CACHE_HEADER_VERSION_ONE), vendor id, device id and the
+     * pipeline-cache UUID; a mismatch (driver or GPU changed) discards the file.
+     */
+    private static byte[] loadPipelineCacheData() {
+        try {
+            if (!java.nio.file.Files.isRegularFile(PIPELINE_CACHE_FILE)) {
+                return null;
+            }
+            byte[] data = java.nio.file.Files.readAllBytes(PIPELINE_CACHE_FILE);
+            if (data.length < 16) {
+                return null;
+            }
+            java.nio.ByteBuffer header = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            if (header.getInt(0) != 1) return null; // VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+            if (header.getInt(4) != Vulkan.deviceProperties.vendorID()) return null;
+            if (header.getInt(8) != Vulkan.deviceProperties.deviceID()) return null;
+            java.nio.ByteBuffer uuid = Vulkan.deviceProperties.pipelineCacheUUID();
+            for (int i = 0; i < 16; ++i) {
+                if (data[12 + i] != uuid.get(i)) return null;
+            }
+            return data;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Exports the driver cache blob to disk so the next launch seeds its pipeline cache
+     * with it. Called after each new pipeline variant is created: variant creation is
+     * rare and expensive, so the write never shows up in the steady-state frame cost,
+     * and a crash cannot lose the variants compiled since the last save.
+     */
+    public static void savePipelineCache() {
+        // The cache blob is megabytes - far beyond the 64 KB MemoryStack - so it is
+        // fetched into a dedicated off-heap buffer.
+        ByteBuffer pData = null;
+        try(MemoryStack stack = stackPush()) {
+            org.lwjgl.PointerBuffer pSize = stack.mallocPointer(1);
+            if (vkGetPipelineCacheData(device, pipelineCache, pSize, null) != VK_SUCCESS) {
+                return;
+            }
+            int size = (int) pSize.get(0);
+            if (size <= 0) {
+                return;
+            }
+            pData = org.lwjgl.system.MemoryUtil.memAlloc(size);
+            if (vkGetPipelineCacheData(device, pipelineCache, pSize, pData) != VK_SUCCESS) {
+                return;
+            }
+            byte[] bytes = new byte[size];
+            pData.position(0);
+            pData.get(bytes);
+            java.nio.file.Files.createDirectories(PIPELINE_CACHE_FILE.getParent());
+            java.nio.file.Files.write(PIPELINE_CACHE_FILE, bytes);
+        } catch (Exception e) {
+            // Cache persistence is best-effort; a failed write only costs warm-up time.
+        } finally {
+            if (pData != null) {
+                org.lwjgl.system.MemoryUtil.memFree(pData);
+            }
         }
     }
 
@@ -628,6 +1004,11 @@ public class Pipeline {
 
     public void resetDescriptorPool(int i) {
         this.resetDescriptorPoolFun.accept(i);
+        // The pool's sets are gone (or the pipeline is being torn down): drop the cache.
+        cachedSets[i] = 0;
+        cachedTex0[i] = null;
+        cachedTex1[i] = null;
+        cachedTex2[i] = null;
     }
 
     /**
@@ -655,189 +1036,11 @@ public class Pipeline {
         }
     }
 
-    public long getHandle(PipelineState state) {
-        return graphicsPipelines.computeIfAbsent(state, state1 -> createGraphicsPipeline(this.vertexFormat, state1));
-    }
-
     public PushConstant getPushConstant() { return pushConstant; }
 
     public long getLayout() { return pipelineLayout; }
 
     public String getPath() { return path; }
-
-    private class DescriptorSetsUnit {
-        private long descriptorSet;
-
-        private DescriptorSetsUnit(VkCommandBuffer commandBuffer, int frame, UniformBuffers uniformBuffers) {
-
-            allocateDescriptorSet(frame);
-            updateDescriptorSet(commandBuffer, frame, uniformBuffers);
-        }
-
-        private void allocateDescriptorSet(int frame) {
-            try(MemoryStack stack = stackPush()) {
-
-                LongBuffer layouts = stack.mallocLong(1);
-                layouts.put(0, descriptorSetLayout);
-
-                VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack);
-                allocInfo.sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
-                allocInfo.descriptorPool(descriptorPools[frame]);
-                allocInfo.pSetLayouts(layouts);
-
-                LongBuffer pDescriptorSet = stack.mallocLong(1);
-
-                int result = vkAllocateDescriptorSets(device, allocInfo, pDescriptorSet);
-                if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
-                    descriptorCount *= 2;
-                    // The old pools may still back sets referenced by in-flight command
-                    // buffers, so they cannot be destroyed here; keep them until every
-                    // frame-in-flight boundary has passed its fence (see
-                    // {@link #processPendingDescriptorPools()}).
-                    pendingPoolDestruction.add(new Object[]{descriptorPools.clone(), 0});
-                    createDescriptorPool(descriptorCount);
-                    allocateDescriptorSet(frame);
-
-                    System.out.println("resized DescriptorPool to: " + descriptorCount);
-                    return;
-                }
-                if (result != VK_SUCCESS) {
-                    throw new RuntimeException("Failed to allocate descriptor sets. Result:" + result);
-                }
-
-                descriptorSet = pDescriptorSet.get(0);
-            }
-        }
-
-        private void updateDescriptorSet(VkCommandBuffer commandBuffer, int frame, UniformBuffers uniformBuffers) {
-            try(MemoryStack stack = stackPush()) {
-
-                VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.calloc(UBOs.size() + samplers.size() + ssbos.size(), stack);
-                VkDescriptorBufferInfo.Buffer[] bufferInfos = new VkDescriptorBufferInfo.Buffer[UBOs.size()];
-
-                int currentOffset = uniformBuffers.getUsedBytes();
-
-                int i = 0;
-                for(UBO ubo : UBOs) {
-
-                    ubo.update();
-                    uniformBuffers.uploadUBO(ubo.getBuffer(), currentOffset, frame);
-
-                    bufferInfos[i] = VkDescriptorBufferInfo.calloc(1, stack);
-                    bufferInfos[i].buffer(uniformBuffers.getId(frame));
-                    bufferInfos[i].offset(currentOffset);
-                    bufferInfos[i].range(ubo.getSize());
-
-                    VkWriteDescriptorSet uboDescriptorWrite = descriptorWrites.get(i);
-                    uboDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-                    uboDescriptorWrite.dstBinding(ubo.getBinding());
-                    uboDescriptorWrite.dstArrayElement(0);
-                    uboDescriptorWrite.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-                    uboDescriptorWrite.descriptorCount(1);
-                    uboDescriptorWrite.pBufferInfo(bufferInfos[i]);
-                    uboDescriptorWrite.dstSet(descriptorSet);
-
-                    // The upload aligns to minUniformBufferOffsetAlignment, so the next
-                    // free offset must be taken from the ring buffer itself.
-                    currentOffset = uniformBuffers.getUsedBytes();
-                    ++i;
-                }
-
-                VkDescriptorImageInfo.Buffer[] imageInfos = new VkDescriptorImageInfo.Buffer[samplers.size()];
-
-                if (samplers.size() > 0) {
-                    VulkanImage texture = VTextureSelector.getBoundTexture();
-                    if (texture == null) texture = VTextureSelector.getWhiteTexture();
-                    texture.readOnlyLayout();
-
-                    imageInfos[0] = VkDescriptorImageInfo.calloc(1, stack);
-                    imageInfos[0].imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                    imageInfos[0].imageView(texture.getTextureImageView());
-                    imageInfos[0].sampler(texture.getTextureSampler());
-
-                    VkWriteDescriptorSet samplerDescriptorWrite = descriptorWrites.get(i);
-                    samplerDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-                    samplerDescriptorWrite.dstBinding(i);
-                    samplerDescriptorWrite.dstArrayElement(0);
-                    samplerDescriptorWrite.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-                    samplerDescriptorWrite.descriptorCount(1);
-                    samplerDescriptorWrite.pImageInfo(imageInfos[0]);
-                    samplerDescriptorWrite.dstSet(descriptorSet);
-
-                    ++i;
-
-                    if (samplers.size() > 1) {
-                        texture = VTextureSelector.getLightTexture();
-                        if (texture == null) texture = VTextureSelector.getWhiteTexture();
-                        texture.readOnlyLayout();
-
-                        imageInfos[1] = VkDescriptorImageInfo.calloc(1, stack);
-                        imageInfos[1].imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                        imageInfos[1].imageView(texture.getTextureImageView());
-                        imageInfos[1].sampler(texture.getTextureSampler());
-
-                        samplerDescriptorWrite = descriptorWrites.get(i);
-                        samplerDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-                        samplerDescriptorWrite.dstBinding(i);
-                        samplerDescriptorWrite.dstArrayElement(0);
-                        samplerDescriptorWrite.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-                        samplerDescriptorWrite.descriptorCount(1);
-                        samplerDescriptorWrite.pImageInfo(imageInfos[1]);
-                    samplerDescriptorWrite.dstSet(descriptorSet);
-
-                        ++i;
-
-                        if (samplers.size() > 2) {
-                            texture = VTextureSelector.getOverlayTexture();
-                            if (texture == null) texture = VTextureSelector.getWhiteTexture();
-                            texture.readOnlyLayout();
-
-                            imageInfos[2] = VkDescriptorImageInfo.calloc(1, stack);
-                            imageInfos[2].imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            imageInfos[2].imageView(texture.getTextureImageView());
-                            imageInfos[2].sampler(texture.getTextureSampler());
-
-                            samplerDescriptorWrite = descriptorWrites.get(i);
-                            samplerDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-                            samplerDescriptorWrite.dstBinding(i);
-                            samplerDescriptorWrite.dstArrayElement(0);
-                            samplerDescriptorWrite.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-                            samplerDescriptorWrite.descriptorCount(1);
-                            samplerDescriptorWrite.pImageInfo(imageInfos[2]);
-                    samplerDescriptorWrite.dstSet(descriptorSet);
-                        }
-                    }
-                }
-
-                for(String name : ssbos) {
-                    net.vulkanmod.vulkan.shader.SSBOResources.Binding b =
-                            net.vulkanmod.vulkan.shader.SSBOResources.get(name);
-                    if (b == null) {
-                        ++i;
-                        continue;
-                    }
-
-                    VkDescriptorBufferInfo.Buffer ssboInfo = VkDescriptorBufferInfo.calloc(1, stack);
-                    ssboInfo.buffer(b.buffer());
-                    ssboInfo.offset(b.offset());
-                    ssboInfo.range(b.range());
-
-                    VkWriteDescriptorSet ssboWrite = descriptorWrites.get(i);
-                    ssboWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-                    ssboWrite.dstBinding(i);
-                    ssboWrite.dstArrayElement(0);
-                    ssboWrite.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-                    ssboWrite.descriptorCount(1);
-                    ssboWrite.pBufferInfo(ssboInfo);
-                    ssboWrite.dstSet(descriptorSet);
-
-                    ++i;
-                }
-
-                vkUpdateDescriptorSets(device, descriptorWrites, null);
-            }
-        }
-    }
 
     public static BlendState defaultBlend() {
         // GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO
@@ -859,12 +1062,17 @@ public class Pipeline {
         final int topology;
 
         public PipelineState(BlendState blendState, DepthState depthState, LogicOpState logicOpState, ColorMask colorMask) {
+            this(blendState, depthState, logicOpState, colorMask, VRenderSystem.cull, VRenderSystem.topology);
+        }
+
+        public PipelineState(BlendState blendState, DepthState depthState, LogicOpState logicOpState,
+                             ColorMask colorMask, boolean cullState, int topology) {
             this.blendState = blendState;
             this.depthState = depthState;
             this.logicOpState = logicOpState;
             this.colorMask = colorMask;
-            this.cullState = VRenderSystem.cull;
-            this.topology = VRenderSystem.topology;
+            this.cullState = cullState;
+            this.topology = topology;
         }
 
         @Override
@@ -1015,12 +1223,21 @@ public class Pipeline {
         public final int function;
 
         public DepthState(boolean depthTest, boolean depthMask, int function) {
-            this.depthTest = depthTest;
-            this.depthMask = depthMask;
-            this.function = glToVulkan(function);
+            this(depthTest, depthMask, glToVulkan(function), true);
         }
 
-        private int glToVulkan(int value) {
+        /** {@code vkNative}: when true, {@code function} is already a Vulkan compare op. */
+        DepthState(boolean depthTest, boolean depthMask, int function, boolean vkNative) {
+            this.depthTest = depthTest;
+            this.depthMask = depthMask;
+            this.function = function;
+        }
+
+        public static int depthFuncToVulkan(int value) {
+            return glToVulkan(value);
+        }
+
+        private static int glToVulkan(int value) {
             return switch (value) {
                 case 512 -> VK_COMPARE_OP_NEVER;
                 case 513 -> VK_COMPARE_OP_LESS;

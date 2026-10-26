@@ -25,7 +25,7 @@ public class TextureAtlasSpriteM {
     private void vulkanmod$mirrorFrameAdvance(int[][] frames, int width, int height, int x, int y,
                                               boolean blur, boolean clamp) {
         TextureUtil.uploadTextureMipmap(frames, width, height, x, y, blur, clamp);
-        TextureBridge.uploadSpriteTile(frames[0], width, height, x, y);
+        TextureBridge.uploadSpriteTile(frames, width, height, x, y);
     }
 
     @Redirect(method = "updateAnimationInterpolated",
@@ -33,6 +33,6 @@ public class TextureAtlasSpriteM {
     private void vulkanmod$mirrorInterpolatedFrame(int[][] frames, int width, int height, int x, int y,
                                                    boolean blur, boolean clamp) {
         TextureUtil.uploadTextureMipmap(frames, width, height, x, y, blur, clamp);
-        TextureBridge.uploadSpriteTile(frames[0], width, height, x, y);
+        TextureBridge.uploadSpriteTile(frames, width, height, x, y);
     }
 }

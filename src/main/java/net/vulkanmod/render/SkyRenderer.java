@@ -13,6 +13,9 @@ import net.vulkanmod.Initializer;
 import net.vulkanmod.vulkan.Drawer;
 import net.vulkanmod.vulkan.Pipeline;
 import net.vulkanmod.vulkan.VRenderSystem;
+import net.vulkanmod.vulkan.memory.AutoIndexBuffer;
+import net.vulkanmod.vulkan.memory.MemoryTypes;
+import net.vulkanmod.vulkan.memory.VertexBuffer;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.joml.Matrix4f;
@@ -30,11 +33,10 @@ import java.util.Random;
 /**
  * Vulkan port of the 1.12.2 overworld sky (see {@code RenderGlobal.renderSky}).
  *
- * <p>Drawn at the head of {@code renderSky} (see RenderGlobalM) while the vanilla GL
- * sky still executes right after (its output is never presented). All sky geometry is
- * deterministic or CPU-side, so it is rebuilt here instead of intercepting the GL
- * draws: the fogged sky plane, the smooth-shaded sunrise/sunset glow fan, the sun and
- * moon quads and the star field.</p>
+ * <p>Drawn at the head of {@code renderSky}; when it handles the sky the vanilla GL sky
+ * is cancelled (see RenderGlobalM). All sky geometry is deterministic or CPU-side, so it
+ * is rebuilt here instead of intercepting the GL draws: the fogged sky plane, the
+ * smooth-shaded sunrise/sunset glow fan, the sun and moon quads and the star field.</p>
  *
  * <p>The matrices are mirrored from the live GL state exactly like the terrain does:
  * the modelview/projection are read at the head of {@code renderSky} (where the
@@ -56,6 +58,12 @@ public class SkyRenderer {
     private static ByteBuffer fanBuffer;
     private static int builtMoonPhase = -1;
 
+    // Persistent device-side copies of the constant sky geometry (M12): uploaded once,
+    // then redrawn from the GPU instead of being rebuilt and re-uploaded every frame.
+    private static VertexBuffer skyPlaneVbo;
+    private static VertexBuffer starsVbo;
+    private static VertexBuffer endSkyVbo;
+
     private static VulkanImage sunTexture;
     private static VulkanImage moonTexture;
     private static VulkanImage endSkyTexture;
@@ -69,6 +77,11 @@ public class SkyRenderer {
 
     /** Two 13x13 quad planes (vanilla's glSkyList + glSkyList2), 4 vertices each. */
     private static final int SKY_PLANE_VERTS = 2 * 13 * 13 * 4;
+
+    // GL_SRC_ALPHA, GL_ONE: additive, like the GL sun/moon. Constant, so it is hoisted out
+    // of the per-frame draw (L10) instead of allocating a fresh BlendState every frame.
+    private static final Pipeline.BlendState ADDITIVE_BLEND =
+            new Pipeline.BlendState(GL11.GL_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ONE, GL11.GL_ZERO);
 
     private static final float PI = (float) Math.PI;
     private static final float HALF_PI = (float) (Math.PI / 2.0);
@@ -92,24 +105,29 @@ public class SkyRenderer {
     }
 
     /** Called at the head of {@code RenderGlobal.renderSky}, before the GL sky runs. */
-    public static void render(float partialTicks, int pass) {
+    /**
+     * @return true when the Vulkan sky fully replaced the vanilla GL sky for this pass,
+     *         so the caller can cancel {@code RenderGlobal.renderSky}; false when the GL
+     *         path has to run (custom sky renderer, inactive renderer, load failure).
+     */
+    public static boolean render(float partialTicks, int pass) {
         Minecraft mc = Minecraft.getMinecraft();
         World world = mc.world;
         if (world == null || !Drawer.isActive() || Drawer.skipRendering) {
-            return;
+            return false;
         }
 
         WorldProvider provider = world.provider;
         // Custom (modded) sky renderers draw arbitrary GL geometry that cannot be
         // replayed generically, so they keep the GL path. The End has a fixed cube sky
         // (renderEndSky); the Nether renders no sky at all (the fog-coloured clear is
-        // already correct there).
+        // already correct there, so its redundant GL fog quad can be skipped too).
         if (provider.getSkyRenderer() != null) {
-            return;
+            return false;
         }
         boolean end = provider.getDimensionType().getId() == 1;
         if (!end && !provider.isSurfaceWorld()) {
-            return;
+            return true;
         }
 
         try {
@@ -126,6 +144,7 @@ public class SkyRenderer {
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
             TextureBridge.restoreAtlasBinding();
         }
+        return true;
     }
 
     private static boolean celestialLogPending;
@@ -187,8 +206,11 @@ public class SkyRenderer {
         Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
         VRenderSystem.applyModelViewMatrix(headMV);
         VRenderSystem.calculateMVP();
-        buildSkyPlane();
-        drawer.draw(skyPlaneBuffer, 7, POSITION, SKY_PLANE_VERTS);
+        if (skyPlaneVbo == null) {
+            buildSkyPlane();
+            skyPlaneVbo = uploadStatic(skyPlaneBuffer, SKY_PLANE_VERTS, POSITION);
+        }
+        drawStaticQuads(drawer, skyPlaneVbo, SKY_PLANE_VERTS);
 
         // From here on the GL sky disables fog.
         VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
@@ -251,8 +273,7 @@ public class SkyRenderer {
             VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, rainFade);
             VRenderSystem.setShaderPipeline(skyTexPipeline);
             // GL_SRC_ALPHA, GL_ONE: additive, like the GL sky
-            Drawer.currentBlendState = new Pipeline.BlendState(GL11.GL_SRC_ALPHA, GL11.GL_ONE,
-                    GL11.GL_ONE, GL11.GL_ZERO);
+            Drawer.currentBlendState = ADDITIVE_BLEND;
 
             VTextureSelector.bindTexture(sunTexture);
             drawer.draw(sunBuffer, 7, POSITION_TEX, 4);
@@ -266,7 +287,10 @@ public class SkyRenderer {
         if (starBrightness > 0.0f) {
             VRenderSystem.setShaderColor(starBrightness, starBrightness, starBrightness, starBrightness);
             VRenderSystem.setShaderPipeline(skyPipeline);
-            drawer.draw(starBuffer, 7, POSITION, starVertexCount);
+            if (starsVbo == null) {
+                starsVbo = uploadStatic(starBuffer, starVertexCount, POSITION);
+            }
+            drawStaticQuads(drawer, starsVbo, starVertexCount);
         }
     }
 
@@ -310,8 +334,7 @@ public class SkyRenderer {
 
         VRenderSystem.setShaderColor(40.0f / 255.0f, 40.0f / 255.0f, 40.0f / 255.0f, 1.0f);
         VRenderSystem.setShaderPipeline(skyTexPipeline);
-        Drawer.currentBlendState = new Pipeline.BlendState(GL11.GL_SRC_ALPHA,
-                GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ZERO);
+        Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
         VTextureSelector.bindTexture(endSkyTexture);
 
         Drawer drawer = Drawer.getInstance();
@@ -327,7 +350,10 @@ public class SkyRenderer {
             }
             VRenderSystem.applyModelViewMatrix(mv);
             VRenderSystem.calculateMVP();
-            drawer.draw(endSkyBuffer, 7, POSITION_TEX, 4);
+            if (endSkyVbo == null) {
+                endSkyVbo = uploadStatic(endSkyBuffer, 4, POSITION_TEX);
+            }
+            drawStaticQuads(drawer, endSkyVbo, 4);
         }
     }
 
@@ -355,6 +381,22 @@ public class SkyRenderer {
 
     // --- geometry builders (replicating the vanilla generators) ---
 
+    /** Uploads constant CPU geometry into a fresh device-local VBO (M12, called once). */
+    private static VertexBuffer uploadStatic(ByteBuffer data, int vertexCount, VertexFormat format) {
+        int size = format.getSize();
+        VertexBuffer vbo = new VertexBuffer(size * vertexCount, MemoryTypes.GPU_MEM);
+        data.position(0);
+        vbo.copyToVertexBuffer(size, vertexCount, data);
+        return vbo;
+    }
+
+    /** Indexed-quad draw of a persistent VBO through the shared quad index buffer. */
+    private static void drawStaticQuads(Drawer drawer, VertexBuffer vbo, int vertexCount) {
+        AutoIndexBuffer quads = drawer.getQuadsIndexBuffer();
+        quads.checkCapacity(vertexCount);
+        drawer.draw(vbo, quads.getIndexBuffer(), vertexCount * 3 / 2, 7);
+    }
+
     /**
      * Refills the sky plane (vanilla glSkyList: a y=16 grid from -384 to 384). Vanilla
      * draws it with a rotation-only modelview (the -eye translate happens later, per
@@ -369,7 +411,8 @@ public class SkyRenderer {
      * reads as the near, unfogged sky colour, not the clear colour); {@code glSkyList2}
      * is the y=-16 plane with its front face UP, visible from above to cover the lower
      * hemisphere (mostly hidden by terrain, fogged to the fog colour at the horizon).
-     * Rebuilt every frame (the rotation changes).
+     * The geometry is constant - the camera rotation rides the modelview matrix - so it
+     * is built once and kept in a persistent VBO (see skyPlaneVbo).
      */
     private static void buildSkyPlane() {
         ByteBuffer buf = skyPlaneBuffer;

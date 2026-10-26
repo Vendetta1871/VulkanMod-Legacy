@@ -8,6 +8,8 @@ import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
+import net.vulkanmod.vulkan.util.VUtil;
+
 import static net.vulkanmod.vulkan.Vulkan.findQueueFamilies;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.*;
@@ -52,8 +54,7 @@ public class TransferQueue {
     }
 
     public static void endRecording() {
-        long fence = endCommands(currentCmdBuffer);
-        Synchronization.addFence(fence);
+        endCommands(currentCmdBuffer);
         currentCmdBuffer = null;
     }
 
@@ -65,11 +66,9 @@ public class TransferQueue {
         }
     }
 
-    public static long endIfNeeded(CommandBuffer commandBuffer) {
-        if (currentCmdBuffer != null) {
-            return -1;
-        } else {
-            return endCommands(commandBuffer);
+    public static void endIfNeeded(CommandBuffer commandBuffer) {
+        if (currentCmdBuffer == null) {
+            endCommands(commandBuffer);
         }
     }
 
@@ -113,11 +112,21 @@ public class TransferQueue {
 
             commandBuffer = commandBuffers.get(current);
 
-            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.create();
+            // Recycling a pool slot whose submit has not retired yet would record into
+            // a running command buffer. Waiting here is the natural backpressure for
+            // uploads issued outside the frame window; inside it copies go to the
+            // frame's transfer command buffer (see Drawer.getFrameTransferCmd) and this
+            // path is barely used.
+            commandBuffer.awaitFence();
+
+            VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack);
             beginInfo.sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
             beginInfo.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 
-            vkBeginCommandBuffer(commandBuffer.handle, beginInfo);
+            int err = vkBeginCommandBuffer(commandBuffer.handle, beginInfo);
+            if(err != VK_SUCCESS) {
+                throw new RuntimeException("Failed to begin transfer command buffer: " + err);
+            }
 
             current++;
 
@@ -125,24 +134,38 @@ public class TransferQueue {
         }
     }
 
-    public synchronized static long endCommands(CommandBuffer commandBuffer) {
+    public synchronized static void endCommands(CommandBuffer commandBuffer) {
 
         try(MemoryStack stack = stackPush()) {
-            long fence = commandBuffer.fence;
 
-            vkEndCommandBuffer(commandBuffer.handle);
+            int err = vkEndCommandBuffer(commandBuffer.handle);
+            if(err != VK_SUCCESS) {
+                throw new RuntimeException("Failed to end transfer command buffer: " + err);
+            }
 
             vkResetFences(device, commandBuffer.fence);
 
-            VkSubmitInfo.Buffer submitInfo = VkSubmitInfo.create(1);
+            VkSubmitInfo.Buffer submitInfo = VkSubmitInfo.calloc(1, stack);
             submitInfo.sType(VK_STRUCTURE_TYPE_SUBMIT_INFO);
             submitInfo.pCommandBuffers(stack.pointers(commandBuffer.handle));
 
-            vkQueueSubmit(Vulkan.getGraphicsQueue(), submitInfo, fence);
-            //vkQueueWaitIdle(graphicsQueue);
+            int result = vkQueueSubmit(Vulkan.getGraphicsQueue(), submitInfo, commandBuffer.fence);
+            if(result != VK_SUCCESS) {
+                // Leave the fence unpending: nothing signals it, so nobody may wait on it.
+                throw new RuntimeException("Failed to submit transfer command buffer: " + result);
+            }
+            commandBuffer.fencePending = true;
+        }
+    }
 
-            //vkFreeCommandBuffers(device, commandPool, commandBuffer);
-            return fence;
+    /**
+     * Blocks until every transfer command buffer submitted through this queue has
+     * retired. Used by the staging-buffer guard, the swapchain recreation and the
+     * minimized-window maintenance, where no frame fence covers the copies.
+     */
+    public synchronized static void waitPendingFences() {
+        for(CommandBuffer commandBuffer : commandBuffers) {
+            commandBuffer.awaitFence();
         }
     }
 
@@ -167,6 +190,8 @@ public class TransferQueue {
     public static class CommandBuffer {
         VkCommandBuffer handle;
         long fence;
+        /** True from a successful {@link #endCommands} until the fence is waited on. */
+        boolean fencePending;
 
         public VkCommandBuffer getHandle() {
             return handle;
@@ -174,6 +199,14 @@ public class TransferQueue {
 
         public long getFence() {
             return fence;
+        }
+
+        /** Waits (at most once) for the submit of this command buffer to retire. */
+        void awaitFence() {
+            if(fencePending) {
+                vkWaitForFences(device, fence, true, VUtil.UINT64_MAX);
+                fencePending = false;
+            }
         }
     }
 }

@@ -2,10 +2,13 @@ package net.vulkanmod.mixin.render;
 
 import com.cleanroommc.client.sdl.Window;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.Vulkan;
 import org.lwjgl.sdl.SDLVideo;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Makes Cleanroom's window teardown safe under the Vulkan renderer.
@@ -20,6 +23,17 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  */
 @Mixin(value = Window.class, remap = false)
 public class WindowCloseM {
+
+    /**
+     * Tear the Vulkan renderer down first: the device must be idle and the swapchain
+     * and surface destroyed before SDL destroys the window they were created from.
+     */
+    @Inject(method = "close", at = @At("HEAD"))
+    private void vulkanmod$cleanUpVulkan(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            Vulkan.cleanUp();
+        }
+    }
 
     /** Skip unsetting the (unused) GL context; the call faults under Vulkan on Wayland. */
     @Redirect(method = "close",

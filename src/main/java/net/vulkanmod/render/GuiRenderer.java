@@ -71,6 +71,7 @@ public class GuiRenderer {
     // hook never sees text. These mirror that vertex stream (POSITION_TEX) while a GUI
     // pass is active and replay it on glEnd.
     private static boolean imActive;
+    private static boolean imWorldText; // entity-pass text: world matrices and fog
     private static int imMode;
     private static int imCount;
     private static float imU, imV;
@@ -90,6 +91,9 @@ public class GuiRenderer {
         guiPass = value;
         if (value) {
             itemDepthReady = false;
+            // The GUI pass (inventory paper-doll, item icons) runs with an orthographic
+            // projection; the cached world snapshot must not leak into it (H8).
+            EntityRenderer.invalidateFrameState();
         }
     }
 
@@ -214,7 +218,8 @@ public class GuiRenderer {
             // live state (the cull query is one Kirino does answer). The hurt tint must
             // never leak from the last entity draw into an icon.
             EntityRenderer.clearRedOverlay();
-            if (GL11.glGetBoolean(GL11.GL_CULL_FACE)) {
+            // The tracked cull bit (GlStateManagerDepthM) is the live one.
+            if (VRenderSystem.cull) {
                 VRenderSystem.enableCull();
             } else {
                 VRenderSystem.disableCull();
@@ -292,17 +297,47 @@ public class GuiRenderer {
         }
     }
 
+    /**
+     * Pipeline state for world-space text (name tags, sign text) captured during the
+     * entity pass. Unlike the GUI overlay it replays with the live world matrices and
+     * keeps the frame's fog, so the text fades with distance like vanilla; depth,
+     * blend, alpha test and colour come from the GlStateManager tracking exactly as
+     * the vanilla label code left them (depth test on, depth mask off, blended).
+     * Culling is forced off so the billboard stays visible from behind, where vanilla
+     * shows it mirrored.
+     */
+    private static void applyWorldTextState(Pipeline pipeline, VulkanImage texture) {
+        VRenderSystem.updateProjectionMatrix();
+        VRenderSystem.updateModelViewMatrix();
+
+        VRenderSystem.disableCull();
+
+        VRenderSystem.colorMask(true, true, true, true);
+        VRenderSystem.setShaderColor(VRenderSystem.trackedColorR, VRenderSystem.trackedColorG,
+                VRenderSystem.trackedColorB, VRenderSystem.trackedColorA);
+
+        VRenderSystem.setShaderPipeline(pipeline);
+        Drawer.currentBlendState = VRenderSystem.getBlendState();
+        if (texture != null) {
+            VTextureSelector.bindTexture(texture);
+        }
+    }
+
     // --- Immediate-mode capture entry points (called by GlStateManagerImmediateM) ---
 
     public static void immediateBegin(int mode) {
+        // World-space text (name tags, sign text) is drawn by FontRenderer inside the
+        // entity pass; it replays with the live world matrices instead of the overlay.
+        boolean worldText = !guiPass && EntityRenderer.isEntityPass();
         // ensureRenderPass() last: an unsupported mode must not open a frame.
-        if (!guiPass || suppressDraw || Drawer.skipRendering
+        if ((!guiPass && !worldText) || suppressDraw || Drawer.skipRendering
                 || (mode != GL11.GL_TRIANGLE_STRIP && mode != GL11.GL_TRIANGLE_FAN && mode != GL11.GL_QUADS)
                 || !ensureRenderPass()) {
             imActive = false;
             return;
         }
         imActive = true;
+        imWorldText = worldText;
         imMode = mode;
         imCount = 0;
         if (imBuffer != null) {
@@ -347,7 +382,11 @@ public class GuiRenderer {
             if (texture == null) {
                 return;
             }
-            applyGuiState(guiPipeline, texture);
+            if (imWorldText) {
+                applyWorldTextState(guiPipeline, texture);
+            } else {
+                applyGuiState(guiPipeline, texture);
+            }
             imBuffer.position(0);
             Drawer.getInstance().draw(imBuffer, imMode, POSITION_TEX, count);
         } catch (Throwable t) {
@@ -373,7 +412,10 @@ public class GuiRenderer {
             }
             return whiteTexture;
         }
-        int texId = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        // Tracked bind instead of a per-draw glGetInteger (see EntityRenderer.entityTexture);
+        // stale mirrors are dropped by the AbstractTextureM / ThreadDownloadImageDataM
+        // invalidation hooks, so no per-draw size query is needed either.
+        int texId = VRenderSystem.trackedBoundTexture;
         if (texId == 0) {
             return null;
         }
@@ -383,7 +425,7 @@ public class GuiRenderer {
             return TextureBridge.getAtlasImage();
         }
         VulkanImage cached = textureCache.get(texId);
-        if (cached != null && matchesLiveSize(cached)) {
+        if (cached != null) {
             return cached;
         }
         VulkanImage image = downloadTexture(texId);
@@ -393,25 +435,16 @@ public class GuiRenderer {
         return image;
     }
 
-    /**
-     * A cached image is only trusted while the live texture still has the same size: GL
-     * reuses deleted texture ids, and {@code AbstractTextureM} clears the caches on the
-     * vanilla delete path, but a same-tick delete + regenerate could still slip through.
-     * The queried texture is the current binding, so no rebind is needed.
-     */
-    private static boolean matchesLiveSize(VulkanImage image) {
-        int w = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
-        int h = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
-        return w == image.getWidth() && h == image.getHeight();
-    }
-
     /** Forgets the Vulkan image mirrored from a GL texture that is being deleted. */
     public static void onTextureDeleted(int texId) {
-        textureCache.remove(texId);
+        VulkanImage image = textureCache.remove(texId);
+        if (image != null) {
+            image.free();
+        }
     }
 
     private static VulkanImage downloadTexture(int texId) {
-        int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        int prevBinding = VRenderSystem.trackedBoundTexture;
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texId);
         int width = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
         int height = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);

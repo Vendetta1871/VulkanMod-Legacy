@@ -3,13 +3,12 @@ package net.vulkanmod.vulkan;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.system.NativeResource;
 
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 
@@ -20,8 +19,19 @@ public class ShaderSPIRVUtils {
     private static long compiler;
 
     public static SPIRV compileShaderFile(String shaderFile, ShaderKind shaderKind) {
-        String path = ShaderSPIRVUtils.class.getResource("/assets/vulkanmod/shaders/" + shaderFile).toExternalForm();
-        return compileShaderAbsoluteFile(path, shaderKind);
+        // getResourceAsStream reads through both the dev classes dir and a packaged jar;
+        // Paths.get(URI) throws FileSystemNotFoundException on jar: URIs, so loading
+        // from the mod jar used to fail outright.
+        try (InputStream in = ShaderSPIRVUtils.class.getResourceAsStream("/assets/vulkanmod/shaders/" + shaderFile)) {
+            if (in == null) {
+                throw new IOException("Shader resource not found: " + shaderFile);
+            }
+            String source = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return compileShader(shaderFile, source, shaderKind);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
     }
 
     public static SPIRV compileShaderAbsoluteFile(String shaderFile, ShaderKind shaderKind) {
@@ -36,6 +46,13 @@ public class ShaderSPIRVUtils {
 
     public static SPIRV compileShader(String filename, String source, ShaderKind shaderKind) {
 
+        // Optimized SPIR-V is deterministic for a given source, so the result is cached
+        // on disk keyed by the source hash: launches after the first skip shaderc.
+        byte[] cached = loadCachedSpv(filename, source, shaderKind);
+        if (cached != null) {
+            return SPIRV.fromBytes(cached);
+        }
+
         if(compiler == 0) compiler = shaderc_compiler_initialize();
 
         if(compiler == NULL) {
@@ -48,36 +65,96 @@ public class ShaderSPIRVUtils {
             throw new RuntimeException("Failed to create compiler options");
         }
 
-//        shaderc_compile_options_set_optimization_level(options, shaderc_optimization_level_performance);
+        shaderc_compile_options_set_optimization_level(options, shaderc_optimization_level_performance);
 
-        long result = shaderc_compile_into_spv(compiler, source, shaderKind.kind, filename, "main", options);
+        long result;
+        try {
+            result = shaderc_compile_into_spv(compiler, source, shaderKind.kind, filename, "main", options);
+        } finally {
+            // The options are not referenced by the result; releasing them here kept
+            // leaking one options object per compiled shader before.
+            shaderc_compile_options_release(options);
+        }
 
         if(result == NULL) {
             throw new RuntimeException("Failed to compile shader " + filename + " into SPIR-V");
         }
 
         if(shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-            throw new RuntimeException("Failed to compile shader " + filename + " into SPIR-V:\n" + shaderc_result_get_error_message(result));
+            String message = shaderc_result_get_error_message(result);
+            shaderc_result_release(result);
+            throw new RuntimeException("Failed to compile shader " + filename + " into SPIR-V:\n" + message);
         }
 
 //        shaderc_compiler_release(compiler);
 
-        return new SPIRV(result, shaderc_result_get_bytes(result));
+        SPIRV spirv = new SPIRV(result, shaderc_result_get_bytes(result));
+        storeCachedSpv(filename, source, shaderKind, spirv.bytecode());
+        return spirv;
     }
 
-    private static SPIRV readFromStream(InputStream inputStream) {
+    // --- SPIR-V disk cache (config/vulkanmod/spv/<source-hash>.spv) ---
 
+    private static final java.nio.file.Path SPV_CACHE_DIR =
+            java.nio.file.Paths.get("config", "vulkanmod", "spv");
+
+    private static String cacheKey(String filename, String source, ShaderKind shaderKind) {
         try {
-            byte[] bytes = inputStream.readAllBytes();
-            ByteBuffer buffer = MemoryUtil.memAlloc(bytes.length);
-            buffer.put(bytes);
-            buffer.position(0);
-
-            return new SPIRV(MemoryUtil.memAddress(buffer), buffer);
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            digest.update(shaderKind.name().getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) '\n');
+            digest.update(filename.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) '\n');
+            digest.update(source.getBytes(StandardCharsets.UTF_8));
+            byte[] hash = digest.digest();
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
         } catch (Exception e) {
-            e.printStackTrace();
+            return null;
         }
-        throw new RuntimeException("unable to read inputStream");
+    }
+
+    private static byte[] loadCachedSpv(String filename, String source, ShaderKind shaderKind) {
+        String key = cacheKey(filename, source, shaderKind);
+        if (key == null) {
+            return null;
+        }
+        try {
+            java.nio.file.Path file = SPV_CACHE_DIR.resolve(key + ".spv");
+            if (!java.nio.file.Files.isRegularFile(file)) {
+                return null;
+            }
+            byte[] bytes = java.nio.file.Files.readAllBytes(file);
+            // A SPIR-V module starts with the magic 0x07230203; a truncated or corrupt
+            // file (crash mid-write) is rejected and recompiled.
+            if (bytes.length < 4 || (bytes[0] & 0xFF) != 0x03 || (bytes[1] & 0xFF) != 0x02
+                    || (bytes[2] & 0xFF) != 0x23 || (bytes[3] & 0xFF) != 0x07) {
+                return null;
+            }
+            return bytes;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void storeCachedSpv(String filename, String source, ShaderKind shaderKind, ByteBuffer spv) {
+        String key = cacheKey(filename, source, shaderKind);
+        if (key == null) {
+            return;
+        }
+        try {
+            byte[] bytes = new byte[spv.remaining()];
+            int pos = spv.position();
+            spv.get(bytes);
+            spv.position(pos);
+            java.nio.file.Files.createDirectories(SPV_CACHE_DIR);
+            java.nio.file.Files.write(SPV_CACHE_DIR.resolve(key + ".spv"), bytes);
+        } catch (Exception e) {
+            // Best-effort: a failed write only costs compile time on the next launch.
+        }
     }
 
     public enum ShaderKind {
@@ -103,13 +180,28 @@ public class ShaderSPIRVUtils {
             this.bytecode = bytecode;
         }
 
+        /** SPIR-V loaded from the disk cache: a plain off-heap buffer, no shaderc result. */
+        static SPIRV fromBytes(byte[] bytes) {
+            ByteBuffer buffer = MemoryUtil.memAlloc(bytes.length);
+            buffer.put(bytes);
+            buffer.position(0);
+            return new SPIRV(0, buffer);
+        }
+
         public ByteBuffer bytecode() {
             return bytecode;
         }
 
         @Override
         public void free() {
-//            shaderc_result_release(handle);
+            // Safe once the bytecode has been copied into the VkShaderModule
+            // (vkCreateShaderModule copies the SPIR-V); Pipeline frees the SPIRV right
+            // after createShaderModule.
+            if (handle != 0) {
+                shaderc_result_release(handle);
+            } else if (bytecode != null) {
+                MemoryUtil.memFree(bytecode);
+            }
             bytecode = null; // Help the GC
         }
     }

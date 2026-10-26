@@ -53,9 +53,12 @@ public class DeviceInfo {
                     .map(VkExtensionProperties::extensionNameString)
                     .collect(toSet());
 
-            requiredExtensions.removeAll(extensions);
+            // Work on a copy: the caller passes one shared set and calls this per physical
+            // device, so removing from it would under-report device 2+ as fully supported.
+            Set<String> missing = new java.util.HashSet<>(requiredExtensions);
+            missing.removeAll(extensions);
 
-            return "Unsupported extensions: " + Arrays.toString(requiredExtensions.toArray());
+            return "Unsupported extensions: " + Arrays.toString(missing.toArray());
         }
     }
 
@@ -76,7 +79,8 @@ public class DeviceInfo {
                 stringBuilder.append(info.unsupportedExtensions(requiredExtensions)).append("\n");
 
                 Vulkan.SwapChainSupportDetails swapChainSupport = Vulkan.querySwapChainSupport(device, stack);
-                boolean swapChainAdequate = swapChainSupport.formats.hasRemaining() && swapChainSupport.presentModes.hasRemaining() ;
+                boolean swapChainAdequate = swapChainSupport.formats != null && swapChainSupport.formats.hasRemaining()
+                        && swapChainSupport.presentModes != null && swapChainSupport.presentModes.hasRemaining();
                 stringBuilder.append("Swapchain supported: ").append(swapChainAdequate ? "true" : "false").append("\n");
             }
 
