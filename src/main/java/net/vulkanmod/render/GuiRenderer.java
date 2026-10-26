@@ -87,13 +87,33 @@ public class GuiRenderer {
         guiTexColorPipeline = new Pipeline(POSITION_TEX_COLOR, "gui_tex_color");
     }
 
+    // GUI-pass overrides of the depth/cull/colour-mask state (applyGuiState writes them
+    // directly); saved on pass entry and restored on exit so the next frame's world
+    // passes do not inherit "depth off, func ALWAYS, cull off" (N1).
+    private static boolean savedDepthTest, savedDepthMask, savedCull;
+    private static int savedDepthFun, savedColorMask;
+
     public static void setGuiPass(boolean value) {
+        boolean wasGui = guiPass;
+        if (value && !wasGui) {
+            savedDepthTest = VRenderSystem.depthTest;
+            savedDepthMask = VRenderSystem.depthMask;
+            savedDepthFun = VRenderSystem.depthFun;
+            savedCull = VRenderSystem.cull;
+            savedColorMask = VRenderSystem.colorMask;
+        }
         guiPass = value;
         if (value) {
             itemDepthReady = false;
             // The GUI pass (inventory paper-doll, item icons) runs with an orthographic
             // projection; the cached world snapshot must not leak into it (H8).
             EntityRenderer.invalidateFrameState();
+        } else if (wasGui) {
+            VRenderSystem.depthTest = savedDepthTest;
+            VRenderSystem.depthMask = savedDepthMask;
+            VRenderSystem.depthFun = savedDepthFun;
+            VRenderSystem.cull = savedCull;
+            VRenderSystem.colorMask = savedColorMask;
         }
     }
 
@@ -105,6 +125,18 @@ public class GuiRenderer {
      * lid. Flat GUI quads keep depth off and are unaffected by the leftover depth.
      */
     private static boolean itemDepthReady;
+
+    /**
+     * Clears the depth attachment once per GUI pass. Shared by the 3D item icons and
+     * the inventory paper doll (N9): both are real depth-tested geometry drawn into an
+     * overlay whose flat quads ignore depth, so they need the leftover world depth gone.
+     */
+    public static void ensureDepthCleared() {
+        if (!itemDepthReady) {
+            Drawer.clearAttachments(0x100);
+            itemDepthReady = true;
+        }
+    }
 
     public static boolean isGuiPass() {
         return guiPass;
@@ -218,8 +250,9 @@ public class GuiRenderer {
             // live state (the cull query is one Kirino does answer). The hurt tint must
             // never leak from the last entity draw into an icon.
             EntityRenderer.clearRedOverlay();
-            // The tracked cull bit (GlStateManagerDepthM) is the live one.
-            if (VRenderSystem.cull) {
+            // applyGuiState just cleared the live cull bit, so read the GL-truth mirror
+            // (GlStateManagerDepthM) - the state the world pass actually left (N16).
+            if (VRenderSystem.glCull) {
                 VRenderSystem.enableCull();
             } else {
                 VRenderSystem.disableCull();
@@ -228,10 +261,7 @@ public class GuiRenderer {
             // them to z=100); the port's GUI otherwise layers purely by submission, which
             // lets the chest body's top face overwrite the lid drawn before it. Clear the
             // leftover world depth once per pass and test against a fresh buffer.
-            if (!itemDepthReady) {
-                Drawer.clearAttachments(0x100);
-                itemDepthReady = true;
-            }
+            ensureDepthCleared();
             VRenderSystem.enableDepthTest();
             VRenderSystem.depthMask(true);
             // The enchantment glint covers only the item's own pixels via depthFunc EQUAL
@@ -383,10 +413,21 @@ public class GuiRenderer {
                 return;
             }
             if (imWorldText) {
-                applyWorldTextState(guiPipeline, texture);
-            } else {
-                applyGuiState(guiPipeline, texture);
+                // applyWorldTextState overrides cull and the colour mask; the rest of
+                // the entity pass must not inherit them (N17).
+                boolean cull = VRenderSystem.cull;
+                int colorMask = VRenderSystem.colorMask;
+                try {
+                    applyWorldTextState(guiPipeline, texture);
+                    imBuffer.position(0);
+                    Drawer.getInstance().draw(imBuffer, imMode, POSITION_TEX, count);
+                } finally {
+                    VRenderSystem.cull = cull;
+                    VRenderSystem.colorMask = colorMask;
+                }
+                return;
             }
+            applyGuiState(guiPipeline, texture);
             imBuffer.position(0);
             Drawer.getInstance().draw(imBuffer, imMode, POSITION_TEX, count);
         } catch (Throwable t) {

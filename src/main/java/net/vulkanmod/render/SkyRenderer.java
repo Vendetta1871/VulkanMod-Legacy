@@ -130,6 +130,14 @@ public class SkyRenderer {
             return true;
         }
 
+        // Vanilla's renderSky ends with depthMask(true), which cancelling it skips; the
+        // sky's own depthMask(false) would otherwise leak into the terrain. Save the
+        // frame's depth/cull state and restore it on the way out (N1), the way the
+        // world-border pass does.
+        boolean depthTest = VRenderSystem.depthTest;
+        boolean depthMask = VRenderSystem.depthMask;
+        int depthFun = VRenderSystem.depthFun;
+        boolean cull = VRenderSystem.cull;
         try {
             if (end) {
                 renderEndSky();
@@ -142,6 +150,10 @@ public class SkyRenderer {
             // The terrain pass re-snapshots every state it needs, but the blend state
             // and the Sampler0 binding are read as-is at draw time, so restore them.
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
+            VRenderSystem.depthTest = depthTest;
+            VRenderSystem.depthMask = depthMask;
+            VRenderSystem.depthFun = depthFun;
+            VRenderSystem.cull = cull;
             TextureBridge.restoreAtlasBinding();
         }
         return true;

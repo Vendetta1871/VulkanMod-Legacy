@@ -393,6 +393,16 @@ public class EntityRenderer {
         // (GlStateManagerDepthM, GlStateManagerBlendM) into VRenderSystem, where the
         // pipeline bind already reads them: every 1.12.2 render path drives this state
         // through GlStateManager, so no mirror and no glGet* round-trip is needed.
+        if (GuiRenderer.isGuiPass()) {
+            // The inventory paper doll and TESR items are real 3D geometry drawn into
+            // the overlay, where applyGuiState has overridden depth to "off, ALWAYS"
+            // for the flat quads. Use the GL-truth depth state vanilla left behind and
+            // a freshly cleared depth buffer, like vanilla's shared depth clear (N9).
+            GuiRenderer.ensureDepthCleared();
+            VRenderSystem.depthTest = VRenderSystem.glDepthTest;
+            VRenderSystem.depthMask = VRenderSystem.glDepthMask;
+            VRenderSystem.depthFun = VRenderSystem.glDepthFun;
+        }
 
         // The current GL colour is the entity tint (white for most mobs, the dye colour
         // for a sheep), matching the ColorMaterial diffuse of the fixed-function path,

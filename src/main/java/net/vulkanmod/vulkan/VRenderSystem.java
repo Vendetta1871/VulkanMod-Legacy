@@ -33,6 +33,16 @@ public class VRenderSystem {
 
     public static boolean cull = true;
 
+    // --- GL-truth mirror of the depth/cull state, written ONLY by the GlStateManager
+    // hooks (GlStateManagerDepthM), i.e. only by vanilla calls. The live fields above
+    // double as the per-pass override channel (sky/clouds/GUI/world-border write them
+    // directly), so a pass can always recover the state vanilla actually left behind.
+    // The terrain's first layer re-syncs the live fields from these as a safety net.
+    public static boolean glDepthTest = true;
+    public static boolean glDepthMask = true;
+    public static int glDepthFun = 515; // GL_LESS
+    public static boolean glCull = true;
+
     // Input-assembly topology of the pipeline variant selected at draw time. GL's
     // immediate modes map onto it 1:1; the default is the triangle list every world/GUI
     // pass uses. The debug-line capture switches it to a line topology for its draws.

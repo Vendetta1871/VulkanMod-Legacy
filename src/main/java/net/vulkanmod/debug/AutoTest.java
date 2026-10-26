@@ -154,6 +154,17 @@ public class AutoTest {
      * sample, default 150).</p>
      */
     private static final boolean FPS_MODE = System.getenv("VULKANMOD_AUTOTEST_FPS") != null;
+
+    /**
+     * Render-state boundary probe: with {@code VULKANMOD_AUTOTEST_STATE=1} the run captures
+     * the cases the default scene cannot reach - terrain with clouds off, terrain above the
+     * cloud plane, the inventory paper doll inside the GUI pass, and the first world frame
+     * after a GUI closed (the Nether/End leak path). Run once with Vulkan and once with
+     * {@code VULKANMOD_DISABLE=1} and diff the pairs.
+     */
+    private static final boolean STATE_MODE = System.getenv("VULKANMOD_AUTOTEST_STATE") != null;
+    /** Absolute camera column for STATE_MODE (near the fixed-seed world spawn). */
+    private static final int PIN_X = 200, PIN_Z = 112;
     private static int fpsSamples;
     private static long fpsSum, fpsMin = Long.MAX_VALUE, fpsMax;
     private static double pinX, pinY, pinZ;
@@ -295,6 +306,62 @@ public class AutoTest {
 
                 if (FPS_MODE) {
                     fpsStage(mc);
+                    return;
+                }
+
+                if (STATE_MODE) {
+                    int t = ++ticks;
+                    if (t == 5) {
+                        // Pin the camera to an absolute column: the world-spawn search
+                        // jitters by a block between runs, which shifts near-field
+                        // parallax and makes the Vulkan/GL pair non-comparable.
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
+                        int topY = mc.world.getTopSolidOrLiquidBlock(
+                                new BlockPos(PIN_X, 0, PIN_Z)).getY();
+                        tpPlayer(mc, PIN_X + 0.5, topY + 2.0, PIN_Z + 0.5);
+                        mc.player.rotationYaw = 0.0f;
+                        mc.player.rotationPitch = 30.0f;
+                        mc.gameSettings.clouds = 0;
+                    } else if (t == 25) {
+                        // N1 case 1: clouds off - neither pass re-reads GL this frame,
+                        // so a leaked sky depthMask(false) would draw terrain without
+                        // depth writes.
+                        capture(mc, "stateCloudsOff");
+                    } else if (t == 35) {
+                        // N1 case 2: above the cloud plane, still with clouds off.
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
+                        tpPlayer(mc, mc.player.posX, 130.0, mc.player.posZ);
+                    } else if (t == 55) {
+                        capture(mc, "stateHighY");
+                    } else if (t == 65) {
+                        // N9: the paper doll is real 3D geometry inside the GUI pass;
+                        // with the GUI's depth-off override leaking into it, the back
+                        // arm paints over the body and the face turns inside-out.
+                        // Cleanroom's GuiInventory redirects to the doll-less creative
+                        // screen while the client is creative, so flip the client-side
+                        // controller to survival for the capture (server stays creative).
+                        mc.playerController.setGameType(GameType.SURVIVAL);
+                        mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.player));
+                    } else if (t == 85) {
+                        Initializer.LOGGER.info("[autotest] state screen at capture: {}",
+                                mc.currentScreen == null ? "null" : mc.currentScreen.getClass().getSimpleName());
+                        capture(mc, "stateInvDoll");
+                    } else if (t == 95) {
+                        mc.displayGuiScreen(null);
+                        mc.playerController.setGameType(GameType.CREATIVE);
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
+                        mc.player.motionY = 0;
+                    } else if (t == 115) {
+                        // The GUI->world boundary: the Nether/End failure mode (no sky
+                        // or cloud pass to mask a leaked "depthFunc ALWAYS").
+                        capture(mc, "statePostGui");
+                    } else if (t == 130 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
                     return;
                 }
 
@@ -523,11 +590,17 @@ public class AutoTest {
                         capture(mc, "featThird");
                     } else if (ticks == 130) {
                         mc.gameSettings.thirdPersonView = 0;
+                        // Same creative redirect as STATE_MODE: survival client-side so
+                        // the paper-doll screen actually opens (GuiContainerCreative has
+                        // no doll to capture).
+                        mc.playerController.setGameType(GameType.SURVIVAL);
                         mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.player));
                     } else if (ticks == 160) {
                         capture(mc, "featInv");
                     } else if (ticks == 170) {
                         mc.displayGuiScreen(null);
+                        mc.playerController.setGameType(GameType.CREATIVE);
+                        mc.player.capabilities.allowFlying = true;
                     } else if (ticks == 195) {
                         capture(mc, "featHand");
                     } else if (ticks == 215 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {

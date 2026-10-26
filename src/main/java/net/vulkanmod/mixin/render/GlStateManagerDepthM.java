@@ -23,6 +23,7 @@ public class GlStateManagerDepthM {
     @Inject(method = "enableDepth", at = @At("HEAD"))
     private static void vulkanmod$enableDepth(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            VRenderSystem.glDepthTest = true;
             VRenderSystem.enableDepthTest();
         }
     }
@@ -30,6 +31,7 @@ public class GlStateManagerDepthM {
     @Inject(method = "disableDepth", at = @At("HEAD"))
     private static void vulkanmod$disableDepth(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            VRenderSystem.glDepthTest = false;
             VRenderSystem.disableDepthTest();
         }
     }
@@ -37,6 +39,7 @@ public class GlStateManagerDepthM {
     @Inject(method = "depthMask(Z)V", at = @At("HEAD"))
     private static void vulkanmod$depthMask(boolean flag, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            VRenderSystem.glDepthMask = flag;
             VRenderSystem.depthMask(flag);
         }
     }
@@ -44,6 +47,7 @@ public class GlStateManagerDepthM {
     @Inject(method = "depthFunc(I)V", at = @At("HEAD"))
     private static void vulkanmod$depthFunc(int func, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            VRenderSystem.glDepthFun = func;
             VRenderSystem.depthFunc(func);
         }
     }
@@ -51,6 +55,7 @@ public class GlStateManagerDepthM {
     @Inject(method = "enableCull", at = @At("HEAD"))
     private static void vulkanmod$enableCull(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            VRenderSystem.glCull = true;
             VRenderSystem.enableCull();
         }
     }
@@ -58,6 +63,7 @@ public class GlStateManagerDepthM {
     @Inject(method = "disableCull", at = @At("HEAD"))
     private static void vulkanmod$disableCull(CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            VRenderSystem.glCull = false;
             VRenderSystem.disableCull();
         }
     }

@@ -474,6 +474,16 @@ public class TerrainRenderer {
         }
         fixedStateCached = true;
 
+        // Safety net (N1): the sky/clouds/GUI passes restore the live depth/cull state
+        // on exit, but a pass that leaks an override ("depth off, func ALWAYS") would
+        // otherwise reach the terrain, whose vanilla code issues no GlStateManager call
+        // between the sky and the SOLID layer. Re-sync from the GL-truth mirror, which
+        // only the GlStateManager hooks write.
+        VRenderSystem.depthTest = VRenderSystem.glDepthTest;
+        VRenderSystem.depthMask = VRenderSystem.glDepthMask;
+        VRenderSystem.depthFun = VRenderSystem.glDepthFun;
+        VRenderSystem.cull = VRenderSystem.glCull;
+
         // Fog (fixed-function GL_FOG on 1.12.2)
         if (!boolState(GL11.GL_FOG)) {
             VRenderSystem.setFogState(VRenderSystem.FOG_NONE);

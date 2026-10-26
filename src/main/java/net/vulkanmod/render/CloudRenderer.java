@@ -89,6 +89,12 @@ public class CloudRenderer {
         }
 
         boolean drawn = false;
+        // Vanilla's renderClouds ends with enableCull()/depthMask(true), which cancelling
+        // it skips; the pass's own disableCull() would leak into terrain and entities (N1).
+        boolean depthTest = VRenderSystem.depthTest;
+        boolean depthMask = VRenderSystem.depthMask;
+        int depthFun = VRenderSystem.depthFun;
+        boolean cull = VRenderSystem.cull;
         try {
             drawn = renderClouds(mc, world, partialTicks, pass, cloudTickCounter, eyeX, eyeY, eyeZ);
         } catch (Throwable t) {
@@ -97,6 +103,10 @@ public class CloudRenderer {
             // The terrain pass reads the blend state and the Sampler0 binding as-is at
             // draw time, so restore both the way the sky pass does.
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
+            VRenderSystem.depthTest = depthTest;
+            VRenderSystem.depthMask = depthMask;
+            VRenderSystem.depthFun = depthFun;
+            VRenderSystem.cull = cull;
             TextureBridge.restoreAtlasBinding();
         }
         return drawn;
