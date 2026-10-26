@@ -469,6 +469,19 @@ public class Drawer {
         }
     }
 
+    /**
+     * Blocks until every frame slot's fence has retired. Used by the world-change arena
+     * reset (M22): the last submitted frames may still be reading the chunk arena through
+     * their indirect draws, and the new world's uploads start from offset 0 again.
+     */
+    public static void waitForAllFrames() {
+        Drawer drawer = INSTANCE;
+        if(drawer == null) {
+            return;
+        }
+        drawer.waitForAllFrameFences();
+    }
+
     private static void resetDescriptors() {
         for(Pipeline pipeline : usedPipelines) {
             pipeline.resetDescriptorPool(currentFrame);

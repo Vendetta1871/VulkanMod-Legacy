@@ -14,7 +14,6 @@ public class Vec1i extends Field {
     void setFunction() {
         if (this.name.equals("EndPortalLayers")) this.set = () -> 15;
         else if (this.name.equals("FogMode")) this.set = net.vulkanmod.vulkan.VRenderSystem::getFogState;
-        else if (this.name.equals("AlphaTest")) this.set = net.vulkanmod.vulkan.VRenderSystem::getAlphaTest;
     }
 
     void update(FloatBuffer fb) {

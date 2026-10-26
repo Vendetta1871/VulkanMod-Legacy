@@ -56,10 +56,11 @@ public abstract class VboRenderListM {
     }
 
     // --- batched path: skip the per-chunk model-view setup ---
-    // renderChunkLayer wraps each chunk in pushMatrix / preRenderChunk(translate) / popMatrix.
-    // The batched draw derives each section's matrix on the CPU from the stashed section origin
-    // and camera (see TerrainRenderer.applyCurrentSectionMatrix), so it never reads the GL matrix
-    // stack. Skipping the three matrix calls removes ~2 ms/frame of Kirino GL overhead while the
+    // renderChunkLayer wraps each chunk in pushMatrix / preRenderChunk(translate) /
+    // multModelviewMatrix / popMatrix. The batched draw derives each section's matrix on
+    // the CPU from the stashed section origin and camera (see
+    // TerrainRenderer.applyCurrentSectionMatrix), so it never reads the GL matrix stack.
+    // Skipping these matrix calls removes ~2 ms/frame of Kirino GL overhead while the
     // loop, frustum culling and the record() call stay exactly as vanilla drives them.
 
     @Redirect(method = "renderChunkLayer",
@@ -75,6 +76,22 @@ public abstract class VboRenderListM {
     private void vulkanmod$skipPopMatrix() {
         if (!TerrainRenderer.BATCH) {
             GlStateManager.popMatrix();
+        }
+    }
+
+    /**
+     * The third matrix call: with the push/pop skipped, this multMatrix would multiply
+     * every chunk's modelview into the CURRENT top of the stack instead of a throwaway
+     * copy, so the drift accumulated across the whole layer (Kirino's rounding nudges
+     * the scale by ~2^-20 per multiply). The batched path never reads it, but anything
+     * that reads the modelview after the terrain pass would (L4).
+     */
+    @Redirect(method = "renderChunkLayer",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/chunk/RenderChunk;multModelviewMatrix()V"))
+    private void vulkanmod$skipMultModelview(net.minecraft.client.renderer.chunk.RenderChunk renderChunk) {
+        if (!TerrainRenderer.BATCH) {
+            renderChunk.multModelviewMatrix();
         }
     }
 }

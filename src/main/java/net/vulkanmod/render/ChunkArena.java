@@ -14,8 +14,6 @@ import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.Map;
-import java.util.TreeMap;
 
 import static net.vulkanmod.vulkan.Vulkan.copyStagingtoLocalBuffer;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -38,13 +36,28 @@ public class ChunkArena {
     /** Vertex stride in bytes; also the allocation granularity (keeps vertexOffset integral). */
     private final int stride;
 
+    /** Growth cap: offsets are ints, and 1 GiB of section geometry is far past any world. */
+    private static final int MAX_CAPACITY = 1024 * 1024 * 1024;
+
     private long buffer;
     private long memory;
     private int capacity;
     private int highWater;
 
-    /** Mature free ranges as offset -> size, kept disjoint and coalesced. */
-    private final TreeMap<Integer, Integer> free = new TreeMap<>();
+    /**
+     * Mature free ranges, sorted by offset, packed as {@code offset << 32 | size}, kept
+     * disjoint and coalesced. A packed long[] rather than a TreeMap: the first-fit scan and
+     * the coalesce's neighbour lookups run on every chunk rebuild and must not box (M22).
+     */
+    private long[] freeBlocks = new long[64];
+    private int freeCount;
+
+    /**
+     * Bumped by {@link #reset()} so frees arriving from the previous world's VBOs (which
+     * vanilla may still delete after the world swap) are ignored instead of punching holes
+     * into freshly handed-out ranges.
+     */
+    private long generation;
 
     /**
      * Ranges awaiting reuse: {offset, size, frameAtWhichReusable}. A range freed by a chunk
@@ -84,16 +97,19 @@ public class ChunkArena {
         int size = align(bytes);
 
         // First-fit scan for a free block big enough.
-        for (Map.Entry<Integer, Integer> e : free.entrySet()) {
-            int offset = e.getKey();
-            int block = e.getValue();
-            if (block >= size) {
-                // Consume the block: remove it, then hand back any leftover tail. Leaving the
-                // original entry in place would hand the same offset out on every later alloc,
-                // overlapping live sections (the "floating islands" bug).
-                free.remove(offset);
-                if (block > size) {
-                    free.put(offset + size, block - size);
+        for (int i = 0; i < freeCount; ++i) {
+            long block = freeBlocks[i];
+            int blockSize = (int) block;
+            if (blockSize >= size) {
+                int offset = (int) (block >>> 32);
+                if (blockSize > size) {
+                    // Hand back the leftover tail in place: it stays ordered (its offset
+                    // grew but never reaches the next block's). Removing the entry instead
+                    // would hand the same offset out again on a later alloc, overlapping
+                    // live sections (the "floating islands" bug).
+                    freeBlocks[i] = (long) (offset + size) << 32 | (blockSize - size);
+                } else {
+                    removeBlock(i);
                 }
                 return offset;
             }
@@ -110,14 +126,19 @@ public class ChunkArena {
     /**
      * Returns a previously allocated range to the arena. The range is only made reusable after
      * {@code freeDelay} frames (see {@link #pending}), so an in-flight frame that is still
-     * reading it is never overwritten.
+     * reading it is never overwritten. Frees from before the last {@link #reset()} are ignored.
      */
-    public void free(int offset, int bytes) {
+    public void free(int offset, int bytes, long generation) {
         int size = align(bytes);
-        if (size <= 0) {
+        if (size <= 0 || generation != this.generation) {
             return;
         }
         pending.addLast(new long[]{offset, size, frameId + freeDelay});
+    }
+
+    /** The token {@link #free} requires; changes on every {@link #reset()}. */
+    public long generation() {
+        return generation;
     }
 
     /** Advances the frame clock and releases any ranges whose delay has elapsed. */
@@ -129,22 +150,92 @@ public class ChunkArena {
         }
     }
 
+    /**
+     * Drops every allocation: the world is gone and its sections were dropped without
+     * freeing their ranges, so the arena would keep the old world's footprint forever
+     * (M22). The in-flight frames may still read the arena through the last indirect
+     * draws, so they retire first; after that a fresh world can start allocating from 0.
+     * The VkBuffer itself (and its grown capacity) is kept.
+     */
+    public void reset() {
+        Drawer.waitForAllFrames();
+        TransferQueue.waitPendingFences();
+
+        ++generation;
+        freeCount = 0;
+        pending.clear();
+        highWater = 0;
+    }
+
     /** Inserts a mature range into the free list, coalescing with adjacent free blocks. */
     private void insertFree(int offset, int size) {
         int start = offset;
         int end = offset + size;
 
-        Map.Entry<Integer, Integer> lower = free.lowerEntry(offset);
-        if (lower != null && lower.getKey() + lower.getValue() == offset) {
-            start = lower.getKey();
-            free.remove(lower.getKey());
+        int i = lowerBound(start);
+        boolean mergedPred = i > 0 && (int) (freeBlocks[i - 1] >>> 32) + (int) freeBlocks[i - 1] == start;
+        if (mergedPred) {
+            start = (int) (freeBlocks[i - 1] >>> 32);
         }
-        Map.Entry<Integer, Integer> higher = free.ceilingEntry(offset);
-        if (higher != null && higher.getKey() == end) {
-            end = higher.getKey() + higher.getValue();
-            free.remove(higher.getKey());
+        boolean mergedSucc = i < freeCount && (int) (freeBlocks[i] >>> 32) == end;
+        if (mergedSucc) {
+            end += (int) freeBlocks[i];
         }
-        free.put(start, end - start);
+
+        long merged = (long) start << 32 | (end - start) & 0xFFFFFFFFL;
+        if (mergedPred) {
+            freeBlocks[i - 1] = merged;
+            if (mergedSucc) {
+                removeBlock(i);
+            }
+        } else if (mergedSucc) {
+            freeBlocks[i] = merged;
+        } else {
+            insertBlock(i, merged);
+        }
+
+        // Tail merge: a free block that reaches the bump pointer is not fragmentation but
+        // unused capacity - give it back instead of letting churn force a grow (M22). Safe
+        // because free blocks never overlap a pending range, so nothing above the new
+        // high water (including every pending range) can still be referenced.
+        if (freeCount > 0) {
+            long last = freeBlocks[freeCount - 1];
+            int lastOffset = (int) (last >>> 32);
+            if (lastOffset + (int) last == highWater) {
+                highWater = lastOffset;
+                removeBlock(freeCount - 1);
+            }
+        }
+    }
+
+    /** Index of the first block whose offset is >= {@code offset}. */
+    private int lowerBound(int offset) {
+        int lo = 0, hi = freeCount;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if ((int) (freeBlocks[mid] >>> 32) < offset) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    private void insertBlock(int index, long block) {
+        if (freeCount == freeBlocks.length) {
+            long[] grown = new long[freeBlocks.length * 2];
+            System.arraycopy(freeBlocks, 0, grown, 0, freeCount);
+            freeBlocks = grown;
+        }
+        System.arraycopy(freeBlocks, index, freeBlocks, index + 1, freeCount - index);
+        freeBlocks[index] = block;
+        ++freeCount;
+    }
+
+    private void removeBlock(int index) {
+        --freeCount;
+        System.arraycopy(freeBlocks, index + 1, freeBlocks, index, freeCount - index);
     }
 
     /** Copies {@code bytes} from {@code data} into the arena at {@code offset} (staging upload). */
@@ -157,7 +248,16 @@ public class ChunkArena {
     }
 
     private void grow(int needed) {
-        int newCapacity = Math.max(align(needed), capacity * 2);
+        // Long math: capacity * 2 overflows negative past 1 GiB, and Math.max would then
+        // silently pick the (still too small) needed value, turning every later alloc into
+        // another grow (M22).
+        long alignedNeeded = (needed + (long) stride - 1) / stride * stride;
+        long target = Math.max(alignedNeeded, Math.min((long) capacity * 2, MAX_CAPACITY));
+        if (target > Integer.MAX_VALUE - stride) {
+            throw new OutOfMemoryError("ChunkArena cannot grow to " + target + " bytes");
+        }
+        int newCapacity = (int) target;
+
         net.vulkanmod.Initializer.LOGGER.warn("[arena] GROW {}MB -> {}MB (used {}MB, needed {}MB)",
                 capacity / (1024 * 1024), newCapacity / (1024 * 1024),
                 highWater / (1024 * 1024), needed / (1024 * 1024));

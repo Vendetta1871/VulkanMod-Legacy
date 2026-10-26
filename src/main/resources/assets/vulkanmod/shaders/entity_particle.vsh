@@ -27,7 +27,7 @@ void main() {
 
     gl_Position = MVP * vec4(Position, 1.0);
 
-    vertexDistance = length(viewPos.xyz);
+    vertexDistance = abs(viewPos.z);
     texCoord0 = UV0;
     vertexColor = VertexColor;
 

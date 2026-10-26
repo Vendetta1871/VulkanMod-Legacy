@@ -438,29 +438,23 @@ public class VRenderSystem {
     public static void setFogState(int state) { fogState = state; }
     public static int getFogState() { return fogState; }
 
-    // --- Fixed-function alpha test (GREATER 0.1), fed to the GUI shaders ---
+    // --- Fixed-function alpha test (live func/ref), fed to the terrain/entity/GUI shaders ---
 
     public static void setAlphaTest(boolean enabled) { alphaTest = enabled; }
-
-    /**
-     * The discard flag for the GUI shaders, which hardcode the vanilla "GREATER 0.1"
-     * test. It discards only while the test is enabled and the live func/ref still
-     * match that assumption; any other func (ALWAYS for the fade passes, a foreign ref)
-     * turns the shader-side discard off, exactly like the GL fixed-function test would.
-     */
-    public static int getAlphaTest() {
-        return alphaTest && alphaTestFunc == 516 && alphaTestRef <= 0.1f ? 1 : 0;
-    }
 
     public static void setAlphaFunc(int func, float ref) { alphaTestFunc = func; alphaTestRef = ref; }
 
     /**
-     * The discard threshold for the shaders: the live alphaFunc reference while the test
-     * is enabled with GREATER, 0 (never discard) otherwise. Passes that disable the test
-     * (enderman eyes, the death fade) or use TRANSPARENT_MODEL's tiny reference need the
-     * real value, not the hardcoded 0.1.
+     * The live alphaFunc comparison as the shaders consume it: the GL enum (NEVER 512
+     * ... ALWAYS 519) while the test is enabled, 0 when it is disabled. The shaders
+     * evaluate the real comparison instead of the old hardcoded GREATER 0.1, so non-
+     * GREATER funcs (ALWAYS for the fade passes, LESS/GEQUAL from mods) behave like GL
+     * instead of turning the test off (M21, N23).
      */
-    public static float getAlphaRef() { return alphaTest && alphaTestFunc == 516 ? alphaTestRef : 0.0f; }
+    public static float getAlphaFunc() { return alphaTest ? (float) alphaTestFunc : 0.0f; }
+
+    /** The live alphaFunc reference; meaningful only while {@link #getAlphaFunc()} != 0. */
+    public static float getAlphaRef() { return alphaTestRef; }
 
     public static void setFogStart(float v) { fogStart = v; }
     public static float getFogStart() { return fogStart; }

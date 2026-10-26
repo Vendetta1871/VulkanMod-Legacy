@@ -35,7 +35,7 @@ void main() {
     vec4 viewPos = cm.modelView * vec4(Position, 1.0);
     gl_Position = cm.mvp * vec4(Position, 1.0);
 
-    vertexDistance = length(viewPos.xyz);
+    vertexDistance = abs(viewPos.z);
     vertexColor = Color;
     texCoord0 = UV0;
     lightCoord = clamp(vec2(UV2) / 256.0, vec2(0.001953126), vec2(0.96875));

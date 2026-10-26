@@ -1,7 +1,7 @@
 [{
 	"modid": "vulkanmod",
 	"name": "VulkanMod",
-	"version": "0.1.0",
+	"version": "${version}",
 	"mcversion": "1.12.2",
 	"description": "Vulkan renderer for Minecraft 1.12.2, ported from VulkanMod (xCollateral).",
 	"authorList": ["CelestialD"],

@@ -19,7 +19,9 @@ public class VulkanModMod {
 
     public static final String MODID = "vulkanmod";
     public static final String NAME = "VulkanMod";
-    public static final String VERSION = "0.1.0";
+    // Generated from gradle.properties at build time (L15); still a compile-time constant,
+    // so the @Mod annotation above keeps working.
+    public static final String VERSION = BuildConfig.VERSION;
 
     public static final Logger LOGGER = LogManager.getLogger("VulkanMod");
 

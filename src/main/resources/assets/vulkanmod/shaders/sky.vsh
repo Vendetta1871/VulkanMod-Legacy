@@ -18,6 +18,7 @@ void main() {
 
     gl_Position = MVP * vec4(Position, 1.0);
 
-    // Matches the GL fixed-function fog coordinate (fragment depth = eye distance).
-    vertexDistance = length(viewPos.xyz);
+    // The GL fixed-function fog coordinate is the eye-space DEPTH (|z|), not the
+    // radial distance - radial fog would be thicker at the screen edges than GL (L2).
+    vertexDistance = abs(viewPos.z);
 }

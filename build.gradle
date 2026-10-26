@@ -99,6 +99,39 @@ jar {
     }
 }
 
+// Single source of truth for the version: gradle.properties (L15). mcmod.info is expanded
+// at build time and the Java constant is generated, so a release bump cannot leave the mod
+// metadata or the @Mod annotation behind.
+def modVersion = project.mod_version
+processResources {
+    inputs.property 'version', modVersion
+    filesMatching('mcmod.info') {
+        expand version: modVersion
+    }
+}
+
+def generatedVersionDir = layout.buildDirectory.dir('generated/sources/version/java')
+tasks.register('generateVersionSource') {
+    inputs.property 'version', modVersion
+    outputs.dir generatedVersionDir
+    doLast {
+        def pkg = generatedVersionDir.get().file('net/vulkanmod').asFile
+        pkg.mkdirs()
+        new File(pkg, 'BuildConfig.java').text = """\
+package net.vulkanmod;
+
+/** Generated from gradle.properties by the generateVersionSource task (L15). Do not edit. */
+public final class BuildConfig {
+    public static final String VERSION = "${modVersion}";
+
+    private BuildConfig() {}
+}
+"""
+    }
+}
+sourceSets.main.java.srcDir generatedVersionDir
+compileJava.dependsOn 'generateVersionSource'
+
 // Merge the LWJGL Vulkan bindings and natives into the mod jar. The natives keep
 // the <os>/<arch>/<package>/ layout LWJGL's loader searches inside the jar.
 // The configuration must stay unresolved until after the cleanroom plugin's own

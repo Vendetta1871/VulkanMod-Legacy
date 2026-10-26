@@ -51,6 +51,7 @@ public class SkyRenderer {
     private static Pipeline skyVcolPipeline;  // POSITION_COLOR: glow fan
 
     private static ByteBuffer skyPlaneBuffer;
+    private static ByteBuffer skyPlane2Buffer;
     private static ByteBuffer starBuffer;
     private static int starVertexCount;
     private static ByteBuffer sunBuffer;
@@ -61,6 +62,7 @@ public class SkyRenderer {
     // Persistent device-side copies of the constant sky geometry (M12): uploaded once,
     // then redrawn from the GPU instead of being rebuilt and re-uploaded every frame.
     private static VertexBuffer skyPlaneVbo;
+    private static VertexBuffer skyPlane2Vbo;
     private static VertexBuffer starsVbo;
     private static VertexBuffer endSkyVbo;
 
@@ -75,8 +77,8 @@ public class SkyRenderer {
     private static final VertexFormat POSITION_TEX = DefaultVertexFormats.POSITION_TEX;
     private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
 
-    /** Two 13x13 quad planes (vanilla's glSkyList + glSkyList2), 4 vertices each. */
-    private static final int SKY_PLANE_VERTS = 2 * 13 * 13 * 4;
+    /** One 13x13 quad plane (vanilla's glSkyList or glSkyList2), 4 vertices per quad. */
+    private static final int SKY_PLANE_VERTS = 13 * 13 * 4;
 
     // GL_SRC_ALPHA, GL_ONE: additive, like the GL sun/moon. Constant, so it is hoisted out
     // of the per-frame draw (L10) instead of allocating a fresh BlendState every frame.
@@ -97,6 +99,7 @@ public class SkyRenderer {
         skyVcolPipeline = new Pipeline(POSITION_COLOR, "sky_vcol");
 
         skyPlaneBuffer = MemoryUtil.memAlloc(SKY_PLANE_VERTS * 12);
+        skyPlane2Buffer = MemoryUtil.memAlloc(SKY_PLANE_VERTS * 12);
         starBuffer = buildStars();
         sunBuffer = buildSun();
         moonBuffer = MemoryUtil.memAlloc(4 * POSITION_TEX.getSize());
@@ -181,6 +184,9 @@ public class SkyRenderer {
         VRenderSystem.setLightDirections(headMV);
 
         snapshotFog();
+        // The live fog mode for the lower plane: vanilla re-enables fog before drawing
+        // glSkyList2 after the stars, and :228 below overwrites the state with NONE.
+        final int fogState = VRenderSystem.getFogState();
 
         VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
         if (boolState(GL11.GL_DEPTH_TEST)) {
@@ -304,6 +310,23 @@ public class SkyRenderer {
             }
             drawStaticQuads(drawer, starsVbo, starVertexCount);
         }
+
+        // --- lower sky plane (vanilla glSkyList2, y=-16) ---
+        // Vanilla draws it here - after the stars - with fog re-enabled and blend
+        // disabled, so the opaque plane overwrites any star that bled below the horizon
+        // instead of adding to it (L7). Drawing both planes up front made additive
+        // stars visible through the lower sky.
+        VRenderSystem.setFogState(fogState);
+        VRenderSystem.setShaderColor(r, g, b, 1.0f);
+        VRenderSystem.setShaderPipeline(skyPipeline);
+        Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
+        VRenderSystem.applyModelViewMatrix(headMV);
+        VRenderSystem.calculateMVP();
+        if (skyPlane2Vbo == null) {
+            buildSkyPlane();
+            skyPlane2Vbo = uploadStatic(skyPlane2Buffer, SKY_PLANE_VERTS, POSITION);
+        }
+        drawStaticQuads(drawer, skyPlane2Vbo, SKY_PLANE_VERTS);
     }
 
     /**
@@ -410,21 +433,24 @@ public class SkyRenderer {
     }
 
     /**
-     * Refills the sky plane (vanilla glSkyList: a y=16 grid from -384 to 384). Vanilla
-     * draws it with a rotation-only modelview (the -eye translate happens later, per
-     * block layer), so the grid floats around the camera at y=+16. The head modelview
-     * here is likewise rotation-only, so the vertices stay in raw camera-relative
-     * space - no eye subtraction.
+     * Refills the two sky planes (vanilla glSkyList + glSkyList2: 13x13 grids from -384
+     * to 384). Vanilla draws them at opposite ends of renderSky - the y=+16 plane first
+     * with fog, the y=-16 plane after the stars with fog re-enabled and blend disabled
+     * (see renderSky) - so they are separate buffers drawn at those two points. Vanilla
+     * builds them with a rotation-only modelview (the -eye translate happens later, per
+     * block layer), so the grids float around the camera. The head modelview here is
+     * likewise rotation-only, so the vertices stay in raw camera-relative space - no eye
+     * subtraction.
      *
-     * Both vanilla display lists are built here with vanilla's exact vertex order, so
-     * their front faces point the same way and GL_CULL_FACE (enabled through all of
-     * renderSky) culls them identically: {@code glSkyList} is the y=+16 plane with its
-     * front face DOWN, visible from below so it covers the upper hemisphere (the zenith
-     * reads as the near, unfogged sky colour, not the clear colour); {@code glSkyList2}
-     * is the y=-16 plane with its front face UP, visible from above to cover the lower
-     * hemisphere (mostly hidden by terrain, fogged to the fog colour at the horizon).
-     * The geometry is constant - the camera rotation rides the modelview matrix - so it
-     * is built once and kept in a persistent VBO (see skyPlaneVbo).
+     * Both grids use vanilla's exact vertex order, so their front faces point the same
+     * way and GL_CULL_FACE (enabled through all of renderSky) culls them identically:
+     * {@code glSkyList} is the y=+16 plane with its front face DOWN, visible from below
+     * so it covers the upper hemisphere (the zenith reads as the near, unfogged sky
+     * colour, not the clear colour); {@code glSkyList2} is the y=-16 plane with its front
+     * face UP, visible from above to cover the lower hemisphere (mostly hidden by
+     * terrain, fogged to the fog colour at the horizon). The geometry is constant - the
+     * camera rotation rides the modelview matrix - so each is built once and kept in a
+     * persistent VBO (see skyPlaneVbo / skyPlane2Vbo).
      */
     private static void buildSkyPlane() {
         ByteBuffer buf = skyPlaneBuffer;
@@ -438,6 +464,16 @@ public class SkyRenderer {
                 putPos(buf, f1, 16.0f, l);
                 putPos(buf, f1, 16.0f, l + 64.0f);
                 putPos(buf, f, 16.0f, l + 64.0f);
+            }
+        }
+        buf.position(0);
+
+        buf = skyPlane2Buffer;
+        buf.position(0);
+        for (int k = -384; k <= 384; k += 64) {
+            for (int l = -384; l <= 384; l += 64) {
+                float f = k;
+                float f1 = k + 64;
                 // glSkyList2: renderSky(-16, true) - the f/f1 swap reverses the winding,
                 // front face up, seen looking down.
                 putPos(buf, f1, -16.0f, l);

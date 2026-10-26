@@ -22,5 +22,5 @@ void main() {
     texCoord0 = UV0;
     // World-space text (name tags, sign text) renders with the live world matrices
     // and the frame's fog; the GUI pass sets FOG_NONE so this stays unused there.
-    vertexDistance = length(viewPos.xyz);
+    vertexDistance = abs(viewPos.z);
 }

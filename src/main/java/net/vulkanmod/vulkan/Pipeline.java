@@ -49,6 +49,10 @@ public class Pipeline {
     private static final long pipelineCache = createPipelineCache();
     private static final int imagesSize = getSwapChainImages().size();
 
+    // L1: whether the optional R8G8B8_SNORM can be used for the NORMAL attribute.
+    private static final boolean R8G8B8_NORMAL_SUPPORTED =
+            Vulkan.vertexBufferFormatSupported(VK_FORMAT_R8G8B8_SNORM);
+
     private String path;
     private long descriptorSetLayout;
     private long pipelineLayout;
@@ -823,7 +827,12 @@ public class Pipeline {
                 }
             }
             else if(usage == VertexFormatElement.EnumUsage.NORMAL) {
-                description.format(count == 3 ? VK_FORMAT_R8G8B8_SNORM : VK_FORMAT_R8G8B8A8_SNORM);
+                // R8G8B8_SNORM is not a mandatory vertex-buffer format (L1). Every desktop
+                // driver supports it, but where one does not, fall back to the mandatory
+                // R8G8B8A8_SNORM: the 4th byte is then whatever follows the normal in the
+                // stream (vanilla pads ITEM to 4 bytes) and the shaders only read .xyz.
+                description.format(count == 3 && R8G8B8_NORMAL_SUPPORTED
+                        ? VK_FORMAT_R8G8B8_SNORM : VK_FORMAT_R8G8B8A8_SNORM);
             }
             else if(usage == VertexFormatElement.EnumUsage.PADDING) {
                 // Padded bytes are skipped by pointing the attribute at a zeroed location;

@@ -21,6 +21,19 @@ public class MinecraftM {
         Initializer.initVulkan();
     }
 
+    /**
+     * World load/unload: hand the previous world's chunk-arena ranges back (M22). The
+     * two-argument overload is the funnel - the one-argument one delegates to it.
+     */
+    @Inject(method = "loadWorld(Lnet/minecraft/client/multiplayer/WorldClient;Ljava/lang/String;)V",
+            at = @At("HEAD"))
+    private void vulkanmod$worldChange(net.minecraft.client.multiplayer.WorldClient world,
+                                       String loadedInWorldPos, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            net.vulkanmod.render.ChunkBatcher.onWorldChange();
+        }
+    }
+
     @Inject(method = "runGameLoop", at = @At("HEAD"))
     private void vulkanmod$frameBegin(CallbackInfo ci) {
         FrameProfiler.frameBegin();

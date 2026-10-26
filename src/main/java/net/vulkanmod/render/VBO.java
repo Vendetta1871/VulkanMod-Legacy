@@ -30,6 +30,9 @@ public class VBO {
     // persistent matrix slot (-1 when unset), and a reused scratch buffer for slot interleaving.
     private int arenaOffset = -1;
     private int arenaBytes;
+    // The arena generation this range was allocated in; frees from an older world (after
+    // ChunkArena.reset) are ignored so they cannot punch holes into new allocations.
+    private long arenaGeneration;
     private int slot = -1;
     private static ByteBuffer scratch = org.lwjgl.system.MemoryUtil.memAlloc(1 << 16);
 
@@ -50,7 +53,7 @@ public class VBO {
         // A section can switch paths between uploads (e.g. BATCH toggled); release
         // whatever the previous upload left behind.
         if (arenaOffset >= 0) {
-            ChunkBatcher.arena().free(arenaOffset, arenaBytes);
+            ChunkBatcher.arena().free(arenaOffset, arenaBytes, arenaGeneration);
             arenaOffset = -1;
         }
         if (slot >= 0) {
@@ -92,7 +95,7 @@ public class VBO {
         // Release the previous slice + slot on rebuild.
         if (arenaOffset >= 0) {
             TerrainRenderer.countUpload(TerrainRenderer.currentLayer, this.vertexCount, vertexCount);
-            arena.free(arenaOffset, arenaBytes);
+            arena.free(arenaOffset, arenaBytes, arenaGeneration);
             arenaOffset = -1;
         }
         if (slot >= 0) {
@@ -113,10 +116,11 @@ public class VBO {
             ByteBuffer interleaved = interleaveSlot(data, vertexCount, slot);
             arenaOffset = arena.alloc(bytes);
             arenaBytes = bytes;
+            arenaGeneration = arena.generation();
             arena.upload(arenaOffset, interleaved, bytes);
         } catch (Throwable t) {
             if (arenaOffset >= 0) {
-                arena.free(arenaOffset, arenaBytes);
+                arena.free(arenaOffset, arenaBytes, arenaGeneration);
                 arenaOffset = -1;
             }
             if (slot >= 0) {
@@ -227,7 +231,7 @@ public class VBO {
         // Release both possible storages unconditionally: a section may have been
         // uploaded through either path over its lifetime.
         if (arenaOffset >= 0) {
-            ChunkBatcher.arena().free(arenaOffset, arenaBytes);
+            ChunkBatcher.arena().free(arenaOffset, arenaBytes, arenaGeneration);
             arenaOffset = -1;
         }
         if (slot >= 0) {

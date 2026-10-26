@@ -22,5 +22,5 @@ void main() {
     gl_Position = MVP * vec4(Position, 1.0);
 
     vertexColor = Color;
-    vertexDistance = length(viewPos.xyz);
+    vertexDistance = abs(viewPos.z);
 }

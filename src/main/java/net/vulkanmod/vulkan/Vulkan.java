@@ -248,6 +248,15 @@ public class Vulkan {
         }
     }
 
+    /** True when the optional R8G8B8_SNORM can be sampled as a vertex attribute (L1). */
+    public static boolean vertexBufferFormatSupported(int format) {
+        try(MemoryStack stack = stackPush()) {
+            VkFormatProperties formatProperties = VkFormatProperties.create();
+            vkGetPhysicalDeviceFormatProperties(physicalDevice, format, formatProperties);
+            return (formatProperties.bufferFeatures() & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0;
+        }
+    }
+
     /**
      * Recreates the swapchain and its attachments. Returns false (nothing recreated)
      * when the surface currently has no extent - a minimized window would make

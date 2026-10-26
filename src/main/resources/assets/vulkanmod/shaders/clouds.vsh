@@ -24,5 +24,5 @@ void main() {
 
     texCoord0 = UV0;
     vertexColor = Color;
-    vertexDistance = length(viewPos.xyz);
+    vertexDistance = abs(viewPos.z);
 }

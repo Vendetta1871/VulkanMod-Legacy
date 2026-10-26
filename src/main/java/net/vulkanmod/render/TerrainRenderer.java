@@ -363,11 +363,12 @@ public class TerrainRenderer {
                 // Capture the camera model-view + projection once per frame, at the first
                 // chunk layer pass. The stack is clean there (setupCameraTransform just
                 // loadIdentity'd and rotated it), matching what vanilla's per-chunk draws
-                // see for every layer. Do NOT re-capture per layer: Kirino nudges the
-                // modelview by ~(1+2^-20) per chunk draw, and because the batched path
-                // skips the per-chunk push/pop that nudge is never discarded - re-querying
-                // per layer would bake a growing scale into the later layers and open
-                // sub-pixel cracks where two render layers of the same section meet
+                // see for every layer. Do NOT re-capture per layer: Kirino's multMatrix
+                // nudged the modelview by ~(1+2^-20) per chunk multiply before the batched
+                // path started no-oping multModelviewMatrix (see VboRenderListM, L4); the
+                // once-per-frame capture is kept regardless, as re-querying per layer
+                // would bake any future drift into the later layers and open sub-pixel
+                // cracks where two render layers of the same section meet
                 // (e.g. solid dirt vs cutout_mipped grass sides).
                 if (lastCaptureFrame != frameCounter) {
                     VRenderSystem.captureCameraMatrices(batchCameraMV, batchProjRemap);

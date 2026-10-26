@@ -29,7 +29,7 @@ void main() {
 
     gl_Position = MVP * vec4(Position, 1.0);
 
-    vertexDistance = length(viewPos.xyz);
+    vertexDistance = abs(viewPos.z);
     // The enchantment glint scrolls its UVs through the GL texture matrix (the only
     // vanilla draw that touches the texture stack); every other item keeps it identity.
     texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;

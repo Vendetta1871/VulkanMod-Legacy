@@ -213,4 +213,14 @@ public class ChunkBatcher {
     public static ChunkArena arena() {
         return arena;
     }
+
+    /**
+     * World change (see MinecraftM): the previous world's sections were dropped without
+     * freeing their arena ranges, so hand the whole arena back (M22).
+     */
+    public static void onWorldChange() {
+        if (arena != null) {
+            arena.reset();
+        }
+    }
 }
