@@ -63,19 +63,21 @@ Environment variables:
 Average FPS, 1% low and 0.1% low (the mean FPS of the worst 1% / 0.1% of individual frames,
 measured from per-frame times) while flying a fixed spectator path over a fixed-seed world for
 90 seconds. Intel UHD 620 iGPU, 1600x900, render distance 12, mipmaps 4, VSync off, FPS uncapped.
-Two rounds run back-to-back per configuration; the numbers are the round average.
+Two rounds per configuration with cooldowns between runs; the numbers are the round average.
 
 | Configuration | Avg FPS | 1% low | 0.1% low |
 |--------------------------------------------|---------|--------|----------|
 | **VulkanMod (this mod)** on Cleanroom 0.7.12 | **175.2** | 64.0 | 40.9 |
 | Cleanroom 0.6.13 + Actinium alpha-0.0.13   | 153.9   | 78.3 | 37.9 |
 | Cleanroom 0.7.12 (base, no renderer mod)   | 136.4   | 61.7 | 40.7 |
+| Forge 14.23.5.2860 (no mods)               | 131.1   | 51.9 | 33.2 |
 | Forge 14.23.5.2860 + OptiFine HD U G5      | 126.5   | 51.9 | 32.8 |
 
 The base and VulkanMod runs use the Gradle dev environment (a few percent of extra overhead, so
 their numbers are conservative); the Forge and Cleanroom+Actinium runs use production installs.
-Actinium has the smoothest frame pacing of the four (best 1% low) but a lower ceiling than the
-Vulkan path; on a discrete GPU the gap narrows as the workload becomes less GPU-bound.
+Actinium has the smoothest frame pacing of these (best 1% low) but a lower ceiling than the
+Vulkan path; on a discrete GPU the gap narrows as the workload becomes less GPU-bound. On this
+hardware OptiFine costs a few percent rather than saving any.
 
 ## Building
 
