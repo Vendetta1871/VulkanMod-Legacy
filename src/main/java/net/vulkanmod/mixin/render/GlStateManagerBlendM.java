@@ -71,28 +71,34 @@ public class GlStateManagerBlendM {
     }
 
     /**
-     * Tracks the texture id bound to GL_TEXTURE_2D. Every draw-time bind in 1.12.2
-     * (entity skins, the block atlas, the font, GUI atlases) goes through this method,
-     * so the entity/GUI texture mirrors can resolve their Vulkan image from the tracked
-     * value instead of a {@code glGetInteger(GL_TEXTURE_BINDING_2D)} round-trip per draw.
+     * Tracks the texture id bound to GL_TEXTURE_2D on unit 0. Every draw-time bind in
+     * 1.12.2 (entity skins, the block atlas, the font, GUI atlases) goes through this
+     * method, so the entity/GUI texture mirrors can resolve their Vulkan image from the
+     * tracked value instead of a {@code glGetInteger(GL_TEXTURE_BINDING_2D)} round-trip
+     * per draw. Binds on other units (the lightmap on unit 1) must not overwrite the
+     * unit-0 mirror (N8).
      */
     @Inject(method = "bindTexture(I)V", at = @At("HEAD"))
     private static void vulkanmod$bindTexture(int texture, CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
+        if (Initializer.isVulkanActive() && VRenderSystem.activeTexUnit() == 0) {
             VRenderSystem.trackedBoundTexture = texture;
         }
     }
 
+    /*
+     * GL texture enable is per-unit state; VRenderSystem.textureEnabled mirrors unit 0
+     * (the one the capture draws with). enableLightmap toggles it on unit 1 (N8).
+     */
     @Inject(method = "enableTexture2D", at = @At("HEAD"))
     private static void vulkanmod$enableTexture2D(CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
+        if (Initializer.isVulkanActive() && VRenderSystem.activeTexUnit() == 0) {
             VRenderSystem.textureEnabled = true;
         }
     }
 
     @Inject(method = "disableTexture2D", at = @At("HEAD"))
     private static void vulkanmod$disableTexture2D(CallbackInfo ci) {
-        if (Initializer.isVulkanActive()) {
+        if (Initializer.isVulkanActive() && VRenderSystem.activeTexUnit() == 0) {
             VRenderSystem.textureEnabled = false;
         }
     }

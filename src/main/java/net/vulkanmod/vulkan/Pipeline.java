@@ -605,10 +605,18 @@ public class Pipeline {
             if (texture2 != null) texture2.readOnlyLayout();
         }
 
+        // A freed image must never reach a descriptor write (its view is destroyed or
+        // scheduled for it) and a set cached against one must never be reused (N15).
+        if (freed(texture0)) texture0 = VTextureSelector.getWhiteTexture();
+        if (freed(texture1)) texture1 = VTextureSelector.getWhiteTexture();
+        if (freed(texture2)) texture2 = VTextureSelector.getWhiteTexture();
+
         int generation = uniformBuffers.getGeneration();
         long set = cachedSets[frame];
         if (set != 0 && cachedTex0[frame] == texture0 && cachedTex1[frame] == texture1
-                && cachedTex2[frame] == texture2 && cachedGen[frame] == generation) {
+                && cachedTex2[frame] == texture2 && cachedGen[frame] == generation
+                && !freed(cachedTex0[frame]) && !freed(cachedTex1[frame])
+                && !freed(cachedTex2[frame])) {
             return set;
         }
 
@@ -621,6 +629,10 @@ public class Pipeline {
         cachedTex2[frame] = texture2;
         cachedGen[frame] = generation;
         return set;
+    }
+
+    private static boolean freed(VulkanImage image) {
+        return image != null && image.isFreed();
     }
 
     private long allocateDescriptorSet(int frame) {

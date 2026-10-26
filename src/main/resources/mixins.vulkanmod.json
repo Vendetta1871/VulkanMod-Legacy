@@ -26,6 +26,7 @@
     "render.AbstractTextureAccessor",
     "render.DynamicTextureM",
     "render.ThreadDownloadImageDataM",
+    "render.TextureUtilM",
     "render.EntityRendererAccessor",
     "render.GuiScreenM",
     "render.GuiMainMenuM",

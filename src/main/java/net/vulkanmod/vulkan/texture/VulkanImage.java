@@ -671,6 +671,9 @@ public class VulkanImage {
         this.textureImageView = 0;
         this.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+        // No selector slot may keep pointing at the freed image (N15).
+        VTextureSelector.onImageFreed(this);
+
         if (imageId != 0) {
             LIVE_VIEWS.remove(view);
             MemoryManager.addToFreeable(() -> {
@@ -681,6 +684,9 @@ public class VulkanImage {
     }
 
     public long getId() { return id;}
+
+    /** True once {@link #free()} has run; the view is destroyed or scheduled for it (N15). */
+    public boolean isFreed() { return id == 0; }
     public long getTextureImageView() { return textureImageView; }
     public long getTextureSampler() { return textureSampler; }
 }

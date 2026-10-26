@@ -44,4 +44,14 @@ public abstract class VTextureSelector {
     public static VulkanImage getBoundTexture() { return boundTexture; }
 
     public static VulkanImage getWhiteTexture() { return whiteTexture; }
+
+    /**
+     * Drops every reference to a freed image so no draw can sample it through a
+     * destroyed (or zero) view; the white texture takes its place (N15).
+     */
+    public static void onImageFreed(VulkanImage image) {
+        if (boundTexture == image) boundTexture = whiteTexture;
+        if (lightTexture == image) lightTexture = whiteTexture;
+        if (overlayTexture == image) overlayTexture = whiteTexture;
+    }
 }

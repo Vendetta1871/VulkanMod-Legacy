@@ -311,6 +311,11 @@ public class VRenderSystem {
     private static int texUnit;
     private static int matrixMode = 5888; // GL_MODELVIEW
 
+    /** The active texture unit tracked from {@code GlStateManager.setActiveTexture}. */
+    public static int activeTexUnit() {
+        return texUnit;
+    }
+
     private static TexUnit texUnit(int i) {
         TexUnit u = TEX_UNITS[i];
         if (u == null) {
