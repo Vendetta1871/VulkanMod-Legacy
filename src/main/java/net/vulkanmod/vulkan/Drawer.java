@@ -220,6 +220,13 @@ public class Drawer {
         }
         fencePending[currentFrame] = false;
 
+        // Uploads issued between frames (animated tiles in runTick etc.) submit through
+        // the TransferQueue; the frame fence waited on above does not cover those
+        // submits. Retire them before rewinding the staging slot, or the next in-frame
+        // upload would overwrite bytes the GPU copy has not read yet (the minimized
+        // path below already does the same). No-op when nothing is pending.
+        TransferQueue.waitPendingFences();
+
         // The frame fence just waited on covers every copy submitted with the previous
         // occupant of this frame slot (staging included), so the CPU-side allocators
         // can be rewound here. Doing it at frame start instead of frame end also keeps
@@ -627,21 +634,30 @@ public class Drawer {
         try(MemoryStack stack = stackPush()) {
 
             // Close the frame's transfer command buffer. A single trailing global
-            // barrier (stage-mask only, so it covers every buffer and image) makes all
-            // its writes visible to every read stage of the render commands; the two
-            // command buffers share one submit, so the copies are guaranteed to run
-            // first by the intra-submit implicit dependency.
+            // barrier makes all its writes available and visible to every read stage
+            // of the render commands (stage masks alone do not flush caches - RADV
+            // flushes by access mask, so vertex/index/indirect data could read stale);
+            // the two command buffers share one submit, so the copies are guaranteed
+            // to run first by the intra-submit implicit dependency.
             VkCommandBuffer transferCmd = null;
             if(frameTransferRecording) {
                 frameTransferRecording = false;
 
                 transferCmd = transferCommandBuffers.get(currentFrame);
 
+                VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack);
+                barrier.sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+                barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+                barrier.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT
+                        | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT
+                        | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT
+                        | VK_ACCESS_TRANSFER_WRITE_BIT);
+
                 vkCmdPipelineBarrier(transferCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
                         | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
                         | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                        0, (VkMemoryBarrier.Buffer) null, (VkBufferMemoryBarrier.Buffer) null,
+                        0, barrier, (VkBufferMemoryBarrier.Buffer) null,
                         (VkImageMemoryBarrier.Buffer) null);
 
                 int err = vkEndCommandBuffer(transferCmd);

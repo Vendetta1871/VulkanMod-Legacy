@@ -138,6 +138,22 @@ public class TransferQueue {
 
         try(MemoryStack stack = stackPush()) {
 
+            // Trailing global barrier: these copies are submitted on their own, outside
+            // the frame's submit, so nothing else makes their writes available and
+            // visible to the frame that later reads the destination (stage masks alone
+            // do not flush caches). The consumer runs in a later submit on the same
+            // queue, so queue submit order provides the execution dependency.
+            VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack);
+            barrier.sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+            barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            barrier.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT
+                    | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT
+                    | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT
+                    | VK_ACCESS_TRANSFER_WRITE_BIT);
+            vkCmdPipelineBarrier(commandBuffer.handle, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, barrier,
+                    (VkBufferMemoryBarrier.Buffer) null, (VkImageMemoryBarrier.Buffer) null);
+
             int err = vkEndCommandBuffer(commandBuffer.handle);
             if(err != VK_SUCCESS) {
                 throw new RuntimeException("Failed to end transfer command buffer: " + err);

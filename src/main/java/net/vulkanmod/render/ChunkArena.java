@@ -8,6 +8,7 @@ import net.vulkanmod.vulkan.memory.StagingBuffer;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkMemoryBarrier;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
@@ -179,6 +180,11 @@ public class ChunkArena {
                 copyStagingtoLocalBuffer(oldBuffer, 0, this.buffer, 0, highWater);
                 transferBarrier(frameCmd);
             } else {
+                // Out-of-frame: uploads still pending in the TransferQueue may write the
+                // old buffer. Queue submit order already runs this copy after them, but
+                // waiting here retires them explicitly so the copy cannot depend on
+                // cross-submit ordering the drivers are free to interpret loosely.
+                TransferQueue.waitPendingFences();
                 copyStagingtoLocalBuffer(oldBuffer, 0, this.buffer, 0, highWater);
                 // Immediate submit: retire it before returning, so the next copy issued
                 // on this queue cannot overlap it.
@@ -190,14 +196,22 @@ public class ChunkArena {
     }
 
     private static void transferBarrier(VkCommandBuffer commandBuffer) {
-        // Stage-mask-only barrier: a global TRANSFER write-after-write/write-after-read
-        // dependency between the copies recorded before and after it.
-        vkCmdPipelineBarrier(commandBuffer,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, (org.lwjgl.vulkan.VkMemoryBarrier.Buffer) null,
-                (org.lwjgl.vulkan.VkBufferMemoryBarrier.Buffer) null,
-                (org.lwjgl.vulkan.VkImageMemoryBarrier.Buffer) null);
+        // Global TRANSFER write-after-write/write-after-read dependency between the
+        // copies recorded before and after it. The memory barrier is what makes the
+        // writes visible: stage masks alone order execution but do not flush caches.
+        try(MemoryStack stack = stackPush()) {
+            VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack);
+            barrier.sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+            barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            barrier.dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+
+            vkCmdPipelineBarrier(commandBuffer,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, barrier,
+                    (org.lwjgl.vulkan.VkBufferMemoryBarrier.Buffer) null,
+                    (org.lwjgl.vulkan.VkImageMemoryBarrier.Buffer) null);
+        }
     }
 
     public long bufferId() {
