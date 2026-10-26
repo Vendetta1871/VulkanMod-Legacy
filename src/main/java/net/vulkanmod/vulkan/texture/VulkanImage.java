@@ -168,8 +168,15 @@ public class VulkanImage {
 
     /** Debug helper: copies the image contents to the CPU and writes them out as a PNG. */
     public void dumpToPng(java.io.File file) {
+        dumpToPng(file, 0);
+    }
+
+    /** Debug helper: dumps a single mip level. */
+    public void dumpToPng(java.io.File file, int level) {
         try(MemoryStack stack = stackPush()) {
-            int size = width * height * 4;
+            int mipW = Math.max(1, width >> level);
+            int mipH = Math.max(1, height >> level);
+            int size = mipW * mipH * 4;
 
             LongBuffer pBuffer = stack.mallocLong(1);
             PointerBuffer pAllocation = stack.pointers(0L);
@@ -190,7 +197,7 @@ public class VulkanImage {
             barrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
             barrier.image(id);
             barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
-            barrier.subresourceRange().baseMipLevel(0);
+            barrier.subresourceRange().baseMipLevel(level);
             barrier.subresourceRange().levelCount(1);
             barrier.subresourceRange().baseArrayLayer(0);
             barrier.subresourceRange().layerCount(1);
@@ -200,9 +207,11 @@ public class VulkanImage {
 
             VkBufferImageCopy.Buffer region = VkBufferImageCopy.create(1);
             region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
+            region.imageSubresource().mipLevel(level);
+            region.imageSubresource().baseArrayLayer(0);
             region.imageSubresource().layerCount(1);
             region.imageOffset().set(0, 0, 0);
-            region.imageExtent(VkExtent3D.create().set(width, height, 1));
+            region.imageExtent(VkExtent3D.create().set(mipW, mipH, 1));
 
             vkCmdCopyImageToBuffer(commandBuffer, id, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pBuffer.get(0), region);
 
@@ -218,13 +227,13 @@ public class VulkanImage {
             TransferQueue.endCommands(transferCommand);
             vkWaitForFences(device, transferCommand.getFence(), true, VUtil.UINT64_MAX);
 
-            java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(width, height,
+            java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(mipW, mipH,
                     java.awt.image.BufferedImage.TYPE_INT_RGB);
             MapAndCopy(pAllocation.get(0), size, (data) -> {
                 ByteBuffer pixels = data.getByteBuffer(0, size);
-                for(int y = 0; y < height; ++y) {
-                    for(int x = 0; x < width; ++x) {
-                        int i = (y * width + x) * 4;
+                for(int y = 0; y < mipH; ++y) {
+                    for(int x = 0; x < mipW; ++x) {
+                        int i = (y * mipW + x) * 4;
                         int rgb = (pixels.get(i) & 0xFF) << 16 | (pixels.get(i + 1) & 0xFF) << 8 | (pixels.get(i + 2) & 0xFF);
                         image.setRGB(x, y, rgb);
                     }
@@ -453,8 +462,10 @@ public class VulkanImage {
             } else {
                 samplerInfo.magFilter(VK_FILTER_NEAREST);
                 // NEAREST_MIPMAP_LINEAR: nearest texel within a level, linear between
-                // levels - the filtering vanilla applies to the block atlas.
-                samplerInfo.minFilter(mipmap ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+                // levels - the filtering vanilla applies to the atlas. A LINEAR minifier
+                // would blend across sprite borders into the transparent atlas padding,
+                // drawing a grid of dark seams on distant blocks.
+                samplerInfo.minFilter(VK_FILTER_NEAREST);
             }
 
 
