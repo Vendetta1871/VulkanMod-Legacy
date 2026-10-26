@@ -472,27 +472,27 @@ public class Pipeline {
     private void createDescriptorPool(int descriptorCount) {
 
         try(MemoryStack stack = stackPush()) {
-            int size =  UBOs.size() + samplers.size() + ssbos.size();
+            // One pool size entry per descriptor TYPE. Duplicate entries of the same
+            // type are not summed by the driver, so each type's count must cover every
+            // binding of that type in every set: a set takes UBOs.size() dynamic UBO
+            // descriptors, so the per-type count is descriptorCount * bindings (N4).
+            int types = (UBOs.size() > 0 ? 1 : 0) + (samplers.size() > 0 ? 1 : 0)
+                    + (ssbos.size() > 0 ? 1 : 0);
 
-            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.create(size);
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.create(types);
 
-            int i;
-            for(i = 0; i < UBOs.size(); ++i) {
-                VkDescriptorPoolSize uniformBufferPoolSize = poolSizes.get(i);
-                uniformBufferPoolSize.type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
-                uniformBufferPoolSize.descriptorCount(descriptorCount);
+            int i = 0;
+            if (UBOs.size() > 0) {
+                poolSizes.get(i++).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+                        .descriptorCount(descriptorCount * UBOs.size());
             }
-
-            for(; i < UBOs.size() + samplers.size(); ++i) {
-                VkDescriptorPoolSize textureSamplerPoolSize = poolSizes.get(i);
-                textureSamplerPoolSize.type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-                textureSamplerPoolSize.descriptorCount(descriptorCount);
+            if (samplers.size() > 0) {
+                poolSizes.get(i++).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(descriptorCount * samplers.size());
             }
-
-            for(; i < size; ++i) {
-                VkDescriptorPoolSize storageBufferPoolSize = poolSizes.get(i);
-                storageBufferPoolSize.type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-                storageBufferPoolSize.descriptorCount(descriptorCount);
+            if (ssbos.size() > 0) {
+                poolSizes.get(i++).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                        .descriptorCount(descriptorCount * ssbos.size());
             }
 
             VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.create();
@@ -554,8 +554,19 @@ public class Pipeline {
             // vkCmdBindDescriptorSets takes the dynamic offsets as uint32_t entries
             // (NOT VkDeviceSize), so the offsets are an IntBuffer.
             IntBuffer offsets = stack.callocInt(UBOs.size());
+
+            // Reserve room for every UBO of this pipeline before uploading any of them:
+            // a resize in the middle of the loop would replace the ring buffer and bump
+            // the generation after the first UBO already went into the old one, so its
+            // dynamic offset would read uninitialized memory in the new buffer (N6).
+            int total = 0;
             for(UBO ubo : UBOs) {
                 ubo.update();
+                total += uniformBuffers.alignedSize(ubo.getBuffer().remaining());
+            }
+            uniformBuffers.ensureCapacity(total);
+
+            for(UBO ubo : UBOs) {
                 int offset = uniformBuffers.uploadUBO(ubo.getBuffer(), frame);
                 // The dynamic-offset array is indexed by the order of the dynamic
                 // bindings in the layout (ascending binding number, contiguous from 0).
@@ -571,23 +582,28 @@ public class Pipeline {
 
     private long getDescriptorSet(int frame, UniformBuffers uniformBuffers) {
 
-        VulkanImage texture0 = VTextureSelector.getBoundTexture();
-        if (texture0 == null) texture0 = VTextureSelector.getWhiteTexture();
-        VulkanImage texture1 = null, texture2 = null;
-        if (samplers.size() > 1) {
-            texture1 = VTextureSelector.getLightTexture();
-            if (texture1 == null) texture1 = VTextureSelector.getWhiteTexture();
-        }
-        if (samplers.size() > 2) {
-            texture2 = VTextureSelector.getOverlayTexture();
-            if (texture2 == null) texture2 = VTextureSelector.getWhiteTexture();
-        }
+        // Pipelines without samplers must not re-allocate their set on every unrelated
+        // texture change: texture0 stays null, so the cache key ignores the bound
+        // texture entirely (N21).
+        VulkanImage texture0 = null, texture1 = null, texture2 = null;
+        if (!samplers.isEmpty()) {
+            texture0 = VTextureSelector.getBoundTexture();
+            if (texture0 == null) texture0 = VTextureSelector.getWhiteTexture();
+            if (samplers.size() > 1) {
+                texture1 = VTextureSelector.getLightTexture();
+                if (texture1 == null) texture1 = VTextureSelector.getWhiteTexture();
+            }
+            if (samplers.size() > 2) {
+                texture2 = VTextureSelector.getOverlayTexture();
+                if (texture2 == null) texture2 = VTextureSelector.getWhiteTexture();
+            }
 
-        // Keep the per-draw layout guarantee: a cached set records
-        // SHADER_READ_ONLY_OPTIMAL, so every bound image must be in it.
-        texture0.readOnlyLayout();
-        if (texture1 != null) texture1.readOnlyLayout();
-        if (texture2 != null) texture2.readOnlyLayout();
+            // Keep the per-draw layout guarantee: a cached set records
+            // SHADER_READ_ONLY_OPTIMAL, so every bound image must be in it.
+            texture0.readOnlyLayout();
+            if (texture1 != null) texture1.readOnlyLayout();
+            if (texture2 != null) texture2.readOnlyLayout();
+        }
 
         int generation = uniformBuffers.getGeneration();
         long set = cachedSets[frame];
@@ -632,6 +648,9 @@ public class Pipeline {
                 // The pools were replaced: sets cached against the old ones must not be
                 // reused (the freshly allocated set is written below).
                 java.util.Arrays.fill(cachedSets, 0);
+                // The retry must target the NEW pool of this frame slot; allocInfo
+                // still points at the exhausted old one otherwise (N4).
+                allocInfo.descriptorPool(descriptorPools[frame]);
                 result = vkAllocateDescriptorSets(device, allocInfo, pDescriptorSet);
                 if (result != VK_SUCCESS) {
                     throw new RuntimeException("Failed to allocate descriptor sets after pool resize. Result:" + result);

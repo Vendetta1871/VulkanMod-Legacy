@@ -47,6 +47,21 @@ public class UniformBuffers {
      * the dynamic offset when binding the descriptor set, so the UBO data needs no
      * per-draw descriptor write.
      */
+    /** The ring slot an upload of {@code size} bytes will occupy. */
+    public int alignedSize(int size) {
+        return align(size, minOffset);
+    }
+
+    /**
+     * Ensures the ring can hold {@code bytes} more without resizing in the middle of
+     * a multi-UBO upload (see Pipeline#bindDescriptorSets, N6).
+     */
+    public void ensureCapacity(int bytes) {
+        if (bytes > this.bufferSize - this.usedBytes) {
+            resizeBuffer((this.bufferSize + bytes) * 2);
+        }
+    }
+
     public int uploadUBO(ByteBuffer buffer, int frame) {
         int size = buffer.remaining();
         int alignedSize = align(size, minOffset);
