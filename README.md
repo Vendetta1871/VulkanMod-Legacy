@@ -53,8 +53,8 @@ Environment variables:
 
 ## Known limitations
 
-- World-space text drawn during the world pass (e.g. the F3 height-map / pathfinding labels) is not
-  captured yet and stays invisible.
+- Name tags and sign text are rendered as of v0.1.5; niche world-space text drawn by the F3 debug
+  renderers (height-map / pathfinding labels) may still stay invisible.
 - This is a work in progress port; some niche GL paths or heavily mixin-modded renderers may still
   fall through or render incorrectly. Please open an issue with a screenshot and your mod list.
 
