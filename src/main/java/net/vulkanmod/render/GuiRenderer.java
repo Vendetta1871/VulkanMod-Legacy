@@ -93,6 +93,12 @@ public class GuiRenderer {
     private static long glyphMatrixVersion;
     private static float glyphR, glyphG, glyphB, glyphA;
     private static Pipeline.BlendState glyphBlend;
+    // The blend factors are part of the batch identity: the crosshair draws its quad
+    // with the inverted (ONE_MINUS_DST_COLOR/ONE_MINUS_SRC_COLOR) func and the hearts
+    // that follow share texture, colour and matrix - without this the whole batch
+    // would flush under the crosshair's func and the HUD would fade in (bug B).
+    private static boolean glyphBlendEnabled;
+    private static int glyphBlendSrc, glyphBlendDst, glyphBlendSrcA, glyphBlendDstA;
     // Alpha test rides the pipeline variant key, so it is part of the batch identity too.
     private static boolean glyphAlphaTest;
     private static int glyphAlphaFunc;
@@ -169,6 +175,16 @@ public class GuiRenderer {
 
     public static boolean isGuiPass() {
         return guiPass;
+    }
+
+    /** The POSITION_TEX_COLOR GUI pipeline, reused for textured world lines (dragon beams). */
+    public static Pipeline getTexColorPipeline() {
+        return guiTexColorPipeline;
+    }
+
+    /** The Vulkan image mirrored from the texture bound on unit 0 (null when unknown). */
+    public static VulkanImage trackedTexture() {
+        return currentGuiTexture();
     }
 
     public static void setSuppressDraw(boolean value) {
@@ -267,6 +283,11 @@ public class GuiRenderer {
                 if (glyphBatchVerts > 0 && (texture != glyphTexture || version != glyphMatrixVersion
                         || VRenderSystem.trackedColorR != glyphR || VRenderSystem.trackedColorG != glyphG
                         || VRenderSystem.trackedColorB != glyphB || VRenderSystem.trackedColorA != glyphA
+                        || VRenderSystem.blendEnabled != glyphBlendEnabled
+                        || VRenderSystem.blendSrcRgb != glyphBlendSrc
+                        || VRenderSystem.blendDstRgb != glyphBlendDst
+                        || VRenderSystem.blendSrcAlpha != glyphBlendSrcA
+                        || VRenderSystem.blendDstAlpha != glyphBlendDstA
                         || VRenderSystem.getAlphaFunc() != (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
                         || VRenderSystem.getAlphaRef() != glyphAlphaRef)) {
                     flushGlyphBatch();
@@ -355,6 +376,11 @@ public class GuiRenderer {
         glyphB = VRenderSystem.trackedColorB;
         glyphA = VRenderSystem.trackedColorA;
         glyphBlend = VRenderSystem.getBlendState();
+        glyphBlendEnabled = VRenderSystem.blendEnabled;
+        glyphBlendSrc = VRenderSystem.blendSrcRgb;
+        glyphBlendDst = VRenderSystem.blendDstRgb;
+        glyphBlendSrcA = VRenderSystem.blendSrcAlpha;
+        glyphBlendDstA = VRenderSystem.blendDstAlpha;
         glyphAlphaTest = VRenderSystem.alphaTest;
         glyphAlphaFunc = VRenderSystem.alphaTestFunc;
         glyphAlphaRef = VRenderSystem.alphaTestRef;

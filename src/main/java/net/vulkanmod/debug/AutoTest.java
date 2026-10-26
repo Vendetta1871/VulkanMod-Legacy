@@ -158,9 +158,10 @@ public class AutoTest {
     /**
      * Render-state boundary probe: with {@code VULKANMOD_AUTOTEST_STATE=1} the run captures
      * the cases the default scene cannot reach - terrain with clouds off, terrain above the
-     * cloud plane, the inventory paper doll inside the GUI pass, and the first world frame
-     * after a GUI closed (the Nether/End leak path). Run once with Vulkan and once with
-     * {@code VULKANMOD_DISABLE=1} and diff the pairs.
+     * cloud plane, the survival HUD (hearts/hunger with absorption + poison tints), the
+     * inventory paper doll inside the GUI pass, the F3+G chunk-border lines and the first
+     * world frame after a GUI closed (the Nether/End leak path). Run once with Vulkan and
+     * once with {@code VULKANMOD_DISABLE=1} and diff the pairs.
      */
     private static final boolean STATE_MODE = System.getenv("VULKANMOD_AUTOTEST_STATE") != null;
     /** Absolute camera column for STATE_MODE (near the fixed-seed world spawn). */
@@ -335,7 +336,24 @@ public class AutoTest {
                         tpPlayer(mc, mc.player.posX, 130.0, mc.player.posZ);
                     } else if (t == 55) {
                         capture(mc, "stateHighY");
-                    } else if (t == 65) {
+                    } else if (t == 58) {
+                        // Survival HUD (hearts + hunger bar): a real server-side
+                        // gamemode switch is required because shouldDrawHUD reads
+                        // the controller's own capabilities copy, which only the
+                        // server's abilities packet updates. Land first - the
+                        // survival switch disables flight, and from the cloud
+                        // pin that is a fatal drop. Absorption adds a second row
+                        // of hearts and poison tints them; both also light up
+                        // Cleanroom's status-effect indicator column.
+                        int landY = mc.world.getTopSolidOrLiquidBlock(
+                                new BlockPos(PIN_X, 0, PIN_Z)).getY();
+                        tpPlayer(mc, PIN_X + 0.5, landY + 1.0, PIN_Z + 0.5);
+                        serverCommand(mc, "gamemode survival " + mc.player.getName());
+                        serverCommand(mc, "effect " + mc.player.getName() + " absorption 60 1");
+                        serverCommand(mc, "effect " + mc.player.getName() + " poison 60 0");
+                    } else if (t == 70) {
+                        capture(mc, "stateHud");
+                    } else if (t == 75) {
                         // N9: the paper doll is real 3D geometry inside the GUI pass;
                         // with the GUI's depth-off override leaking into it, the back
                         // arm paints over the body and the face turns inside-out.
@@ -344,21 +362,50 @@ public class AutoTest {
                         // controller to survival for the capture (server stays creative).
                         mc.playerController.setGameType(GameType.SURVIVAL);
                         mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.player));
-                    } else if (t == 85) {
+                    } else if (t == 95) {
                         Initializer.LOGGER.info("[autotest] state screen at capture: {}",
                                 mc.currentScreen == null ? "null" : mc.currentScreen.getClass().getSimpleName());
                         capture(mc, "stateInvDoll");
-                    } else if (t == 95) {
+                    } else if (t == 105) {
                         mc.displayGuiScreen(null);
-                        mc.playerController.setGameType(GameType.CREATIVE);
+                        serverCommand(mc, "gamemode creative " + mc.player.getName());
+                    } else if (t == 110) {
+                        // Back above the treeline for the border and postGui captures.
+                        int hudTopY = mc.world.getTopSolidOrLiquidBlock(
+                                new BlockPos(PIN_X, 0, PIN_Z)).getY();
+                        tpPlayer(mc, PIN_X + 0.5, hudTopY + 2.0, PIN_Z + 0.5);
                         mc.player.capabilities.allowFlying = true;
                         mc.player.capabilities.isFlying = true;
                         mc.player.motionY = 0;
+                        // F3+G chunk borders: POSITION_COLOR line lists replayed
+                        // through DebugLinesRenderer.
+                        mc.debugRenderer.toggleChunkBorders();
                     } else if (t == 115) {
+                        capture(mc, "stateBorders");
+                    } else if (t == 120) {
+                        mc.debugRenderer.toggleChunkBorders();
+                        // End portal planes (bug D): POSITION_COLOR quads with eye-linear
+                        // texgen replayed through EndPortalRenderer. Place one a few
+                        // blocks ahead and tilt the view down so it fills the frame.
+                        // The rotation is pinned so the GL reference run sees the same
+                        // camera and the same placement spot.
+                        mc.player.rotationYaw = 45.0F;
+                        mc.player.rotationPitch = 25.0F;
+                        double lx = mc.player.getLook(1.0F).x;
+                        double lz = mc.player.getLook(1.0F).z;
+                        int px = net.minecraft.util.math.MathHelper.floor(
+                                (float) (mc.player.posX + lx * 4.0));
+                        int pz = net.minecraft.util.math.MathHelper.floor(
+                                (float) (mc.player.posZ + lz * 4.0));
+                        serverCommand(mc, "setblock " + px + " "
+                                + (int) mc.player.posY + " " + pz + " minecraft:end_portal");
+                    } else if (t == 125) {
+                        capture(mc, "statePortal");
+                    } else if (t == 130) {
                         // The GUI->world boundary: the Nether/End failure mode (no sky
                         // or cloud pass to mask a leaked "depthFunc ALWAYS").
                         capture(mc, "statePostGui");
-                    } else if (t == 130 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+                    } else if (t == 145 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                         Initializer.LOGGER.info("[autotest] done, shutting down");
                         mc.shutdown();
                     }
@@ -925,6 +972,18 @@ public class AutoTest {
      * set is snapped back next tick; drive it with a server-side /tp and mirror it on the client so
      * the render-time interpolation stays smooth.
      */
+    /**
+     * Runs a console command on the integrated server from the client thread.
+     * Singleplayer shares the JVM, so the task lands on the next server tick and
+     * the usual packet round trip updates the client state.
+     */
+    private static void serverCommand(Minecraft mc, String command) {
+        IntegratedServer server = mc.getIntegratedServer();
+        if (server != null) {
+            server.addScheduledTask(() -> server.getCommandManager().executeCommand(server, command));
+        }
+    }
+
     private static void tpPlayer(Minecraft mc, double x, double y, double z) {
         IntegratedServer server = mc.getIntegratedServer();
         if (server != null) {

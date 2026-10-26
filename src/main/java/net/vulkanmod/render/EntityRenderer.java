@@ -233,6 +233,9 @@ public class EntityRenderer {
         // A throw inside compileDisplayList would leave the compile flag set and silently
         // drop every entity capture for the rest of the session (M13).
         compiling = false;
+        // The TESR dispatcher catches exceptions, so the portal window's RETURN injection
+        // can be skipped by a throwing render; never let the flag leak into the next frame.
+        EndPortalRenderer.setActive(false);
         // Drop any weather left un-flushed by an aborted frame before re-capturing this one.
         weatherPending = false;
         weatherVerts = 0;

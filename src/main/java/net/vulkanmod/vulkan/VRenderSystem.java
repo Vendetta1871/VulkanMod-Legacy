@@ -414,6 +414,21 @@ public class VRenderSystem {
         return TextureMatrix;
     }
 
+    /** The active unit's current texture matrix (the one the eye-linear planes feed). */
+    public static Matrix4f getTextureMatrix4f() {
+        return new Matrix4f(texUnit(0).cur);
+    }
+
+    /**
+     * Mirrored {@code GL_EYE_PLANE} coefficients of the eye-linear texture coordinate
+     * generation. The End portal TESR is the only 1.12.2 code that sets eye planes;
+     * {@code GlStateManagerTexGenM} records them here and {@code EndPortalRenderer}
+     * replays the generation on the CPU.
+     */
+    public static final float[] texGenPlaneS = new float[4];
+    public static final float[] texGenPlaneT = new float[4];
+    public static final float[] texGenPlaneR = new float[4];
+
     public static ByteBuffer getModelViewMatrix() {
         return modelViewMatrix;
     }

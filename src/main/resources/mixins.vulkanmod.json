@@ -15,6 +15,7 @@
     "render.RenderGlobalM",
     "render.RenderManagerM",
     "render.TileEntityRendererDispatcherM",
+    "render.TileEntityEndPortalRendererM",
     "render.ModelRendererM",
     "render.WorldVertexBufferUploaderM",
     "render.VertexBufferM",
@@ -38,6 +39,7 @@
     "render.GlStateManagerLightM",
     "render.GlStateManagerImmediateM",
     "render.GlStateManagerMatrixM",
+    "render.GlStateManagerTexGenM",
     "render.GameSettingsM",
     "render.ParticleManagerM",
     "render.FramebufferM"

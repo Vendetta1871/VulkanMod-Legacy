@@ -33,6 +33,10 @@ import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
  * {@code glLineWidth} through the line pipeline's dynamic line-width state; the blend,
  * depth and fog states are read from the live GL state so each renderer's own sequence
  * (chunk borders draw unblended, the selection box blends) is reproduced per draw.</p>
+ *
+ * <p>The dragon's healing beams ({@code RenderDragon.renderCrystalBeams}) are the one
+ * world-pass {@code POSITION_TEX_COLOR} line draw: same replay path, but through the
+ * textured pipeline with the beam texture from the tracked bind.</p>
  */
 public class DebugLinesRenderer {
 
@@ -40,6 +44,9 @@ public class DebugLinesRenderer {
     private static Pipeline linePipeline;
 
     private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
+    // The dragon's healing beams: GL_LINES with a texture and per-vertex colour, drawn
+    // through the same shared Tessellator the debug renderers use.
+    private static final VertexFormat POSITION_TEX_COLOR = DefaultVertexFormats.POSITION_TEX_COLOR;
 
     private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
     private static final FloatBuffer float1 = MemoryUtil.memAllocFloat(1);
@@ -55,8 +62,9 @@ public class DebugLinesRenderer {
      * line draws.
      */
     public static boolean accepts(BufferBuilder buffer) {
+        VertexFormat format = buffer.getVertexFormat();
         return linePipeline != null
-                && buffer.getVertexFormat() == POSITION_COLOR
+                && (format == POSITION_COLOR || format == POSITION_TEX_COLOR)
                 && (buffer.getDrawMode() == GL11.GL_LINES || buffer.getDrawMode() == GL11.GL_LINE_STRIP);
     }
 
@@ -104,10 +112,24 @@ public class DebugLinesRenderer {
             Drawer.currentBlendState = VRenderSystem.getBlendState();
 
             VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-            VRenderSystem.setShaderPipeline(linePipeline);
+            VertexFormat format = buffer.getVertexFormat();
+            if (format == POSITION_TEX_COLOR) {
+                // Textured lines (dragon beams): the gui_tex_color pipeline already does
+                // texture * vertexColor * ColorModulator, which matches the fixed-function
+                // chain these draws run under. The beam texture was bound by RenderDragon
+                // through GlStateManager, so the tracked mirror resolves it.
+                net.vulkanmod.vulkan.texture.VulkanImage tex = GuiRenderer.trackedTexture();
+                if (tex == null) {
+                    return;
+                }
+                net.vulkanmod.vulkan.texture.VTextureSelector.bindTexture(tex);
+                VRenderSystem.setShaderPipeline(GuiRenderer.getTexColorPipeline());
+            } else {
+                VRenderSystem.setShaderPipeline(linePipeline);
+            }
             VRenderSystem.setTopology(topology);
 
-            Drawer.getInstance().drawLines(data, POSITION_COLOR, vertexCount);
+            Drawer.getInstance().drawLines(data, format, vertexCount);
         } catch (Throwable t) {
             TerrainRenderer.reportOnce("debug lines", t);
         } finally {
