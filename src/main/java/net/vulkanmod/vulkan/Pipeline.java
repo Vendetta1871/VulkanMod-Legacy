@@ -46,6 +46,35 @@ public class Pipeline {
     public static final BlendState NO_BLEND_STATE = new BlendState(false, 0, 0, 0, 0);
 
     private static final VkDevice device = Vulkan.getDevice();
+
+    // Driver pipeline cache persisted across launches (config/vulkanmod/pipeline-cache.vkc).
+    // These must be declared BEFORE pipelineCache: its initializer (createPipelineCache ->
+    // loadPipelineCacheData) reads them, and static initializers run in declaration order -
+    // with the path declared later it was still null there, so the file was never even
+    // opened (the real root cause of N7, on top of the wrong header offsets).
+    private static final java.nio.file.Path PIPELINE_CACHE_FILE =
+            java.nio.file.Paths.get("config", "vulkanmod", "pipeline-cache.vkc");
+
+    // Warm-up sidecar (H11): the state keys every pipeline reached, so the next launch
+    // pre-creates those variants during loading instead of at draw time.
+    private static final java.nio.file.Path VARIANTS_FILE =
+            java.nio.file.Paths.get("config", "vulkanmod", "pipeline-variants.txt");
+    private static final Map<String, long[]> RECORDED_VARIANTS = loadRecordedVariants();
+
+    /**
+     * Trailer appended to the cache file: "VMPC" + blob length, little-endian (N13). The
+     * atomic rename already keeps a torn write out of the file; the trailer additionally
+     * catches a zero-filled file (the rename survived a power loss but the data blocks
+     * did not) before the blob reaches the driver.
+     */
+    private static final int CACHE_TRAILER_MAGIC = 0x43504D56;
+
+    /**
+     * Set whenever a variant was created; the blob is written once at shutdown instead
+     * of synchronously on every miss, which hitched the frame during warm-up (N13).
+     */
+    private static boolean cacheDirty;
+
     private static final long pipelineCache = createPipelineCache();
     private static final int imagesSize = getSwapChainImages().size();
 
@@ -115,6 +144,30 @@ public class Pipeline {
         graphicsPipelines.put(defaultKey, createGraphicsPipeline(vertexFormat, unpackStateKey(defaultKey)));
         lastStateKey = defaultKey;
         lastStateHandle = graphicsPipelines.get(defaultKey);
+
+        // Warm-up (H11): the variants this pipeline reached at draw time in the previous
+        // session are created here, during loading, instead of mid-frame. A recorded key
+        // that is stale (state combination this build no longer uses) just fails and is
+        // skipped; the variant would then be created on demand like before.
+        long[] recorded = RECORDED_VARIANTS.get(path);
+        if (recorded != null) {
+            int prewarmed = 0;
+            for (long key : recorded) {
+                if (graphicsPipelines.containsKey(key)) {
+                    continue;
+                }
+                try {
+                    graphicsPipelines.put(key, createGraphicsPipeline(vertexFormat, unpackStateKey(key)));
+                    ++prewarmed;
+                } catch (RuntimeException e) {
+                    // Stale recording; nothing to undo, the map entry was never added.
+                }
+            }
+            if (prewarmed > 0) {
+                net.vulkanmod.Initializer.LOGGER.info("[pipeline] {} pre-warmed {} variant(s)", path, prewarmed);
+            }
+        }
+
         createDescriptorPool(descriptorCount);
 
         INSTANCES.add(this);
@@ -170,8 +223,9 @@ public class Pipeline {
         if (handle == null) {
             handle = createGraphicsPipeline(vertexFormat, unpackStateKey(stateKey));
             graphicsPipelines.put(stateKey, handle);
-            // Persist the driver cache whenever it grew, so the next launch starts warm.
-            savePipelineCache();
+            // N13: the driver blob is several MB - writing it here hitched the frame on
+            // every miss. Just mark it; Vulkan.cleanUp flushes the cache at shutdown.
+            cacheDirty = true;
         }
         lastStateKey = stateKey;
         lastStateHandle = handle;
@@ -337,6 +391,8 @@ public class Pipeline {
                 throw new RuntimeException("Failed to create graphics pipeline");
             }
 
+            // The driver cache grew; savePipelineCache at shutdown persists it (N13).
+            cacheDirty = true;
             return pGraphicsPipeline.get(0);
         }
     }
@@ -933,14 +989,15 @@ public class Pipeline {
         }
     }
 
-    // Driver pipeline cache persisted across launches (config/vulkanmod/pipeline-cache.vkc).
-    private static final java.nio.file.Path PIPELINE_CACHE_FILE =
-            java.nio.file.Paths.get("config", "vulkanmod", "pipeline-cache.vkc");
+    // The cache file paths, the trailer magic and the dirty flag are declared up top,
+    // before pipelineCache (whose initializer needs them).
 
     private static long createPipelineCache() {
         // The persisted blob can be megabytes, so it goes into a dedicated off-heap
         // buffer rather than the 64 KB MemoryStack. vkCreatePipelineCache copies it.
         byte[] initial = loadPipelineCacheData();
+        net.vulkanmod.Initializer.LOGGER.info("[pipeline-cache] {}",
+                initial != null ? "loaded " + initial.length + " bytes" : "cold start");
         ByteBuffer initialData = null;
         try(MemoryStack stack = stackPush()) {
 
@@ -969,9 +1026,12 @@ public class Pipeline {
     }
 
     /**
-     * Reads the persisted cache and validates its header: the first 16 bytes are
-     * version (VK_PIPELINE_CACHE_HEADER_VERSION_ONE), vendor id, device id and the
-     * pipeline-cache UUID; a mismatch (driver or GPU changed) discards the file.
+     * Reads the persisted cache and validates it: the trailer (N13), then the driver's
+     * own header - VkPipelineCacheHeaderVersionOne, little-endian, with headerSize (32)
+     * at 0, headerVersion (1) at 4, vendorID at 8, deviceID at 12 and the pipeline-cache
+     * UUID at 16..31 (N7; the old code read all of them four bytes early and rejected
+     * every file). A driver or GPU change discards the file. The blob handed to the
+     * driver is the file minus its trailer.
      */
     private static byte[] loadPipelineCacheData() {
         try {
@@ -979,30 +1039,59 @@ public class Pipeline {
                 return null;
             }
             byte[] data = java.nio.file.Files.readAllBytes(PIPELINE_CACHE_FILE);
-            if (data.length < 16) {
+            String reject = null;
+            if (data.length < 32 + 8) {
+                reject = "too short (" + data.length + " bytes)";
+            }
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            if (reject == null && buf.getInt(data.length - 8) != CACHE_TRAILER_MAGIC) {
+                reject = "trailer magic";
+            }
+            int blobLength = buf.getInt(data.length - 4);
+            if (reject == null && blobLength != data.length - 8) {
+                reject = "trailer length " + blobLength + " vs file " + (data.length - 8);
+            }
+            // headerSize, VK_PIPELINE_CACHE_HEADER_VERSION_ONE
+            if (reject == null && (buf.getInt(0) < 32 || buf.getInt(4) != 1)) {
+                reject = "header size/version " + buf.getInt(0) + "/" + buf.getInt(4);
+            }
+            if (reject == null && buf.getInt(8) != Vulkan.deviceProperties.vendorID()) {
+                reject = String.format("vendor 0x%04x vs 0x%04x", buf.getInt(8),
+                        Vulkan.deviceProperties.vendorID());
+            }
+            if (reject == null && buf.getInt(12) != Vulkan.deviceProperties.deviceID()) {
+                reject = String.format("device 0x%04x vs 0x%04x", buf.getInt(12),
+                        Vulkan.deviceProperties.deviceID());
+            }
+            java.nio.ByteBuffer uuid = Vulkan.deviceProperties.pipelineCacheUUID();
+            for (int i = 0; reject == null && i < 16; ++i) {
+                if (data[16 + i] != uuid.get(i)) {
+                    reject = "UUID byte " + i;
+                }
+            }
+            if (reject != null) {
+                net.vulkanmod.Initializer.LOGGER.info("[pipeline-cache] rejected: {}", reject);
                 return null;
             }
-            java.nio.ByteBuffer header = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            if (header.getInt(0) != 1) return null; // VK_PIPELINE_CACHE_HEADER_VERSION_ONE
-            if (header.getInt(4) != Vulkan.deviceProperties.vendorID()) return null;
-            if (header.getInt(8) != Vulkan.deviceProperties.deviceID()) return null;
-            java.nio.ByteBuffer uuid = Vulkan.deviceProperties.pipelineCacheUUID();
-            for (int i = 0; i < 16; ++i) {
-                if (data[12 + i] != uuid.get(i)) return null;
-            }
-            return data;
+            return java.util.Arrays.copyOf(data, blobLength);
         } catch (Exception e) {
+            net.vulkanmod.Initializer.LOGGER.info("[pipeline-cache] rejected: {}", e.toString());
             return null;
         }
     }
 
     /**
-     * Exports the driver cache blob to disk so the next launch seeds its pipeline cache
-     * with it. Called after each new pipeline variant is created: variant creation is
-     * rare and expensive, so the write never shows up in the steady-state frame cost,
-     * and a crash cannot lose the variants compiled since the last save.
+     * Exports the driver cache blob and the recorded variant keys to disk so the next
+     * launch seeds its pipeline cache and pre-warms its variants. Called once at
+     * shutdown (Vulkan.cleanUp, before the cache is destroyed) when something was
+     * created since the last save (N13).
      */
     public static void savePipelineCache() {
+        if (!cacheDirty) {
+            return;
+        }
+        cacheDirty = false;
+
         // The cache blob is megabytes - far beyond the 64 KB MemoryStack - so it is
         // fetched into a dedicated off-heap buffer.
         ByteBuffer pData = null;
@@ -1019,11 +1108,12 @@ public class Pipeline {
             if (vkGetPipelineCacheData(device, pipelineCache, pSize, pData) != VK_SUCCESS) {
                 return;
             }
-            byte[] bytes = new byte[size];
+            byte[] out = new byte[size + 8];
             pData.position(0);
-            pData.get(bytes);
-            java.nio.file.Files.createDirectories(PIPELINE_CACHE_FILE.getParent());
-            java.nio.file.Files.write(PIPELINE_CACHE_FILE, bytes);
+            pData.get(out, 0, size);
+            java.nio.ByteBuffer.wrap(out, size, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    .putInt(CACHE_TRAILER_MAGIC).putInt(size);
+            writeAtomic(PIPELINE_CACHE_FILE, out);
         } catch (Exception e) {
             // Cache persistence is best-effort; a failed write only costs warm-up time.
         } finally {
@@ -1031,6 +1121,66 @@ public class Pipeline {
                 org.lwjgl.system.MemoryUtil.memFree(pData);
             }
         }
+
+        saveRecordedVariants();
+    }
+
+    /**
+     * Writes through a temp file and renames over the target, so a crash mid-write can
+     * never leave a partial file where the loader expects a complete one (N13).
+     */
+    private static void writeAtomic(java.nio.file.Path file, byte[] bytes) throws java.io.IOException {
+        java.nio.file.Files.createDirectories(file.getParent());
+        java.nio.file.Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        java.nio.file.Files.write(tmp, bytes);
+        try {
+            java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /** One "<shader-path> <state-key>" line per variant reached this session (H11). */
+    private static void saveRecordedVariants() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (Pipeline pipeline : INSTANCES) {
+                for (Long key : pipeline.graphicsPipelines.keySet()) {
+                    sb.append(pipeline.path).append(' ').append(key).append('\n');
+                }
+            }
+            writeAtomic(VARIANTS_FILE, sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            // Best-effort warm-up data; losing it only costs the next launch's pre-warm.
+        }
+    }
+
+    private static Map<String, long[]> loadRecordedVariants() {
+        Map<String, long[]> map = new HashMap<>();
+        try {
+            Map<String, ArrayList<Long>> collected = new HashMap<>();
+            for (String line : java.nio.file.Files.readAllLines(VARIANTS_FILE)) {
+                int space = line.indexOf(' ');
+                if (space <= 0) {
+                    continue;
+                }
+                try {
+                    long key = Long.parseLong(line.substring(space + 1).trim());
+                    collected.computeIfAbsent(line.substring(0, space), k -> new ArrayList<>()).add(key);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            collected.forEach((path, keys) -> {
+                long[] array = new long[keys.size()];
+                for (int i = 0; i < array.length; ++i) {
+                    array[i] = keys.get(i);
+                }
+                map.put(path, array);
+            });
+        } catch (Exception e) {
+            // No usable recording; variants will be created at draw time like before.
+        }
+        return map;
     }
 
     private Consumer<Integer> defaultResetDPFun() {

@@ -101,6 +101,13 @@ public class ShaderSPIRVUtils {
     private static String cacheKey(String filename, String source, ShaderKind shaderKind) {
         try {
             java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            // N14: the compiler identity and the compile options are part of the key, so
+            // an updated shaderc or different options never reuse SPIR-V built by the old
+            // configuration. LWJGL does not bind shaderc_shaderc_version_string, so the
+            // LWJGL version (bumped whenever the bundled shaderc is upgraded) stands in.
+            digest.update(("shaderc " + org.lwjgl.Version.getVersion()
+                    + " opt=performance entry=main").getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) '\n');
             digest.update(shaderKind.name().getBytes(StandardCharsets.UTF_8));
             digest.update((byte) '\n');
             digest.update(filename.getBytes(StandardCharsets.UTF_8));
@@ -128,9 +135,11 @@ public class ShaderSPIRVUtils {
                 return null;
             }
             byte[] bytes = java.nio.file.Files.readAllBytes(file);
-            // A SPIR-V module starts with the magic 0x07230203; a truncated or corrupt
-            // file (crash mid-write) is rejected and recompiled.
-            if (bytes.length < 4 || (bytes[0] & 0xFF) != 0x03 || (bytes[1] & 0xFF) != 0x02
+            // N14: SPIR-V is a stream of 32-bit words opening with the magic 0x07230203
+            // and a 20-byte header; a truncated or corrupt file (crash mid-write) is
+            // rejected and recompiled instead of reaching vkCreateShaderModule.
+            if (bytes.length < 20 || (bytes.length & 3) != 0
+                    || (bytes[0] & 0xFF) != 0x03 || (bytes[1] & 0xFF) != 0x02
                     || (bytes[2] & 0xFF) != 0x23 || (bytes[3] & 0xFF) != 0x07) {
                 return null;
             }
@@ -151,7 +160,16 @@ public class ShaderSPIRVUtils {
             spv.get(bytes);
             spv.position(pos);
             java.nio.file.Files.createDirectories(SPV_CACHE_DIR);
-            java.nio.file.Files.write(SPV_CACHE_DIR.resolve(key + ".spv"), bytes);
+            // N14: temp file + atomic rename, so a crash mid-write cannot leave a
+            // partial .spv for the next launch to feed to the driver.
+            java.nio.file.Path file = SPV_CACHE_DIR.resolve(key + ".spv");
+            java.nio.file.Path tmp = file.resolveSibling(key + ".spv.tmp");
+            java.nio.file.Files.write(tmp, bytes);
+            try {
+                java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (Exception e) {
             // Best-effort: a failed write only costs compile time on the next launch.
         }
