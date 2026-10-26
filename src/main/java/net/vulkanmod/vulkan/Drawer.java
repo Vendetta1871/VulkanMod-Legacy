@@ -17,7 +17,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 
 import net.minecraft.client.renderer.vertex.VertexFormat;
 
@@ -87,6 +86,11 @@ public class Drawer {
     public static boolean shouldRecreate = false;
     public static boolean rebuild = false;
     public static boolean skipRendering = false;
+
+    // Set when an acquire succeeded but the swapchain must go once the frame it
+    // rendered is presented (N10: the acquire's semaphore signal has to be
+    // consumed by a submit before the swapchain cycle may touch the sync objects).
+    private boolean recreateAfterPresent;
 
     public Drawer()
     {
@@ -243,8 +247,11 @@ public class Drawer {
         // still waits on a slot's own fence before reuse, so this is bookkeeping only.
         TransferQueue.resetCurrent();
 
-        CompletableFuture.runAsync(MemoryManager::freeBuffers);
-//        MemoryManager.freeBuffers();
+        // Synchronous: freeBuffers mutates the MemoryManager handle maps that the
+        // render thread writes on every chunk upload, so it must not run on a pool
+        // thread (N5). It is cheap - it only frees entries whose frame boundary has
+        // already retired.
+        MemoryManager.freeBuffers();
 
         // Acquire the swapchain image before recording so the frame is rendered into the
         // image that is later submitted and presented. The acquired index differs from
@@ -257,8 +264,11 @@ public class Drawer {
             int vkResult = vkAcquireNextImageKHR(device, Vulkan.getSwapChain(), VUtil.UINT64_MAX,
                     imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex);
 
-            if(vkResult == VK_ERROR_OUT_OF_DATE_KHR || vkResult == VK_SUBOPTIMAL_KHR || shouldRecreate) {
-                shouldRecreate = false;
+            if(vkResult == VK_ERROR_OUT_OF_DATE_KHR) {
+                // No image was acquired. Recreate before the next acquire and drop this
+                // frame; the frame-slot sync objects survive the recreation (they are
+                // not swapchain objects), so the implementation-defined signal of a
+                // failed acquire can never dangle on a semaphore destroy (N10).
                 recreateSwapChain();
                 // The frame is dropped: nothing was recorded yet, endRenderPass()
                 // and submitDraw() bail out on skipRendering.
@@ -269,6 +279,13 @@ public class Drawer {
             }
 
             imageIndex = pImageIndex.get(0);
+
+            // SUBOPTIMAL or a pending resize request: the acquire already signaled the
+            // semaphore, so this frame must be rendered and presented before the
+            // recreation. Dropping it here would leave that signal pending when the
+            // semaphore is destroyed or re-acquired (N10).
+            recreateAfterPresent = shouldRecreate || vkResult == VK_SUBOPTIMAL_KHR;
+            shouldRecreate = false;
         }
 
         resetDescriptors();
@@ -467,13 +484,16 @@ public class Drawer {
 
     private void createSyncObjects() {
 
-        // Sized by the frame-slot count, not the current swapchain image count: the
-        // arrays are indexed by currentFrame, which cycles over MAX_FRAMES_IN_FLIGHT
-        // even after a recreation changed the number of images.
+        // imageAvailable and the fences are indexed by currentFrame and cycle over
+        // MAX_FRAMES_IN_FLIGHT even after a recreation changed the number of images,
+        // so they are sized by the frame-slot count. renderFinished is indexed by
+        // imageIndex: its present consumes the signal, and the presentation engine
+        // only hands the same image out again after that present retired, so a
+        // per-slot semaphore could be re-signaled while still in use under
+        // MAILBOX/IMMEDIATE (N12, VUID-vkQueueSubmit-pSignalSemaphores-00067).
         final int frameNum = MAX_FRAMES_IN_FLIGHT;
 
         imageAvailableSemaphores = new ArrayList<>(frameNum);
-        renderFinishedSemaphores = new ArrayList<>(frameNum);
         inFlightFences = new ArrayList<>(frameNum);
 
         try(MemoryStack stack = stackPush()) {
@@ -486,25 +506,24 @@ public class Drawer {
             fenceInfo.flags(VK_FENCE_CREATE_SIGNALED_BIT);
 
             LongBuffer pImageAvailableSemaphore = stack.mallocLong(1);
-            LongBuffer pRenderFinishedSemaphore = stack.mallocLong(1);
             LongBuffer pFence = stack.mallocLong(1);
 
             for(int i = 0;i < frameNum;i++) {
 
                 if(vkCreateSemaphore(device, semaphoreInfo, null, pImageAvailableSemaphore) != VK_SUCCESS
-                        || vkCreateSemaphore(device, semaphoreInfo, null, pRenderFinishedSemaphore) != VK_SUCCESS
                         || vkCreateFence(device, fenceInfo, null, pFence) != VK_SUCCESS) {
 
                     throw new RuntimeException("Failed to create synchronization objects for the frame " + i);
                 }
 
                 imageAvailableSemaphores.add(pImageAvailableSemaphore.get(0));
-                renderFinishedSemaphores.add(pRenderFinishedSemaphore.get(0));
                 inFlightFences.add(pFence.get(0));
 
             }
 
         }
+
+        recreateRenderFinishedSemaphores();
     }
 
 
@@ -673,7 +692,7 @@ public class Drawer {
             submitInfo.pWaitSemaphores(stackGet().longs(imageAvailableSemaphores.get(currentFrame)));
             submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
 
-            submitInfo.pSignalSemaphores(stackGet().longs(renderFinishedSemaphores.get(currentFrame)));
+            submitInfo.pSignalSemaphores(stackGet().longs(renderFinishedSemaphores.get(imageIndex)));
 
             // The command buffer recorded in initiateRenderPass() for this frame slot;
             // it renders into the framebuffer of the acquired imageIndex. The frame's
@@ -703,7 +722,7 @@ public class Drawer {
             VkPresentInfoKHR presentInfo = VkPresentInfoKHR.calloc(stack);
             presentInfo.sType(VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
 
-            presentInfo.pWaitSemaphores(stackGet().longs(renderFinishedSemaphores.get(currentFrame)));
+            presentInfo.pWaitSemaphores(stackGet().longs(renderFinishedSemaphores.get(imageIndex)));
 
             presentInfo.swapchainCount(1);
             presentInfo.pSwapchains(stack.longs(getSwapChain()));
@@ -713,11 +732,17 @@ public class Drawer {
             vkResult = vkQueuePresentKHR(getPresentQueue(), presentInfo);
 
             if(vkResult == VK_ERROR_OUT_OF_DATE_KHR || vkResult == VK_SUBOPTIMAL_KHR || shouldRecreate) {
-                shouldRecreate = false;
                 recreateSwapChain();
                 return;
             } else if(vkResult != VK_SUCCESS) {
                 throw new RuntimeException("Failed to present swap chain image");
+            }
+
+            if(recreateAfterPresent) {
+                // The frame an earlier SUBOPTIMAL acquire or resize request forced us
+                // to render: presented now, so recreate here (N10).
+                recreateSwapChain();
+                return;
             }
 
             currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -732,24 +757,31 @@ public class Drawer {
         for(int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
             vkDestroyFence(device, inFlightFences.get(i), null);
             vkDestroySemaphore(device, imageAvailableSemaphores.get(i), null);
-            vkDestroySemaphore(device, renderFinishedSemaphores.get(i), null);
+        }
+        for(long semaphore : renderFinishedSemaphores) {
+            vkDestroySemaphore(device, semaphore, null);
         }
         inFlightFences = null;
     }
 
-    private void recreateSwapChain() {        vkDeviceWaitIdle(device);
+    /** @return true when the swapchain was replaced. */
+    private boolean recreateSwapChain() {
+        vkDeviceWaitIdle(device);
+        shouldRecreate = false;
 
         if(!Vulkan.recreateSwapChain()) {
             // Minimized surface (zero currentExtent): creating a swapchain for it would
             // fail every frame. Keep the old one and retry once the window has a size.
-            return;
+            shouldRecreate = true;
+            return false;
         }
 
-        for(int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            vkDestroyFence(device, inFlightFences.get(i), null);
-            vkDestroySemaphore(device, imageAvailableSemaphores.get(i), null);
-            vkDestroySemaphore(device, renderFinishedSemaphores.get(i), null);
-        }
+        // The frame-slot sync objects (imageAvailable, fences) are not swapchain
+        // objects and are indexed by currentFrame, so they survive the recreation:
+        // destroying them here could hit a semaphore the failed or dropped acquire
+        // left signaled (N10). Only the per-image renderFinished set follows the
+        // swapchain image count; vkDeviceWaitIdle above proved none is in use.
+        recreateRenderFinishedSemaphores();
 
         commandBuffers.forEach(commandBuffer -> vkResetCommandBuffer(commandBuffer, 0));
         transferCommandBuffers.forEach(commandBuffer -> vkResetCommandBuffer(commandBuffer, 0));
@@ -757,11 +789,36 @@ public class Drawer {
         java.util.Arrays.fill(activeCommandBuffers, false);
         java.util.Arrays.fill(fencePending, false);
         frameTransferRecording = false;
-
-        createSyncObjects();
+        recreateAfterPresent = false;
 
         currentFrame = 0;
         imageIndex = 0;
+        return true;
+    }
+
+    /** One render-finished semaphore per swapchain image (N12); see createSyncObjects. */
+    private void recreateRenderFinishedSemaphores() {
+        if(renderFinishedSemaphores != null) {
+            for(long semaphore : renderFinishedSemaphores) {
+                vkDestroySemaphore(device, semaphore, null);
+            }
+        }
+
+        final int imageNum = getSwapChainImages().size();
+        renderFinishedSemaphores = new ArrayList<>(imageNum);
+
+        try(MemoryStack stack = stackPush()) {
+            VkSemaphoreCreateInfo semaphoreInfo = VkSemaphoreCreateInfo.create();
+            semaphoreInfo.sType(VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO);
+
+            LongBuffer pSemaphore = stack.mallocLong(1);
+            for(int i = 0; i < imageNum; ++i) {
+                if(vkCreateSemaphore(device, semaphoreInfo, null, pSemaphore) != VK_SUCCESS) {
+                    throw new RuntimeException("Failed to create render-finished semaphore " + i);
+                }
+                renderFinishedSemaphores.add(pSemaphore.get(0));
+            }
+        }
     }
 
     public void rebuildInstance() {

@@ -272,10 +272,20 @@ public class Vulkan {
         int oldW = swapChainExtent.width(), oldH = swapChainExtent.height();
         swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
 
-        createSwapChain();
+        try {
+            createSwapChain();
+        } catch (RuntimeException e) {
+            // A failed vkCreateSwapchainKHR leaves the old swapchain and views alive
+            // (they are destroyed only once the new one exists), but the framebuffers
+            // referencing them are already gone: rebuild them so the renderer keeps
+            // valid handles, then let the caller see the failure (N24).
+            createFramebuffers();
+            throw e;
+        }
 
-        MemoryManager.freeImage(depthImage, depthImageMemory);
+        // The view must go before the image it was created from (N24).
         vkDestroyImageView(device, depthImageView, null);
+        MemoryManager.freeImage(depthImage, depthImageMemory);
 
         createImageViews();
         createDepthResources();
@@ -312,8 +322,9 @@ public class Vulkan {
         vkDestroySwapchainKHR(device, swapChain, null);
         swapChain = 0L;
 
-        MemoryManager.freeImage(depthImage, depthImageMemory);
+        // The view must go before the image it was created from (N24).
         vkDestroyImageView(device, depthImageView, null);
+        MemoryManager.freeImage(depthImage, depthImageMemory);
 
         // Pipelines reference the render pass and the shared samplers, so they are
         // destroyed before both.
