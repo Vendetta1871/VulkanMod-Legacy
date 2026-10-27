@@ -17,26 +17,16 @@ import static org.lwjgl.vulkan.VK13.*;
 /**
  * Hybrid ray-traced sun/moon shadows on the raster scene (T8, first effect): one shadow
  * ray per scene pixel from the depth-reconstructed position; shadowed pixels are darkened
- * in place before the upscaler. Strength: VULKANMOD_RT_SHADOWS (0..1, default 0.45).
+ * in place before the upscaler. Strength: Config.rtShadowStrength (VULKANMOD_RT_SHADOWS overrides).
  */
 final class RtShadowPass {
 
     private static final int PUSH_BYTES = 96;
-    private static final float STRENGTH = readStrength();
 
     private static RtPipeline pipeline;
     private static final Matrix4f invJittered = new Matrix4f();
 
     private RtShadowPass() {}
-
-    private static float readStrength() {
-        try {
-            String v = System.getenv("VULKANMOD_RT_SHADOWS");
-            return v != null ? Math.max(0.0f, Math.min(1.0f, Float.parseFloat(v))) : 0.45f;
-        } catch (NumberFormatException e) {
-            return 0.45f;
-        }
-    }
 
     static void record(VkCommandBuffer cmd, MemoryStack stack) {
         if (!RtScene.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null || !RtLighting.hasSky()) {
@@ -44,7 +34,7 @@ final class RtShadowPass {
         }
         float[] sun = RtLighting.sun();
         boolean day = sun[1] >= 0.0f;
-        float strength = STRENGTH * (day ? 1.0f : 0.3f) * (1.0f - RtLighting.overcast())
+        float strength = Initializer.CONFIG.effectiveRtShadowStrength() * (day ? 1.0f : 0.3f) * (1.0f - RtLighting.overcast())
                 // Fade out while the sun or moon crosses the horizon.
                 * Math.min(1.0f, Math.abs(sun[1]) / 0.1f);
         if (strength <= 0.01f) return;
@@ -53,7 +43,7 @@ final class RtShadowPass {
             pipeline = new RtPipeline(RtDescriptors.layout(), PUSH_BYTES, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                     "rt/shadows.rgen", new String[]{"rt/shadow.rmiss"},
                     new RtPipeline.HitGroup[]{new RtPipeline.HitGroup(null, "rt/debug.rahit")});
-            Initializer.LOGGER.info("[rt] shadows ready, strength {}", STRENGTH);
+            Initializer.LOGGER.info("[rt] shadows ready");
         }
         RenderTarget scene = FrameTargets.scene;
         boolean opaque = FrameTargets.opaqueTaken();

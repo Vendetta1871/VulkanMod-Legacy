@@ -72,6 +72,16 @@ public final class FrameTargets {
             renderScale = scale;
             if (display.width() > 0) Drawer.shouldRecreate = true;
         }
+        if (Vulkan.getDevice() != null) {
+            net.vulkanmod.vulkan.rt.RtScene.applySettings();
+        }
+    }
+
+    /** Destroys the RT passes' pipelines and descriptors (RT turned off; device idle). */
+    public static void releaseRtPasses() {
+        RtDebugView.destroy();
+        RtShadowPass.destroy();
+        RtDescriptors.destroy();
     }
 
     static void init(int depthFormat) {
@@ -97,9 +107,7 @@ public final class FrameTargets {
     }
 
     static void destroy() {
-        RtDebugView.destroy();
-        RtShadowPass.destroy();
-        RtDescriptors.destroy();
+        releaseRtPasses();
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.destroy();
         Fsr3Upscaler.destroy();
         Fsr1Upscaler.destroy();

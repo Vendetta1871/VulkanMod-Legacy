@@ -33,7 +33,22 @@ public class Config {
     /** FSR 3 sharpening strength 0..1: 0 = off. */
     public float fsr3Sharpness = 0.3f;
 
+    /** Ray-traced effects (shadows for now); needs ray-tracing pipeline support. */
+    public boolean rayTracing = false;
+    /** How much ray-traced shadows darken, 0..1. */
+    public float rtShadowStrength = 0.45f;
+
     // Environment overrides (tests and autotest runs) take precedence over the file.
+
+    public boolean effectiveRayTracing() {
+        String env = System.getenv("VULKANMOD_RT");
+        if (env != null) return env.isEmpty() || env.charAt(0) != '0';
+        return rayTracing;
+    }
+
+    public float effectiveRtShadowStrength() {
+        return clamp(envFloat("VULKANMOD_RT_SHADOWS", rtShadowStrength), 0.0f, 1.0f);
+    }
 
     public float effectiveRenderScale() {
         return clamp(envFloat("VULKANMOD_RENDER_SCALE", renderScale), 0.25f, 1.0f);

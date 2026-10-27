@@ -38,11 +38,11 @@ public final class RtScene {
     private static final int INSTANCE_BYTES = 64;
     private static final int INSTANCE_RING = 4;
 
-    /** VULKANMOD_RT=1 turns the RT scene on (also the rt debug view). */
-    private static final boolean REQUESTED = System.getenv("VULKANMOD_RT") != null
-            || "rt".equalsIgnoreCase(System.getenv("VULKANMOD_DEBUG_VIEW"));
+    /** The rt debug view needs the scene regardless of the setting. */
+    private static final boolean DEBUG_VIEW = "rt".equalsIgnoreCase(System.getenv("VULKANMOD_DEBUG_VIEW"));
 
-    private static Boolean enabled;
+    private static boolean enabled;
+    private static boolean warned;
     /** VULKANMOD_RT_LOG=1: per-frame build statistics. */
     private static final boolean LOG = System.getenv("VULKANMOD_RT_LOG") != null;
 
@@ -79,14 +79,50 @@ public final class RtScene {
     private RtScene() {}
 
     public static boolean enabled() {
-        if (enabled == null) {
-            DeviceFeatures f = Vulkan.getDeviceInfo().features;
-            enabled = REQUESTED && f != null && f.rayTracingPipeline && TerrainBatch.active();
-            if (REQUESTED && !enabled) {
+        return enabled;
+    }
+
+    /** The device has the ray-tracing pipeline and the batched chunk path is on. */
+    public static boolean supported() {
+        DeviceFeatures f = Vulkan.getDeviceInfo() != null ? Vulkan.getDeviceInfo().features : null;
+        return f != null && f.rayTracingPipeline && TerrainBatch.active();
+    }
+
+    /**
+     * Applies Config.rayTracing (VULKANMOD_RT overrides). Turning it on recreates the frame
+     * targets (the scene color needs STORAGE) and reloads the chunks so every section gets
+     * its BLAS; turning it off waits for the GPU and releases the RT resources.
+     * Client thread only.
+     */
+    public static void applySettings() {
+        boolean want = Initializer.CONFIG.effectiveRayTracing() || DEBUG_VIEW;
+        if (want && !supported()) {
+            if (!warned) {
+                warned = true;
                 Initializer.LOGGER.warn("[rt] requested but unavailable (needs ray-tracing pipeline support and the batched chunk path)");
             }
+            want = false;
         }
-        return enabled;
+        if (want == enabled) return;
+
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
+        if (!want) {
+            vkDeviceWaitIdle(Vulkan.getDevice());
+            net.vulkanmod.vulkan.FrameTargets.releaseRtPasses();
+            destroy();
+            enabled = false;
+            Initializer.LOGGER.info("[rt] off");
+            return;
+        }
+        enabled = true;
+        Initializer.LOGGER.info("[rt] on");
+        if (net.vulkanmod.vulkan.FrameTargets.display.width() > 0) {
+            net.vulkanmod.vulkan.Drawer.shouldRecreate = true;
+        }
+        // Sections uploaded while RT was off carry no RT state: rebuild them.
+        if (mc.world != null && mc.renderGlobal != null) {
+            mc.renderGlobal.loadRenderers();
+        }
     }
 
     // --- section lifecycle (called from VBO) ---
@@ -447,7 +483,12 @@ public final class RtScene {
 
     /** Releases everything; the device must be idle. */
     public static void destroy() {
-        for (Section s : sections) releaseBlas(s);
+        for (Section s : sections) {
+            releaseBlas(s);
+            s.index = -1;
+            s.dirty = false;
+            s.placed = false;
+        }
         sections.clear();
         buildQueue.clear();
         if (tlas != 0L) {
