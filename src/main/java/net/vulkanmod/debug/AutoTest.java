@@ -1291,8 +1291,9 @@ public class AutoTest {
     }
 
     /**
-     * Drives {@link #GUI_MODE}: title -> Options (dirt background) -> Language (scrollbar),
-     * capturing each after it has rendered a few frames, then quitting.
+     * Drives {@link #GUI_MODE}: title -> Options (dirt background) -> Language (scrollbar)
+     * -> Video Settings -> Upscaling, capturing each after it has rendered a few frames,
+     * then quitting.
      */
     private static int guiTicks;
 
@@ -1314,7 +1315,20 @@ public class AutoTest {
         } else if (mc.currentScreen instanceof GuiLanguage) {
             if (++guiTicks == 24) {
                 capture(mc, "scrollbar");
-            } else if (guiTicks >= 30 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+            } else if (guiTicks == 30) {
+                mc.displayGuiScreen(new net.minecraft.client.gui.GuiVideoSettings(mc.currentScreen, mc.gameSettings));
+            }
+        } else if (mc.currentScreen instanceof net.minecraft.client.gui.GuiVideoSettings) {
+            // The "Upscaling..." button added by GuiVideoSettingsM, then its screen.
+            if (++guiTicks == 36) {
+                capture(mc, "videoSettings");
+            } else if (guiTicks == 40) {
+                mc.displayGuiScreen(new net.vulkanmod.config.gui.UpscalingSettingsScreen(mc.currentScreen));
+            }
+        } else if (mc.currentScreen instanceof net.vulkanmod.config.gui.UpscalingSettingsScreen) {
+            if (++guiTicks == 46) {
+                capture(mc, "upscaling");
+            } else if (guiTicks >= 52 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                 Initializer.LOGGER.info("[autotest] done, shutting down");
                 mc.shutdown();
             }
