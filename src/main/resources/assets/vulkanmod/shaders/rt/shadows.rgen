@@ -26,11 +26,15 @@ vec3 unproject(ivec2 p, float depth, vec2 size) {
 }
 
 // Of the two neighbours along an axis, the one closer in depth gives the surface tangent.
+// At the image border only the inner neighbour exists (a clamped one would be the pixel
+// itself and give a zero tangent).
 vec3 tangent(ivec2 p, ivec2 axis, float d, vec3 pos, ivec2 size) {
-    ivec2 a = clamp(p + axis, ivec2(0), size - 1);
-    ivec2 b = clamp(p - axis, ivec2(0), size - 1);
-    float da = texelFetch(sceneDepth, a, 0).r;
-    float db = texelFetch(sceneDepth, b, 0).r;
+    ivec2 a = p + axis;
+    ivec2 b = p - axis;
+    bool hasA = all(lessThan(a, size));
+    bool hasB = all(greaterThanEqual(b, ivec2(0)));
+    float da = hasA ? texelFetch(sceneDepth, a, 0).r : 2.0;
+    float db = hasB ? texelFetch(sceneDepth, b, 0).r : 2.0;
     return abs(da - d) < abs(db - d)
             ? unproject(a, da, vec2(size)) - pos
             : pos - unproject(b, db, vec2(size));
@@ -43,7 +47,12 @@ void main() {
     if (d >= 0.99999 || pc.light.w <= 0.0) return;   // sky, clouds past the far plane
 
     vec3 pos = unproject(p, d, vec2(size));
-    vec3 n = normalize(cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size)));
+    vec3 c = cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size));
+    // Degenerate or non-finite geometry: never trace a NaN ray (software traversal on GPUs
+    // without RT cores can spin on it).
+    float len2 = dot(c, c);
+    if (!(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) return;
+    vec3 n = c * inversesqrt(len2);
     vec3 view = pos - unproject(p, 0.0, vec2(size));
     if (dot(n, view) > 0.0) n = -n;
 
@@ -61,8 +70,8 @@ void main() {
     }
 
     float factor = 1.0 - pc.light.w * (1.0 - lit);
-    vec4 c = imageLoad(sceneColor, p);
-    imageStore(sceneColor, p, vec4(c.rgb * factor, c.a));
+    vec4 color = imageLoad(sceneColor, p);
+    imageStore(sceneColor, p, vec4(color.rgb * factor, color.a));
     if (pc.flags.x > 0.0) {
         // Keeps FSR's auto-reactive mask from flagging every shadowed pixel.
         vec4 o = imageLoad(opaqueColor, p);

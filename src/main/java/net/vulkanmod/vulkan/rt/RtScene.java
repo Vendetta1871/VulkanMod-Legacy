@@ -43,6 +43,8 @@ public final class RtScene {
             || "rt".equalsIgnoreCase(System.getenv("VULKANMOD_DEBUG_VIEW"));
 
     private static Boolean enabled;
+    /** VULKANMOD_RT_LOG=1: per-frame build statistics. */
+    private static final boolean LOG = System.getenv("VULKANMOD_RT_LOG") != null;
 
     /** Per-section state, owned by the section's VBO. */
     public static final class Section {
@@ -300,6 +302,13 @@ public final class RtScene {
                 infos.get(i).scratchData().deviceAddress(scratchBase + scratchOffsets[i]);
             }
             vkCmdBuildAccelerationStructuresKHR(cmd, infos, ranges);
+            if (LOG) {
+                int maxVerts = 0;
+                for (Section s : batch) maxVerts = Math.max(maxVerts, s.vertexCount);
+                Initializer.LOGGER.info("[rt] built {} BLAS (max {} verts, scratch {} KB, arena {} MB, queue left {})",
+                        count, maxVerts, scratchTotal / 1024, ChunkBatcher.arena().capacity() >> 20,
+                        buildQueue.size() - count);
+            }
 
             for (Section s : batch) s.dirty = false;
             buildQueue.removeAll(batch);
@@ -387,9 +396,10 @@ public final class RtScene {
                     info.get(0), stack.ints(tlasCapacity), sizes);
             long scratchAlign = Math.max(1, Vulkan.getDeviceInfo().features.minAccelerationStructureScratchOffsetAlignment);
             ensureScratch(sizes.buildScratchSize() + scratchAlign);
+            long scratchAddress = align(scratch.address, scratchAlign);
 
             info.get(0).dstAccelerationStructure(tlas);
-            info.get(0).scratchData().deviceAddress(align(scratch.address, scratchAlign));
+            info.get(0).scratchData().deviceAddress(scratchAddress);
 
             VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack);
             range.get(0).primitiveCount(n);
