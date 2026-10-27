@@ -4,7 +4,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
-import net.vulkanmod.Initializer;
 import net.vulkanmod.vulkan.Drawer;
 import net.vulkanmod.vulkan.Pipeline;
 import net.vulkanmod.vulkan.VRenderSystem;
@@ -18,6 +17,7 @@ import java.nio.FloatBuffer;
 import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
 import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
 import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 
 /**
  * Vulkan port of the world-space debug geometry that 1.12.2 draws through the shared
@@ -30,12 +30,13 @@ import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
  * <p>The renderers build their vertices eye-relative (they subtract the interpolated
  * camera position), so the walls are drawn with a rotation-only modelview, exactly like
  * the sky/cloud/border passes. The line width comes from the mirrored
- * {@code glLineWidth} through the line pipeline's dynamic line-width state; the blend,
- * depth and fog states are read from the live GL state so each renderer's own sequence
- * (chunk borders draw unblended, the selection box blends) is reproduced per draw.</p>
+ * {@code glLineWidth} through the line pipeline's dynamic line-width state; depth and
+ * fog states are read from the live GL state. The {@code POSITION_COLOR} lines always
+ * blend with SRC_ALPHA/ONE_MINUS_SRC_ALPHA so the alpha-0 strip joints fade out instead
+ * of painting an opaque web, while the textured beam draws keep the mirrored blend.</p>
  *
  * <p>The dragon's healing beams ({@code RenderDragon.renderCrystalBeams}) are the one
- * world-pass {@code POSITION_TEX_COLOR} line draw: same replay path, but through the
+ * world-pass {@code POSITION_TEX_COLOR} strip draw: same replay path, but through the
  * textured pipeline with the beam texture from the tracked bind.</p>
  */
 public class DebugLinesRenderer {
@@ -44,8 +45,8 @@ public class DebugLinesRenderer {
     private static Pipeline linePipeline;
 
     private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
-    // The dragon's healing beams: GL_LINES with a texture and per-vertex colour, drawn
-    // through the same shared Tessellator the debug renderers use.
+    // The dragon's healing beams: a GL_TRIANGLE_STRIP ribbon with a texture and
+    // per-vertex colour, drawn through the same shared Tessellator the debug renderers use.
     private static final VertexFormat POSITION_TEX_COLOR = DefaultVertexFormats.POSITION_TEX_COLOR;
 
     private static final FloatBuffer float4 = MemoryUtil.memAllocFloat(4);
@@ -63,9 +64,18 @@ public class DebugLinesRenderer {
      */
     public static boolean accepts(BufferBuilder buffer) {
         VertexFormat format = buffer.getVertexFormat();
-        return linePipeline != null
-                && (format == POSITION_COLOR || format == POSITION_TEX_COLOR)
-                && (buffer.getDrawMode() == GL11.GL_LINES || buffer.getDrawMode() == GL11.GL_LINE_STRIP);
+        if (linePipeline == null || format == null) {
+            return false;
+        }
+        int mode = buffer.getDrawMode();
+        if (format == POSITION_TEX_COLOR) {
+            // The dragon's healing beams are a GL_TRIANGLE_STRIP ribbon (begin(5) is
+            // GL_TRIANGLE_STRIP, not a line mode) - the only textured strip that reaches
+            // this hook; entity quads (mode 7) are captured upstream first.
+            return mode == GL11.GL_LINES || mode == GL11.GL_LINE_STRIP
+                    || mode == GL11.GL_TRIANGLE_STRIP;
+        }
+        return mode == GL11.GL_LINES || mode == GL11.GL_LINE_STRIP;
     }
 
     /** Replays the finished buffer as one line batch. The buffer is already position(0). */
@@ -80,19 +90,30 @@ public class DebugLinesRenderer {
             return;
         }
 
-        int topology = buffer.getDrawMode() == GL11.GL_LINE_STRIP ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
-                : VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        int topology = switch (buffer.getDrawMode()) {
+            case GL11.GL_LINE_STRIP -> VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+            case GL11.GL_TRIANGLE_STRIP -> VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+            default -> VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        };
         ByteBuffer data = buffer.getByteBuffer();
+
+        VertexFormat format = buffer.getVertexFormat();
+        boolean textured = format == POSITION_TEX_COLOR;
 
         try {
             VRenderSystem.updateProjectionMatrix();
             VRenderSystem.updateModelViewMatrix();
-            // Rotation-only modelview: the vertices are eye-relative, so the residual
-            // translation Kirino reports must not be applied on top.
-            Matrix4f mv = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
-            mv.set(0, 3, 0.0f).set(1, 3, 0.0f).set(2, 3, 0.0f);
-            VRenderSystem.applyModelViewMatrix(mv);
-            VRenderSystem.calculateMVP();
+            if (!textured) {
+                // Rotation-only modelview: the debug renderers' vertices are eye-relative,
+                // so the residual translation Kirino reports must not be applied on top.
+                // The dragon beams are the exception - RenderDragon.doRender has already
+                // translated the modelview to the entity, so their vertices are entity-local
+                // and need the full live modelview updateModelViewMatrix just applied.
+                Matrix4f mv = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
+                mv.set(0, 3, 0.0f).set(1, 3, 0.0f).set(2, 3, 0.0f);
+                VRenderSystem.applyModelViewMatrix(mv);
+                VRenderSystem.calculateMVP();
+            }
 
             snapshotFog();
 
@@ -107,17 +128,27 @@ public class DebugLinesRenderer {
             VRenderSystem.depthFunc(int1().get(0));
             VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
 
-            // Blend is mirrored into VRenderSystem by the GlStateManager hook; the chunk
-            // borders run with it disabled, the selection box with SRC_ALPHA/ONE_MINUS.
-            Drawer.currentBlendState = VRenderSystem.getBlendState();
+            if (textured) {
+                // Beams run under whatever blend the entity pass left behind, like vanilla.
+                Drawer.currentBlendState = VRenderSystem.getBlendState();
+            } else {
+                // The debug renderers build their LINE_STRIPs with alpha-0 "pen-up" joints
+                // between the visible segments (chunk borders connect every chunk corner,
+                // the sight lines start at the eye with alpha 0). Vanilla 1.12.2 disables
+                // blend around these draws, which turns those joints into the opaque web
+                // across the middle of the chunk that real players never accept; the
+                // reference look fades them out. SRC_ALPHA/ONE_MINUS_SRC_ALPHA reproduces
+                // it: alpha-1 segments stay solid, alpha-0 joints vanish, the red sight
+                // lines fade toward the crosshair.
+                Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
+            }
 
             VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-            VertexFormat format = buffer.getVertexFormat();
-            if (format == POSITION_TEX_COLOR) {
-                // Textured lines (dragon beams): the gui_tex_color pipeline already does
-                // texture * vertexColor * ColorModulator, which matches the fixed-function
-                // chain these draws run under. The beam texture was bound by RenderDragon
-                // through GlStateManager, so the tracked mirror resolves it.
+            if (textured) {
+                // Textured strips/lines (dragon beams): the gui_tex_color pipeline already
+                // does texture * vertexColor * ColorModulator, which matches the
+                // fixed-function chain these draws run under. The beam texture was bound
+                // by RenderDragon through GlStateManager, so the tracked mirror resolves it.
                 net.vulkanmod.vulkan.texture.VulkanImage tex = GuiRenderer.trackedTexture();
                 if (tex == null) {
                     return;

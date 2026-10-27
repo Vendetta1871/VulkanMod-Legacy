@@ -164,6 +164,16 @@ public class AutoTest {
      * once with {@code VULKANMOD_DISABLE=1} and diff the pairs.
      */
     private static final boolean STATE_MODE = System.getenv("VULKANMOD_AUTOTEST_STATE") != null;
+
+    /**
+     * End-fight repro (bug E, dragon healing beams): moves the player to The End,
+     * waits for the dragon, then pins the two client-side fields {@code RenderDragon}
+     * reads for the healing beam ({@code hurtTime > 0} and a non-null
+     * {@code healingEnderCrystal}) and places the camera sideways to the
+     * crystal-to-head axis so the ribbon crosses the frame instead of pointing
+     * away from the lens.
+     */
+    private static final boolean END_MODE = System.getenv("VULKANMOD_AUTOTEST_END") != null;
     /** Absolute camera column for STATE_MODE (near the fixed-seed world spawn). */
     private static final int PIN_X = 200, PIN_Z = 112;
     private static int fpsSamples;
@@ -409,6 +419,11 @@ public class AutoTest {
                         Initializer.LOGGER.info("[autotest] done, shutting down");
                         mc.shutdown();
                     }
+                    return;
+                }
+
+                if (END_MODE) {
+                    endStage(mc);
                     return;
                 }
 
@@ -996,6 +1011,123 @@ public class AutoTest {
         mc.player.lastTickPosZ = mc.player.posZ;
         mc.player.setPosition(x, y, z);
         mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+    }
+
+    // --- END_MODE (dragon healing beams, bug E) ---
+
+    private static net.minecraft.entity.boss.EntityDragon endDragon;
+    private static int endArmedAt = -1;
+    private static net.minecraft.entity.item.EntityEnderCrystal endBeamCrystal;
+
+    private static void endStage(Minecraft mc) {
+        int t = ++ticks;
+        if (t == 5) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server != null) {
+                final java.util.UUID who = mc.player.getUniqueID();
+                server.addScheduledTask(() -> {
+                    net.minecraft.entity.player.EntityPlayerMP mp =
+                            server.getPlayerList().getPlayerByUUID(who);
+                    if (mp != null) {
+                        server.getPlayerList().transferPlayerToDimension(mp, 1,
+                                new net.minecraft.world.Teleporter(server.getWorld(1)));
+                    }
+                });
+            }
+            Initializer.LOGGER.info("[autotest] end: dimension change scheduled");
+            return;
+        }
+        if (mc.world == null || mc.world.provider.getDimension() != 1) {
+            return; // The End is still loading
+        }
+        if (endDragon == null || endDragon.isDead) {
+            endDragon = null;
+            for (net.minecraft.entity.Entity e : mc.world.loadedEntityList) {
+                if (e instanceof net.minecraft.entity.boss.EntityDragon d && !d.isDead) {
+                    endDragon = d;
+                    Initializer.LOGGER.info("[autotest] end: dragon found at {}, {}, {}",
+                            d.posX, d.posY, d.posZ);
+                    break;
+                }
+            }
+            if (endDragon == null) {
+                if (t % 40 == 0) {
+                    Initializer.LOGGER.info("[autotest] end: waiting for dragon (t={})", t);
+                }
+                return;
+            }
+        }
+
+        // RenderDragon draws the beam while hurtTime > 0 and healingEnderCrystal is
+        // non-null - both plain client-side fields the renderer reads directly, so
+        // pinning them here (Phase.END, after the world tick) reproduces the healing
+        // state without waiting for the fight AI to reach it on its own.
+        endDragon.hurtTime = 3;
+        if (endBeamCrystal == null || endBeamCrystal.isDead) {
+            // Pick the farthest crystal once and latch it: a near one hides the short
+            // ribbon inside the dragon's own body volume (depth-rejected), a far one
+            // makes the beam cross open sky. The dragon AI re-detects a healing crystal
+            // on its own, so the pin below re-asserts the choice every tick.
+            net.minecraft.entity.item.EntityEnderCrystal farthest = null;
+            double best = -1.0;
+            for (net.minecraft.entity.Entity e : mc.world.loadedEntityList) {
+                if (e instanceof net.minecraft.entity.item.EntityEnderCrystal c && !c.isDead) {
+                    double d2 = c.getDistanceSq(endDragon);
+                    if (d2 > best) {
+                        best = d2;
+                        farthest = c;
+                    }
+                }
+            }
+            endBeamCrystal = farthest;
+        }
+        endDragon.healingEnderCrystal = endBeamCrystal;
+
+        if (endArmedAt < 0) {
+            endArmedAt = t;
+            mc.player.capabilities.allowFlying = true;
+            mc.player.capabilities.isFlying = true;
+            Initializer.LOGGER.info("[autotest] end: camera armed, healing crystal {}",
+                    endDragon.healingEnderCrystal == null ? "MISSING" : "set");
+        }
+
+        // Frame the beam from the side: stand off the crystal-to-head axis (a camera on
+        // the axis foreshortens the ribbon to a dot) and look at its midpoint. Rotation
+        // is client-authoritative, so aiming every tick cannot rubber-band.
+        double ax, ay, az;
+        if (endDragon.healingEnderCrystal != null) {
+            ax = endDragon.healingEnderCrystal.posX - endDragon.posX;
+            ay = endDragon.healingEnderCrystal.posY - (endDragon.posY + 2.0);
+            az = endDragon.healingEnderCrystal.posZ - endDragon.posZ;
+        } else {
+            ax = ay = az = 0.0;
+        }
+        double horiz = Math.sqrt(ax * ax + az * az);
+        double px = 0.0, pz = 0.0;
+        if (horiz > 1.0e-3) {
+            px = az / horiz;
+            pz = -ax / horiz;
+        }
+        double midX = endDragon.posX + ax * 0.5;
+        double midY = endDragon.posY + 2.0 + ay * 0.5;
+        double midZ = endDragon.posZ + az * 0.5;
+        if ((t - endArmedAt) % 5 == 1) {
+            tpPlayer(mc, midX + px * 30.0, midY + 4.0, midZ + pz * 30.0);
+        }
+        double dx = midX - mc.player.posX;
+        double dy = midY - mc.player.posY;
+        double dz = midZ - mc.player.posZ;
+        mc.player.rotationYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        mc.player.rotationPitch = (float) Math.toDegrees(
+                Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)));
+        mc.player.motionX = mc.player.motionY = mc.player.motionZ = 0;
+
+        if (t == endArmedAt + 40) {
+            capture(mc, "endBeam");
+        } else if (t == endArmedAt + 50 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
     }
 
     private static void startRain(Minecraft mc) {
