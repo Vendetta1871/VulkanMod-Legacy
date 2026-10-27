@@ -93,6 +93,11 @@ public class Pipeline {
     private static final long pipelineCache = createPipelineCache();
     private static final int imagesSize = getSwapChainImages().size();
 
+    /** Shared driver cache handle, so compute pipelines land in the same persisted blob. */
+    static long getPipelineCache() {
+        return pipelineCache;
+    }
+
     // L1: whether the optional R8G8B8_SNORM can be used for the NORMAL attribute.
     private static final boolean R8G8B8_NORMAL_SUPPORTED =
             Vulkan.vertexBufferFormatSupported(VK_FORMAT_R8G8B8_SNORM);
@@ -429,7 +434,15 @@ public class Pipeline {
             pipelineInfo.pColorBlendState(colorBlending);
             pipelineInfo.pDynamicState(dynamicStates);
             pipelineInfo.layout(pipelineLayout);
-            pipelineInfo.renderPass(Vulkan.getRenderPass());
+            // B4: dynamic rendering - the pipeline names its attachment formats instead
+            // of a render pass. All raster pipelines currently target the scene set.
+            VkPipelineRenderingCreateInfo renderingInfo = VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
+                    .colorAttachmentCount(1)
+                    .pColorAttachmentFormats(stack.ints(SceneTargets.COLOR_FORMAT))
+                    .depthAttachmentFormat(SceneTargets.depthFormat())
+                    .stencilAttachmentFormat(SceneTargets.stencilFormat());
+            pipelineInfo.pNext(renderingInfo.address());
+            pipelineInfo.renderPass(VK_NULL_HANDLE);
             pipelineInfo.subpass(0);
             pipelineInfo.basePipelineHandle(VK_NULL_HANDLE);
             pipelineInfo.basePipelineIndex(-1);

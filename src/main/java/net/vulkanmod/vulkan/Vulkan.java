@@ -47,6 +47,8 @@ import static org.lwjgl.vulkan.KHRSwapchain.vkDestroySwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkGetSwapchainImagesKHR;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK11.VK_API_VERSION_1_1;
+import static org.lwjgl.vulkan.VK13.VK_API_VERSION_1_3;
+import static org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 
 public class Vulkan {
 
@@ -163,6 +165,8 @@ public class Vulkan {
 
     private static VkQueue graphicsQueue;
     private static VkQueue presentQueue;
+    private static QueueSetup queueSetup;
+    private static int instanceApiVersion;
 
     // Config value validated: at least double buffering, sane upper bound.
     private static final int frameQueueSize = Math.min(Math.max(2, Initializer.CONFIG.frameQueueSize), 8);
@@ -175,13 +179,6 @@ public class Vulkan {
     private static int swapChainImageFormat;
     private static VkExtent2D swapChainExtent;
     private static List<Long> swapChainImageViews;
-    private static List<Long> swapChainFramebuffers;
-
-    private static long depthImage;
-    private static long depthImageMemory;
-    private static long depthImageView;
-
-    private static long renderPass;
 
     private static long commandPool;
     private static VkCommandBuffer immediateCmdBuffer;
@@ -209,9 +206,9 @@ public class Vulkan {
 
         createSwapChain();
         createImageViews();
-        createRenderPass();
-        createDepthResources();
-        createFramebuffers();
+        // B2: the frame renders into offscreen targets and is copied to the swapchain.
+        SceneTargets.init(findDepthFormat());
+        SceneTargets.create(swapChainExtent.width(), swapChainExtent.height());
 
         createStagingBuffers();
     }
@@ -281,35 +278,21 @@ public class Vulkan {
             }
         }
 
-//        vkDeviceWaitIdle(device);
-        // The old framebuffers reference the old image views and depth view, so they
-        // must go first: createSwapChain() already destroys the old views and the old
-        // swapchain internally, and layers (e.g. MangoHud) track those objects to keep
-        // per-swapchain state - handing them a destroyed-view window is undefined.
         int oldW = swapChainExtent.width(), oldH = swapChainExtent.height();
-        swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
 
         try {
             createSwapChain();
         } catch (RuntimeException e) {
-            // A failed vkCreateSwapchainKHR leaves the old swapchain and views alive
-            // (they are destroyed only once the new one exists), but the framebuffers
-            // referencing them are already gone: rebuild them so the renderer keeps
-            // valid handles, then let the caller see the failure (N24).
-            // swapChainExtent/format still describe those views, because a failed
-            // create publishes nothing (R10). Schedule a retry for the next frame.
-            createFramebuffers();
+            // A failed vkCreateSwapchainKHR leaves the old swapchain, its views and the
+            // scene targets alive; swapChainExtent/format still describe them, because a
+            // failed create publishes nothing (R10). Schedule a retry for the next frame.
             Drawer.shouldRecreate = true;
             throw e;
         }
 
-        // The view must go before the image it was created from (N24).
-        vkDestroyImageView(device, depthImageView, null);
-        MemoryManager.freeImage(depthImage, depthImageMemory);
-
         createImageViews();
-        createDepthResources();
-        createFramebuffers();
+        // The caller (Drawer.recreateSwapChain) waited for the device to idle.
+        SceneTargets.create(swapChainExtent.width(), swapChainExtent.height());
 
         Initializer.LOGGER.info("[swapchain] recreated {}x{} -> {}x{}", oldW, oldH,
                 swapChainExtent.width(), swapChainExtent.height());
@@ -364,9 +347,6 @@ public class Vulkan {
             }
         }
 
-        if(swapChainFramebuffers != null) {
-            swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
-        }
         if(swapChainImageViews != null) {
             swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
         }
@@ -375,24 +355,13 @@ public class Vulkan {
             swapChain = 0L;
         }
 
-        // The view must go before the image it was created from (N24).
-        if(depthImageView != 0L) {
-            vkDestroyImageView(device, depthImageView, null);
-        }
-        if(depthImage != 0L) {
-            MemoryManager.freeImage(depthImage, depthImageMemory);
-        }
+        SceneTargets.destroy();
 
-        // Pipelines reference the render pass and the shared samplers, so they are
-        // destroyed before both.
+        // Pipelines reference the shared samplers, so they are destroyed first.
         if(swapchainCreated) {
             Pipeline.cleanUpAll();
         }
         net.vulkanmod.vulkan.texture.VulkanImage.destroySharedSamplers();
-        if(renderPass != 0L) {
-            vkDestroyRenderPass(device, renderPass, null);
-            renderPass = 0L;
-        }
 
         vkDestroyFence(device, immediateFence, null);
 
@@ -445,7 +414,10 @@ public class Vulkan {
             appInfo.applicationVersion(VK_MAKE_VERSION(1, 0, 0));
             appInfo.pEngineName(stack.UTF8Safe("No Engine"));
             appInfo.engineVersion(VK_MAKE_VERSION(1, 0, 0));
-            appInfo.apiVersion(VK_API_VERSION_1_1);
+            // B1: the highest version up to 1.3 the loader offers; the device may still be
+            // older, DeviceFeatures takes min(instance, device).
+            instanceApiVersion = Math.min(VK.getInstanceVersionSupported() & ~0xFFF, VK_API_VERSION_1_3);
+            appInfo.apiVersion(instanceApiVersion);
 
             VkInstanceCreateInfo createInfo = VkInstanceCreateInfo.create();
 
@@ -589,57 +561,60 @@ public class Vulkan {
         try(MemoryStack stack = stackPush()) {
 
             QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+            queueSetup = QueueSetup.plan(physicalDevice, indices);
 
-            int[] uniqueQueueFamilies = indices.unique();
+            int[] families = queueSetup.families();
+            VkDeviceQueueCreateInfo.Buffer queueCreateInfos = VkDeviceQueueCreateInfo.calloc(families.length, stack);
 
-            VkDeviceQueueCreateInfo.Buffer queueCreateInfos = VkDeviceQueueCreateInfo.create(uniqueQueueFamilies.length);
+            for(int i = 0;i < families.length;i++) {
+                int count = queueSetup.queueCount(families[i]);
+                java.nio.FloatBuffer priorities = stack.mallocFloat(count);
+                for(int q = 0; q < count; q++) priorities.put(q, 1.0f);
 
-            for(int i = 0;i < uniqueQueueFamilies.length;i++) {
                 VkDeviceQueueCreateInfo queueCreateInfo = queueCreateInfos.get(i);
                 queueCreateInfo.sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO);
-                queueCreateInfo.queueFamilyIndex(uniqueQueueFamilies[i]);
-                queueCreateInfo.pQueuePriorities(stack.floats(1.0f));
+                queueCreateInfo.queueFamilyIndex(families[i]);
+                queueCreateInfo.pQueuePriorities(priorities);
             }
 
-            // Only enable features the physical device actually supports; requesting an
-            // unsupported one fails vkCreateDevice on strict drivers.
-            VkPhysicalDeviceFeatures supportedFeatures = VkPhysicalDeviceFeatures.calloc(stack);
-            vkGetPhysicalDeviceFeatures(physicalDevice, supportedFeatures);
+            // B1: optional features are queried through the pNext chain and enabled only
+            // when present; requesting an unsupported one fails vkCreateDevice.
+            DeviceFeatures features = new DeviceFeatures();
+            long featuresChain = features.configure(physicalDevice, instanceApiVersion,
+                    availableDeviceExtensions(physicalDevice), stack);
+            deviceInfo.features = features;
 
-            VkPhysicalDeviceFeatures deviceFeatures = VkPhysicalDeviceFeatures.calloc(stack);
-            deviceFeatures.samplerAnisotropy(supportedFeatures.samplerAnisotropy());
-            // The debug-line capture draws GL_LINES/GL_LINE_STRIP with glLineWidth up to
-            // 6; wideLines lets the line pipeline honour a dynamic width > 1.
-            deviceFeatures.wideLines(supportedFeatures.wideLines());
             // ChunkBatcher submits one indirect call with drawCount > 1 per chunk layer.
             // Without the feature Drawer.drawIndexedIndirect replays the commands one by one.
-            deviceFeatures.multiDrawIndirect(supportedFeatures.multiDrawIndirect());
-            multiDrawIndirectSupported = supportedFeatures.multiDrawIndirect();
-            // GlStateManager.colorLogicOp/logicOp mirror (N22): enable the feature when
-            // present so a logic-op pipeline variant is valid if vanilla ever reaches it.
-            deviceFeatures.logicOp(supportedFeatures.logicOp());
-            logicOpSupported = supportedFeatures.logicOp();
+            multiDrawIndirectSupported = features.multiDrawIndirect;
+            // GlStateManager.colorLogicOp/logicOp mirror (N22).
+            logicOpSupported = features.logicOp;
             // M3: vkCmdSetLineWidth must stay inside limits.lineWidthRange
             // (VUID-vkCmdSetLineWidth-lineWidth-00788). Without wideLines the range is
             // [1,1], so a mirrored glLineWidth has to clamp to exactly 1 - both bounds.
-            boolean wideLines = supportedFeatures.wideLines();
+            boolean wideLines = features.wideLines;
             VRenderSystem.setLineWidthRange(
                     wideLines ? deviceProperties.limits().lineWidthRange(0) : 1.0f,
                     wideLines ? deviceProperties.limits().lineWidthRange(1) : 1.0f);
 
-            VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.create();
+            Set<String> extensions = new LinkedHashSet<>(DEVICE_EXTENSIONS);
+            extensions.addAll(features.extensions);
+
+            VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.calloc(stack);
 
             createInfo.sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
             createInfo.pQueueCreateInfos(queueCreateInfos);
             // queueCreateInfoCount is automatically set
 
-            createInfo.pEnabledFeatures(deviceFeatures);
-
-            createInfo.ppEnabledExtensionNames(asPointerBuffer(DEVICE_EXTENSIONS));
-
-            if(ENABLE_VALIDATION_LAYERS) {
-                createInfo.ppEnabledLayerNames(asPointerBuffer(VALIDATION_LAYERS));
+            if(features.apiVersion >= VK_API_VERSION_1_1) {
+                // VkPhysicalDeviceFeatures2 in pNext replaces pEnabledFeatures.
+                createInfo.pNext(featuresChain);
+            } else {
+                createInfo.pEnabledFeatures(VkPhysicalDeviceFeatures2.create(featuresChain).features());
             }
+
+            createInfo.ppEnabledExtensionNames(asPointerBuffer(extensions));
+            // Device layers are deprecated; validation is enabled on the instance.
 
             PointerBuffer pDevice = stack.pointers(VK_NULL_HANDLE);
 
@@ -647,16 +622,26 @@ public class Vulkan {
                 throw new RuntimeException("Failed to create logical device");
             }
 
-            device = new VkDevice(pDevice.get(0), physicalDevice, createInfo);
+            device = new VkDevice(pDevice.get(0), physicalDevice, createInfo, features.apiVersion);
 
-            PointerBuffer pQueue = stack.pointers(VK_NULL_HANDLE);
+            queueSetup.fetch(device);
+            graphicsQueue = queueSetup.graphics;
+            presentQueue = queueSetup.present;
 
-            vkGetDeviceQueue(device, indices.graphicsFamily, 0, pQueue);
-            graphicsQueue = new VkQueue(pQueue.get(0), device);
+            Initializer.LOGGER.info("Device features: {}", features);
+            Initializer.LOGGER.info("Queues: {}", queueSetup);
+        }
+    }
 
-            vkGetDeviceQueue(device, indices.presentFamily, 0, pQueue);
-            presentQueue = new VkQueue(pQueue.get(0), device);
-
+    private static Set<String> availableDeviceExtensions(VkPhysicalDevice device) {
+        try(MemoryStack stack = stackPush()) {
+            IntBuffer count = stack.ints(0);
+            vkEnumerateDeviceExtensionProperties(device, (String)null, count, null);
+            VkExtensionProperties.Buffer props = VkExtensionProperties.malloc(count.get(0), stack);
+            vkEnumerateDeviceExtensionProperties(device, (String)null, count, props);
+            Set<String> names = new HashSet<>();
+            for(int i = 0; i < props.capacity(); i++) names.add(props.get(i).extensionNameString());
+            return names;
         }
     }
 
@@ -671,6 +656,11 @@ public class Vulkan {
             allocatorCreateInfo.device(device);
             allocatorCreateInfo.pVulkanFunctions(vulkanFunctions);
             allocatorCreateInfo.instance(instance);
+            allocatorCreateInfo.vulkanApiVersion(deviceInfo.features.apiVersion);
+            if(deviceInfo.features.bufferDeviceAddress) {
+                // Arena and AS buffers need vkGetBufferDeviceAddress (T2).
+                allocatorCreateInfo.flags(VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT);
+            }
 
             PointerBuffer pAllocator = stack.pointers(VK_NULL_HANDLE);
 
@@ -745,8 +735,13 @@ public class Vulkan {
             createInfo.imageColorSpace(surfaceFormat.colorSpace());
             createInfo.imageExtent(extent);
             createInfo.imageArrayLayers(1);
-            // TRANSFER_SRC lets the autotest copy presented frames back to the CPU.
-            createInfo.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+            // TRANSFER_DST: the scene target is copied in (B2). TRANSFER_SRC lets the
+            // autotest copy presented frames back to the CPU.
+            if((swapChainSupport.capabilities.supportedUsageFlags() & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
+                throw new RuntimeException("Surface does not support TRANSFER_DST swapchain images");
+            }
+            createInfo.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                    | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
             QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
@@ -812,112 +807,6 @@ public class Vulkan {
         }
     }
 
-    private static void createRenderPass() {
-
-        try(MemoryStack stack = stackPush()) {
-
-            VkAttachmentDescription.Buffer attachments = VkAttachmentDescription.create(2);
-            VkAttachmentReference.Buffer attachmentRefs = VkAttachmentReference.create(2);
-
-            // Color attachments
-            VkAttachmentDescription colorAttachment = attachments.get(0);
-            colorAttachment.format(swapChainImageFormat);
-            colorAttachment.samples(VK_SAMPLE_COUNT_1_BIT);
-            colorAttachment.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR);
-            colorAttachment.storeOp(VK_ATTACHMENT_STORE_OP_STORE);
-            colorAttachment.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-            colorAttachment.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE);
-            colorAttachment.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-            colorAttachment.finalLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-            VkAttachmentReference colorAttachmentRef = attachmentRefs.get(0);
-            colorAttachmentRef.attachment(0);
-            colorAttachmentRef.layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-
-            // Depth-Stencil attachments
-
-            VkAttachmentDescription depthAttachment = attachments.get(1);
-            depthAttachment.format(findDepthFormat());
-            depthAttachment.samples(VK_SAMPLE_COUNT_1_BIT);
-            depthAttachment.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR);
-            depthAttachment.storeOp(VK_ATTACHMENT_STORE_OP_DONT_CARE);
-            depthAttachment.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-            depthAttachment.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE);
-            depthAttachment.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-            depthAttachment.finalLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-            VkAttachmentReference depthAttachmentRef = attachmentRefs.get(1);
-            depthAttachmentRef.attachment(1);
-            depthAttachmentRef.layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-            VkSubpassDescription.Buffer subpass = VkSubpassDescription.create(1);
-            subpass.pipelineBindPoint(VK_PIPELINE_BIND_POINT_GRAPHICS);
-            subpass.colorAttachmentCount(1);
-            subpass.pColorAttachments(VkAttachmentReference.create(1).put(0, colorAttachmentRef));
-            subpass.pDepthStencilAttachment(depthAttachmentRef);
-
-            // Order the previous frames' attachment writes against this subpass: the depth
-            // image is shared by all frames in flight, so the clear/depth-test of frame N+1
-            // must not run before frame N's depth writes (late fragment tests) finished;
-            // the layout transition out of PRESENT_SRC may otherwise happen before the
-            // imageAvailable wait of the submit.
-            VkSubpassDependency.Buffer dependency = VkSubpassDependency.create(1);
-            dependency.srcSubpass(VK_SUBPASS_EXTERNAL);
-            dependency.dstSubpass(0);
-            dependency.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                    | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
-            dependency.srcAccessMask(VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-            dependency.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
-            dependency.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-
-            VkRenderPassCreateInfo renderPassInfo = VkRenderPassCreateInfo.create();
-            renderPassInfo.sType(VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO);
-            renderPassInfo.pAttachments(attachments);
-            renderPassInfo.pSubpasses(subpass);
-            renderPassInfo.pDependencies(dependency);
-
-            LongBuffer pRenderPass = stack.mallocLong(1);
-
-            if(vkCreateRenderPass(device, renderPassInfo, null, pRenderPass) != VK_SUCCESS) {
-                throw new RuntimeException("Failed to create render pass");
-            }
-
-            renderPass = pRenderPass.get(0);
-        }
-    }
-
-    private static void createDepthResources() {
-
-        try(MemoryStack stack = stackPush()) {
-
-            int depthFormat = findDepthFormat();
-
-            LongBuffer pDepthImage = stack.mallocLong(1);
-            PointerBuffer pDepthImageMemory = stack.mallocPointer(1);
-
-            MemoryManager.createImage(
-                    swapChainExtent.width(), swapChainExtent.height(), 1,
-                    depthFormat,
-                    VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                    pDepthImage,
-                    pDepthImageMemory);
-
-            depthImage = pDepthImage.get(0);
-            depthImageMemory = pDepthImageMemory.get(0);
-
-            depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
-
-            // Explicitly transitioning the depth image
-            VkCommandBuffer commandBuffer = beginImmediateCmd();
-            transitionImageLayout(commandBuffer, depthImage, depthFormat,
-                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 1);
-            endImmediateCmd();
-
-        }
-    }
-
     private static int findSupportedFormat(IntBuffer formatCandidates, int tiling, int features) {
 
         try(MemoryStack stack = stackPush()) {
@@ -942,7 +831,7 @@ public class Vulkan {
         throw new RuntimeException("Failed to find supported format");
     }
 
-    private static int findDepthFormat() {
+    static int findDepthFormat() {
         return findSupportedFormat(
                 stackGet().ints(VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT),
                 VK_IMAGE_TILING_OPTIMAL,
@@ -1071,41 +960,6 @@ public class Vulkan {
 
         return scissor;
     }
-
-    private static void createFramebuffers() {
-
-        swapChainFramebuffers = new ArrayList<>(swapChainImageViews.size());
-
-        try(MemoryStack stack = stackPush()) {
-
-            LongBuffer attachments = stack.longs(VK_NULL_HANDLE, depthImageView);
-            //attachments = stack.mallocLong(1);
-            LongBuffer pFramebuffer = stack.mallocLong(1);
-
-            // Lets allocate the create info struct once and just update the pAttachments field each iteration
-            VkFramebufferCreateInfo framebufferInfo = VkFramebufferCreateInfo.create();
-            framebufferInfo.sType(VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO);
-            framebufferInfo.renderPass(renderPass);
-            framebufferInfo.width(swapChainExtent.width());
-            framebufferInfo.height(swapChainExtent.height());
-            framebufferInfo.layers(1);
-
-            for(long imageView : swapChainImageViews) {
-
-                attachments.put(0, imageView);
-
-                framebufferInfo.pAttachments(attachments);
-
-                if(vkCreateFramebuffer(device, framebufferInfo, null, pFramebuffer) != VK_SUCCESS) {
-                    throw new RuntimeException("Failed to create framebuffer");
-                }
-
-                swapChainFramebuffers.add(pFramebuffer.get(0));
-            }
-        }
-    }
-
-
 
     public static void copyStagingtoLocalBuffer(long srcBuffer, long dstBuffer, long dstOffset, long size) {
 
@@ -1270,10 +1124,11 @@ public class Vulkan {
             }
         }
 
-        // Feature support (anisotropy, wideLines, multiDrawIndirect) is queried and gated
-        // at device creation in createDevice; nothing to check here.
+        // Optional features are queried and gated at device creation (DeviceFeatures);
+        // only the baseline the frame structure depends on is checked here.
 
-        return indices.isComplete() && extensionsSupported && swapChainAdequate;
+        return indices.isComplete() && extensionsSupported && swapChainAdequate
+                && DeviceFeatures.meetsBaseline(device, instanceApiVersion);
     }
 
     private static boolean checkDeviceExtensionSupport(VkPhysicalDevice device) {
@@ -1397,6 +1252,8 @@ public class Vulkan {
 
     public static VkQueue getGraphicsQueue() { return graphicsQueue; }
 
+    public static QueueSetup getQueues() { return queueSetup; }
+
     public static long getSwapChain() { return swapChain; }
 
     public static boolean isSwapchainRetired() { return swapchainRetired; }
@@ -1409,16 +1266,6 @@ public class Vulkan {
     public static List<Long> getSwapChainImages() { return swapChainImages; }
 
     public static int getSwapChainImageFormat() { return swapChainImageFormat; }
-
-    public static long getRenderPass()
-    {
-        return renderPass;
-    }
-
-    public static List<Long> getSwapChainFramebuffers()
-    {
-        return swapChainFramebuffers;
-    }
 
     public static long getCommandPool()
     {

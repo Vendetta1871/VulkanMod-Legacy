@@ -25,6 +25,8 @@ public class DeviceInfo {
     public final String vendorId;
     public final String deviceName;
     public final String driverVersion;
+    /** Set once the logical device is created (B1). */
+    public DeviceFeatures features;
 
     static {
         cpuInfo = System.getProperty("os.arch", "unknown");

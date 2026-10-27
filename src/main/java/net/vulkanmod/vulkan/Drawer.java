@@ -62,8 +62,8 @@ public class Drawer {
     private ArrayList<Long> inFlightFences;
 
     private static int currentFrame = 0;
-    private final int commandBuffersCount = getSwapChainFramebuffers().size();
-    private boolean[] activeCommandBuffers = new boolean[getSwapChainFramebuffers().size()];
+    private final int commandBuffersCount = getSwapChainImages().size();
+    private boolean[] activeCommandBuffers = new boolean[getSwapChainImages().size()];
 
     /**
      * Swapchain image acquired for the frame currently being recorded. Command buffers,
@@ -343,23 +343,6 @@ public class Drawer {
             VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack);
             beginInfo.sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
 
-            VkRenderPassBeginInfo renderPassInfo = VkRenderPassBeginInfo.calloc(stack);
-            renderPassInfo.sType(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
-
-            renderPassInfo.renderPass(getRenderPass());
-
-            VkRect2D renderArea = VkRect2D.calloc(stack);
-            renderArea.offset(VkOffset2D.calloc(stack).set(0, 0));
-            renderArea.extent(getSwapchainExtent());
-            renderPassInfo.renderArea(renderArea);
-
-            VkClearValue.Buffer clearValues = VkClearValue.calloc(2, stack);
-            // TODO: revert to black (0,0,0,1) once the world/GUI pipelines are ported;
-            // the tint makes the Vulkan-presented frame recognizable during development.
-            clearValues.get(0).color().float32(VRenderSystem.clearColor);
-            clearValues.get(1).depthStencil().set(1.0f, 0);
-            renderPassInfo.pClearValues(clearValues);
-
             VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
 
             int err = vkBeginCommandBuffer(commandBuffer, beginInfo);
@@ -367,9 +350,11 @@ public class Drawer {
                 throw new RuntimeException("Failed to begin recording command buffer:" + err);
             }
 
-            renderPassInfo.framebuffer(getSwapChainFramebuffers().get(imageIndex));
-
-            vkCmdBeginRenderPass(commandBuffer, renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+            // B2: world and GUI render into the scene targets; endRenderPass() copies the
+            // result into the acquired swapchain image.
+            float[] clear = new float[4];
+            VRenderSystem.clearColor.get(0, clear);
+            SceneTargets.beginRendering(commandBuffer, clear, stack);
 
             VkViewport.Buffer pViewport = Vulkan.viewport(stack);
             vkCmdSetViewport(commandBuffer, 0, pViewport);
@@ -388,7 +373,11 @@ public class Drawer {
 
         VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
 
-        vkCmdEndRenderPass(commandBuffer);
+        try(MemoryStack stack = stackPush()) {
+            VkExtent2D extent = getSwapchainExtent();
+            SceneTargets.endAndPresentCopy(commandBuffer, getSwapChainImages().get(imageIndex),
+                    Vulkan.getSwapChainImageFormat(), extent.width(), extent.height(), stack);
+        }
 
         if(captureFile != null) {
             recordCapture(commandBuffer);
@@ -744,7 +733,9 @@ public class Drawer {
 
             submitInfo.waitSemaphoreCount(1);
             submitInfo.pWaitSemaphores(stackGet().longs(imageAvailableSemaphores.get(currentFrame)));
-            submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
+            // The swapchain image is first touched by the copy at the end of the frame
+            // (SceneTargets.endAndPresentCopy), so rendering does not wait for the acquire.
+            submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_TRANSFER_BIT));
 
             submitInfo.pSignalSemaphores(stackGet().longs(renderFinishedSemaphores.get(imageIndex)));
 
