@@ -111,6 +111,32 @@ public class GlStateManagerBlendM {
     }
 
     /*
+     * Colour logic op (R15): GuiTextField's selection box and mod GUIs toggle it; the
+     * state rides the pipeline key through Drawer.currentLogicOpState.
+     */
+    @Inject(method = "enableColorLogic()V", at = @At("HEAD"))
+    private static void vulkanmod$enableColorLogic(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.enableColorLogicOp();
+        }
+    }
+
+    @Inject(method = "disableColorLogic()V", at = @At("HEAD"))
+    private static void vulkanmod$disableColorLogic(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.disableColorLogicOp();
+        }
+    }
+
+    // colorLogicOp(LogicOp) delegates here.
+    @Inject(method = "colorLogicOp(I)V", at = @At("HEAD"))
+    private static void vulkanmod$colorLogicOp(int opcode, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.logicOp(opcode);
+        }
+    }
+
+    /*
      * Texture matrix mirror. The matrix ops run for the modelview/projection stacks too,
      * so each hook only acts while the texture mode is current (a static int compare);
      * VRenderSystem keeps the stack in sync with the calls Kirino sees.

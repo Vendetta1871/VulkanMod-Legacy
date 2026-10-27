@@ -60,6 +60,7 @@ public class Vulkan {
 
     // Set at device creation from the physical device's feature bits (see M3).
     public static boolean multiDrawIndirectSupported;
+    public static boolean logicOpSupported;
 
     public static final Set<String> VALIDATION_LAYERS;
     static {
@@ -586,6 +587,7 @@ public class Vulkan {
             // GlStateManager.colorLogicOp/logicOp mirror (N22): enable the feature when
             // present so a logic-op pipeline variant is valid if vanilla ever reaches it.
             deviceFeatures.logicOp(supportedFeatures.logicOp());
+            logicOpSupported = supportedFeatures.logicOp();
             // M3: vkCmdSetLineWidth must stay inside limits.lineWidthRange
             // (VUID-vkCmdSetLineWidth-lineWidth-00788). Without wideLines the range is
             // [1,1], so a mirrored glLineWidth above 1 has to clamp to 1.

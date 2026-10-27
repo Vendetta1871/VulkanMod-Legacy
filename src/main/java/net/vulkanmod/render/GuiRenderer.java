@@ -103,6 +103,8 @@ public class GuiRenderer {
     private static boolean glyphAlphaTest;
     private static int glyphAlphaFunc;
     private static float glyphAlphaRef;
+    // Logic op rides the pipeline variant key as well (R15).
+    private static Pipeline.LogicOpState glyphLogicOp = Pipeline.DEFAULT_LOGICOP_STATE;
     private static final org.joml.Matrix4f glyphModelView = new org.joml.Matrix4f();
     private static final org.joml.Matrix4f glyphProjection = new org.joml.Matrix4f();
     // Capped at 65536 vertices so the batch stays in the shared UINT16 index range (N25).
@@ -289,7 +291,8 @@ public class GuiRenderer {
                         || VRenderSystem.blendSrcAlpha != glyphBlendSrcA
                         || VRenderSystem.blendDstAlpha != glyphBlendDstA
                         || VRenderSystem.getAlphaFunc() != (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
-                        || VRenderSystem.getAlphaRef() != glyphAlphaRef)) {
+                        || VRenderSystem.getAlphaRef() != glyphAlphaRef
+                        || !Drawer.currentLogicOpState.equals(glyphLogicOp))) {
                     flushGlyphBatch();
                 }
                 if (glyphBatchVerts + vertexCount > GLYPH_BATCH_MAX) {
@@ -384,6 +387,7 @@ public class GuiRenderer {
         glyphAlphaTest = VRenderSystem.alphaTest;
         glyphAlphaFunc = VRenderSystem.alphaTestFunc;
         glyphAlphaRef = VRenderSystem.alphaTestRef;
+        glyphLogicOp = Drawer.currentLogicOpState;
         VRenderSystem.updateProjectionMatrix();
         VRenderSystem.updateModelViewMatrix();
         glyphModelView.set(VRenderSystem.getModelViewMatrix4f());
@@ -426,6 +430,7 @@ public class GuiRenderer {
             int liveAlphaFunc = VRenderSystem.alphaTestFunc;
             float liveAlphaRef = VRenderSystem.alphaTestRef;
             Pipeline.BlendState liveBlend = Drawer.currentBlendState;
+            Pipeline.LogicOpState liveLogicOp = Drawer.currentLogicOpState;
             VRenderSystem.alphaTest = glyphAlphaTest;
             VRenderSystem.alphaTestFunc = glyphAlphaFunc;
             VRenderSystem.alphaTestRef = glyphAlphaRef;
@@ -436,6 +441,7 @@ public class GuiRenderer {
                 applyGuiState(guiPipeline, glyphTexture, false);
                 VRenderSystem.setShaderColor(glyphR, glyphG, glyphB, glyphA);
                 Drawer.currentBlendState = glyphBlend;
+                Drawer.currentLogicOpState = glyphLogicOp;
                 glyphBatch.position(0);
                 Drawer.getInstance().draw(glyphBatch, 7, POSITION_TEX, n);
             } finally {
@@ -443,6 +449,7 @@ public class GuiRenderer {
                 VRenderSystem.alphaTestFunc = liveAlphaFunc;
                 VRenderSystem.alphaTestRef = liveAlphaRef;
                 Drawer.currentBlendState = liveBlend;
+                Drawer.currentLogicOpState = liveLogicOp;
             }
         } catch (Throwable t) {
             if (errorLogs++ < 3) {

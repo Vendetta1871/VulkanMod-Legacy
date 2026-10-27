@@ -77,7 +77,7 @@ public class VRenderSystem {
     public static int blendDstAlpha = 0; // GL_ZERO
 
     public static boolean logicOpEnabled = false;
-    public static int logicOpMode = 0;   // GL_CLEAR
+    public static int logicOpMode = 0x1503; // GL_COPY, the GL default
 
     public static float clearDepth = 1.0f;
     public static FloatBuffer clearColor = MemoryUtil.memAllocFloat(4);
@@ -554,7 +554,7 @@ public class VRenderSystem {
 
     public static void enableColorLogicOp() {
         logicOpEnabled = true;
-        Drawer.currentLogicOpState = new Pipeline.LogicOpState(true, logicOpMode);
+        applyLogicOpState();
     }
 
     public static void disableColorLogicOp() {
@@ -564,7 +564,14 @@ public class VRenderSystem {
 
     public static void logicOp(int mode) {
         logicOpMode = mode;
-        Drawer.currentLogicOpState = new Pipeline.LogicOpState(true, mode);
+        applyLogicOpState(); // L12: changing the op must not force-enable it
+    }
+
+    // A logic-op pipeline variant is only valid with the logicOp device feature.
+    private static void applyLogicOpState() {
+        Drawer.currentLogicOpState = logicOpEnabled && Vulkan.logicOpSupported
+                ? new Pipeline.LogicOpState(true, logicOpMode)
+                : Pipeline.DEFAULT_LOGICOP_STATE;
     }
 
     // --- Clear ---
@@ -673,6 +680,8 @@ public class VRenderSystem {
         alphaTestFunc = 516;
         alphaTestRef = 0.1f;
         logicOpEnabled = false;
+        logicOpMode = 0x1503;
+        Drawer.currentLogicOpState = Pipeline.DEFAULT_LOGICOP_STATE;
         fogState = FOG_LINEAR;
         fogStart = 0.95f;
         fogEnd = 1.0f;
