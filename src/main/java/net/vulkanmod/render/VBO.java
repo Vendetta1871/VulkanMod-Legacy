@@ -34,6 +34,8 @@ public class VBO {
     // ChunkArena.reset) are ignored so they cannot punch holes into new allocations.
     private long arenaGeneration;
     private int slot = -1;
+    /** Ray-tracing state of this section (T3), only when the RT scene is on. */
+    private net.vulkanmod.vulkan.rt.RtScene.Section rt;
     private static ByteBuffer scratch = org.lwjgl.system.MemoryUtil.memAlloc(1 << 16);
 
     /**
@@ -104,6 +106,10 @@ public class VBO {
         }
 
         this.vertexCount = vertexCount;
+        if (rt != null) {
+            // Old geometry is gone; a new BLAS follows the upload below.
+            net.vulkanmod.vulkan.rt.RtScene.onClose(rt);
+        }
         if (vertexCount <= 0) {
             return;
         }
@@ -118,6 +124,10 @@ public class VBO {
             arenaBytes = bytes;
             arenaGeneration = arena.generation();
             arena.upload(arenaOffset, interleaved, bytes);
+            if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
+                if (rt == null) rt = new net.vulkanmod.vulkan.rt.RtScene.Section();
+                net.vulkanmod.vulkan.rt.RtScene.onUpload(rt, arenaOffset, vertexCount);
+            }
         } catch (Throwable t) {
             if (arenaOffset >= 0) {
                 arena.free(arenaOffset, arenaBytes, arenaGeneration);
@@ -218,6 +228,14 @@ public class VBO {
 
             TerrainRenderer.countDraw(TerrainRenderer.currentLayer, vertexCount);
             ChunkBatcher.record(slot, arenaOffset / ChunkBatcher.STRIDE, vertexCount);
+            if (rt != null) {
+                net.minecraft.util.BlockRenderLayer layer = TerrainRenderer.currentLayer;
+                int mask = layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT ? 0
+                        : layer == net.minecraft.util.BlockRenderLayer.CUTOUT
+                        ? net.vulkanmod.vulkan.rt.RtScene.MASK_CUTOUT : net.vulkanmod.vulkan.rt.RtScene.MASK_OPAQUE;
+                net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, TerrainRenderer.pendingX(), TerrainRenderer.pendingY(),
+                        TerrainRenderer.pendingZ(), mask);
+            }
             if (TerrainRenderer.DUMP_MVP && TerrainRenderer.dumpFramesLeft > 0) {
                 TerrainRenderer.dumpSectionMatrix(slot);
             }
@@ -227,6 +245,9 @@ public class VBO {
     }
 
     public void close() {
+        if (rt != null) {
+            net.vulkanmod.vulkan.rt.RtScene.onClose(rt);
+        }
         // Release both possible storages unconditionally: a section may have been
         // uploaded through either path over its lifetime.
         if (arenaOffset >= 0) {

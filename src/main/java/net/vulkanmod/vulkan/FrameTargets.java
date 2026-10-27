@@ -95,6 +95,8 @@ public final class FrameTargets {
     }
 
     static void destroy() {
+        RtDebugView.destroy();
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.destroy();
         Fsr3Upscaler.destroy();
         Fsr1Upscaler.destroy();
         MotionVectorPass.destroy();
@@ -224,7 +226,19 @@ public final class FrameTargets {
             MotionVectorPass.record(cmd, depthAspect(), stack);
         }
 
-        if (MotionVectorPass.DEBUG_VIEW) {
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
+            net.vulkanmod.vulkan.rt.RtScene.record(cmd, stack);
+        }
+
+        if (RtDebugView.ACTIVE && net.vulkanmod.vulkan.rt.RtScene.enabled() && RtDebugView.record(cmd, stack)) {
+            StorageImage rt = RtDebugView.output;
+            blitIntoDisplay(cmd, rt.image, rt.width, rt.height, rt.format,
+                    VK_IMAGE_LAYOUT_GENERAL, org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, stack);
+            VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
+            depthToAttachment(depth.get(0), display);
+            pipelineBarrier(cmd, depth, stack);
+        } else if (MotionVectorPass.DEBUG_VIEW) {
             StorageImage mv = MotionVectorPass.motionVectors;
             blitIntoDisplay(cmd, mv.image, mv.width, mv.height, mv.format,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

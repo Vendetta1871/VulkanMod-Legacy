@@ -87,6 +87,11 @@ public class TerrainRenderer {
     private static double batchCamX, batchCamY, batchCamZ;
     private static int pendingX, pendingY, pendingZ;
 
+    /** Origin of the section being recorded (from preRenderChunk), for the RT scene. */
+    public static int pendingX() { return pendingX; }
+    public static int pendingY() { return pendingY; }
+    public static int pendingZ() { return pendingZ; }
+
     /** Records the current section's origin and the camera position (called from preRenderChunk). */
     public static void stashChunkTransform(int x, int y, int z, double camX, double camY, double camZ) {
         pendingX = x;

@@ -181,6 +181,10 @@ public class ChunkArena {
         TransferQueue.waitPendingFences();
 
         ++generation;
+        // Every section is gone; the frames that used their BLASes were waited for above.
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
+            net.vulkanmod.vulkan.rt.RtScene.onArenaReset();
+        }
         freeCount = 0;
         pendingHead = 0;
         pendingCount = 0;
