@@ -3,12 +3,13 @@ package net.vulkanmod.mixin.render;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.GuiMainMenu;
-import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.VulkanModMod;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -28,6 +29,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(GuiMainMenu.class)
 public class GuiMainMenuM {
 
+    // L14: the branding list is fixed after FML init; count it once (-1 = not yet).
+    // (The label needs no cache: NAME and BuildConfig.VERSION are constants, javac folds it.)
+    @Unique
+    private static int vulkanmod$brandingLines = -1;
+
     @Inject(method = "drawScreen(IIF)V",
             at = @At(value = "INVOKE",
                     target = "Lnet/minecraftforge/fml/common/FMLCommonHandler;getBrandings(Z)Ljava/util/List;",
@@ -36,14 +42,17 @@ public class GuiMainMenuM {
         if (!Initializer.isVulkanActive()) {
             return;
         }
-        Minecraft mc = Minecraft.getMinecraft();
-        FontRenderer font = mc.fontRenderer;
-        int screenHeight = new ScaledResolution(mc).getScaledHeight();
+        FontRenderer font = Minecraft.getMinecraft().fontRenderer;
+        if (vulkanmod$brandingLines < 0) {
+            vulkanmod$brandingLines = FMLCommonHandler.instance().getBrandings(true).size();
+        }
+        // GuiScreen.height is the scaled height setWorldAndResolution took from the same
+        // ScaledResolution this used to allocate every frame.
+        int screenHeight = ((GuiScreen) (Object) this).height;
 
         // Sit one line above the topmost branding row; the loader draws its lines upward
         // from height - 10, one per (FONT_HEIGHT + 1) pixels.
-        int lines = FMLCommonHandler.instance().getBrandings(true).size();
-        int y = screenHeight - (10 + lines * (font.FONT_HEIGHT + 1));
+        int y = screenHeight - (10 + vulkanmod$brandingLines * (font.FONT_HEIGHT + 1));
 
         GlStateManager.enableTexture2D();
         GlStateManager.disableLighting();
