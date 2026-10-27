@@ -119,6 +119,18 @@ public final class DeviceFeatures {
         e.fragmentStoresAndAtomics(fragmentStoresAndAtomics = f.fragmentStoresAndAtomics());
         e.shaderStorageImageReadWithoutFormat(storageImageReadWithoutFormat = f.shaderStorageImageReadWithoutFormat());
         e.shaderStorageImageWriteWithoutFormat(storageImageWriteWithoutFormat = f.shaderStorageImageWriteWithoutFormat());
+        // ffx-api picks its 16-bit shader permutations from what the device supports.
+        e.shaderInt16(f.shaderInt16());
+
+        // ffx-api resolves some functions by their KHR names (vkGetBufferMemoryRequirements2KHR),
+        // which the loader only returns when the promoted extension is enabled explicitly.
+        for (String ext : new String[]{
+                org.lwjgl.vulkan.KHRGetMemoryRequirements2.VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+                org.lwjgl.vulkan.KHRDedicatedAllocation.VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+                org.lwjgl.vulkan.KHRSynchronization2.VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+                org.lwjgl.vulkan.EXTSubgroupSizeControl.VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME}) {
+            if (available.contains(ext)) extensions.add(ext);
+        }
 
         chain = 0;
         if (v12) {
@@ -127,6 +139,7 @@ public final class DeviceFeatures {
             en12.bufferDeviceAddress(bufferDeviceAddress = sup12.bufferDeviceAddress());
             en12.scalarBlockLayout(scalarBlockLayout = sup12.scalarBlockLayout());
             en12.hostQueryReset(hostQueryReset = sup12.hostQueryReset());
+            en12.shaderFloat16(sup12.shaderFloat16());
 
             descriptorIndexing = sup12.descriptorIndexing()
                     && sup12.descriptorBindingPartiallyBound()
@@ -154,6 +167,9 @@ public final class DeviceFeatures {
             en13.dynamicRendering(dynamicRendering = sup13.dynamicRendering());
             en13.synchronization2(synchronization2 = sup13.synchronization2());
             en13.maintenance4(maintenance4 = sup13.maintenance4());
+            // ffx-api requests wave sizes when the device reports subgroup size control.
+            en13.subgroupSizeControl(sup13.subgroupSizeControl());
+            en13.computeFullSubgroups(sup13.computeFullSubgroups());
             en13.pNext(chain); chain = en13.address();
         }
 
