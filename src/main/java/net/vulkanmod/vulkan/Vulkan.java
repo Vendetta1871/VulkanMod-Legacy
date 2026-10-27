@@ -168,6 +168,9 @@ public class Vulkan {
     private static final int frameQueueSize = Math.min(Math.max(2, Initializer.CONFIG.frameQueueSize), 8);
 
     private static long swapChain;
+    // R10: set when a failed vkCreateSwapchainKHR retired swapChain (the spec retires
+    // oldSwapchain even on failure). It must neither be acquired from nor passed again.
+    private static boolean swapchainRetired;
     private static List<Long> swapChainImages;
     private static int swapChainImageFormat;
     private static VkExtent2D swapChainExtent;
@@ -293,7 +296,10 @@ public class Vulkan {
             // (they are destroyed only once the new one exists), but the framebuffers
             // referencing them are already gone: rebuild them so the renderer keeps
             // valid handles, then let the caller see the failure (N24).
+            // swapChainExtent/format still describe those views, because a failed
+            // create publishes nothing (R10). Schedule a retry for the next frame.
             createFramebuffers();
+            Drawer.shouldRecreate = true;
             throw e;
         }
 
@@ -342,25 +348,46 @@ public class Vulkan {
         }
 
         vkDeviceWaitIdle(device);
-        Pipeline.savePipelineCache();
 
-        Drawer drawer = Drawer.getInstance();
-        if(drawer != null) {
-            drawer.cleanUpSyncObjects();
+        // M20: init can stop anywhere between createLogicalDevice and createFramebuffers.
+        // Pipeline, Drawer and MemoryManager read getSwapChainImages() in their static
+        // initializers, so they are only touched once the swapchain exists, and every
+        // swapchain-level handle is checked on its own.
+        final boolean swapchainCreated = swapChainImages != null;
+
+        if(swapchainCreated) {
+            Pipeline.savePipelineCache();
+
+            Drawer drawer = Drawer.getInstance();
+            if(drawer != null) {
+                drawer.cleanUpSyncObjects();
+            }
         }
 
-        swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
-        swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
-        vkDestroySwapchainKHR(device, swapChain, null);
-        swapChain = 0L;
+        if(swapChainFramebuffers != null) {
+            swapChainFramebuffers.forEach(framebuffer -> vkDestroyFramebuffer(device, framebuffer, null));
+        }
+        if(swapChainImageViews != null) {
+            swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
+        }
+        if(swapChain != 0L) {
+            vkDestroySwapchainKHR(device, swapChain, null);
+            swapChain = 0L;
+        }
 
         // The view must go before the image it was created from (N24).
-        vkDestroyImageView(device, depthImageView, null);
-        MemoryManager.freeImage(depthImage, depthImageMemory);
+        if(depthImageView != 0L) {
+            vkDestroyImageView(device, depthImageView, null);
+        }
+        if(depthImage != 0L) {
+            MemoryManager.freeImage(depthImage, depthImageMemory);
+        }
 
         // Pipelines reference the render pass and the shared samplers, so they are
         // destroyed before both.
-        Pipeline.cleanUpAll();
+        if(swapchainCreated) {
+            Pipeline.cleanUpAll();
+        }
         net.vulkanmod.vulkan.texture.VulkanImage.destroySharedSamplers();
         if(renderPass != 0L) {
             vkDestroyRenderPass(device, renderPass, null);
@@ -377,12 +404,16 @@ public class Vulkan {
         // vmaDestroyAllocator does NOT destroy allocations that are still alive, so
         // every texture view, image and buffer still registered must go first, while
         // the device is valid - otherwise vkDestroyDevice reports leaked objects.
-        net.vulkanmod.vulkan.texture.VulkanImage.destroyAllViews();
-        MemoryManager.destroyAllResources();
+        if(swapchainCreated) {
+            net.vulkanmod.vulkan.texture.VulkanImage.destroyAllViews();
+            MemoryManager.destroyAllResources();
+        }
 
         // The allocator must go while the device is still valid - destroying the
         // device first leaks everything it still owns and aborts.
-        vmaDestroyAllocator(allocator);
+        if(allocator != 0L) {
+            vmaDestroyAllocator(allocator);
+        }
 
         vkDestroyDevice(device, null);
 
@@ -674,7 +705,10 @@ public class Vulkan {
 
         try(MemoryStack stack = stackPush()) {
 
-            long oldSwapchain = swapChain != 0L ? swapChain : VK_NULL_HANDLE;
+            // R10: a retired swapchain must not be passed again as oldSwapchain
+            // (VUID-VkSwapchainCreateInfoKHR-oldSwapchain-01933); it is still destroyed
+            // below once the new one exists.
+            long oldSwapchain = swapChain != 0L && !swapchainRetired ? swapChain : VK_NULL_HANDLE;
 
             SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice, stack);
 
@@ -700,13 +734,12 @@ public class Vulkan {
             createInfo.sType(VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
             createInfo.surface(surface);
 
-            // Image settings
-            swapChainImageFormat = surfaceFormat.format();
-            swapChainExtent = VkExtent2D.create().set(extent);
-
+            // Image settings. R10: swapChainImageFormat/swapChainExtent describe the
+            // swapchain that exists, so they are published only after a successful
+            // create; a failed recreation then rebuilds its framebuffers with the size
+            // of the views it still has.
             createInfo.minImageCount(imageCount.get(0));
-//            createInfo.imageFormat(surfaceFormat.format());
-            createInfo.imageFormat(swapChainImageFormat);
+            createInfo.imageFormat(surfaceFormat.format());
             createInfo.imageColorSpace(surfaceFormat.colorSpace());
             createInfo.imageExtent(extent);
             createInfo.imageArrayLayers(1);
@@ -732,14 +765,25 @@ public class Vulkan {
 
             LongBuffer pSwapChain = stack.longs(VK_NULL_HANDLE);
 
-            if(vkCreateSwapchainKHR(device, createInfo, null, pSwapChain) != VK_SUCCESS) {
-                throw new RuntimeException("Failed to create swap chain");
+            int result = vkCreateSwapchainKHR(device, createInfo, null, pSwapChain);
+            if(result != VK_SUCCESS) {
+                // Passing oldSwapchain retired it even though the create failed (R10).
+                if(oldSwapchain != VK_NULL_HANDLE) {
+                    swapchainRetired = true;
+                }
+                throw new RuntimeException("Failed to create swap chain: " + result);
             }
 
-            if(oldSwapchain != VK_NULL_HANDLE) {
+            swapChainImageFormat = surfaceFormat.format();
+            swapChainExtent = VkExtent2D.create().set(extent);
+
+            // Destroy the previous swapchain whenever one exists - also a retired one,
+            // for which oldSwapchain stayed VK_NULL_HANDLE.
+            if(swapChain != 0L) {
                 swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
                 vkDestroySwapchainKHR(device, swapChain, null);
             }
+            swapchainRetired = false;
 
             swapChain = pSwapChain.get(0);
 
@@ -1336,6 +1380,8 @@ public class Vulkan {
     public static VkQueue getGraphicsQueue() { return graphicsQueue; }
 
     public static long getSwapChain() { return swapChain; }
+
+    public static boolean isSwapchainRetired() { return swapchainRetired; }
 
     public static VkExtent2D getSwapchainExtent()
     {

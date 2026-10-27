@@ -25,13 +25,13 @@ public abstract class MemoryManager {
     private static final int Frames = Vulkan.getSwapChainImages().size();
 
     /**
-     * Everything needed to destroy a buffer once its grace period expires. The handle,
-     * allocation and mapped pointer are snapshotted at enqueue time because several
+     * Everything needed to destroy a buffer once its grace period expires. The handle
+     * and allocation are snapshotted at enqueue time because several
      * buffer types resize in place (addToFreeable(this) followed by a fresh createBuffer
      * on the same object); reading the live Buffer at free time would destroy the new
      * VkBuffer instead of the old one.
      */
-    private record PendingFree(Buffer.BufferInfo info, PointerBuffer data) {}
+    private record PendingFree(Buffer.BufferInfo info) {}
 
     private static List<Pair<Pair<Long, Long>, Integer>> freeableBuffers = new ArrayList<>();
     private static List<Pair<PendingFree, Integer>> freeableBuffers2 = new ArrayList<>();
@@ -44,11 +44,11 @@ public abstract class MemoryManager {
     private static final Long2LongOpenHashMap buffers = new Long2LongOpenHashMap();
     private static final Long2LongOpenHashMap images = new Long2LongOpenHashMap();
 
-    // L9: allocations carrying a persistent Map() mapping. VMA forbids
-    // vmaDestroyBuffer on a mapped allocation, so every destroy path unmaps first
-    // through this set.
-    private static final it.unimi.dsi.fastutil.longs.LongOpenHashSet mappedAllocations =
-            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    // L9: allocation -> the PointerBuffer Map() returned for it. VMA forbids
+    // vmaDestroyBuffer on a mapped allocation, so every destroy path unmaps first and
+    // releases the pointer buffer here, its only owner (see unmapIfMapped).
+    private static final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<PointerBuffer> mappedAllocations =
+            new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
 
     private static int deviceMemory = 0;
     private static int nativeMemory = 0;
@@ -221,9 +221,18 @@ public abstract class MemoryManager {
         PointerBuffer data = MemoryUtil.memAllocPointer(1);
 
         vmaMapMemory(allocator, allocation, data);
-        mappedAllocations.add(allocation);
+        mappedAllocations.put(allocation, data);
 
         return data;
+    }
+
+    /** Undoes a persistent Map(): unmaps the allocation and frees its PointerBuffer (L9). */
+    private static void unmapIfMapped(long allocation) {
+        PointerBuffer mapped = mappedAllocations.remove(allocation);
+        if(mapped != null) {
+            vmaUnmapMemory(allocator, allocation);
+            MemoryUtil.memFree(mapped);
+        }
     }
 
     public static void Copy(PointerBuffer data, Consumer<PointerBuffer> consumer) {
@@ -240,9 +249,7 @@ public abstract class MemoryManager {
         // L9: VMA requires the allocation to be unmapped before destruction - the old
         // "vmaDestroyBuffer unmaps for you" assumption was wrong. HOST_MEM buffers keep
         // a persistent Map() mapping for their whole lifetime.
-        if(mappedAllocations.remove(allocation)) {
-            vmaUnmapMemory(allocator, allocation);
-        }
+        unmapIfMapped(allocation);
         vmaDestroyBuffer(allocator, buffer, allocation);
 
     }
@@ -264,9 +271,9 @@ public abstract class MemoryManager {
         Buffer.BufferInfo bufferInfo = buffer.getBufferInfo();
 
         if(buffers.containsKey(bufferInfo.id())){
-            // Snapshot the mapped pointer too: Map() allocated a native PointerBuffer for
-            // it, and in-place resizes replace buffer.data, leaking the old mapping.
-            freeableBuffers2.add(new Pair<>(new PendingFree(bufferInfo, buffer.data), 0));
+            // The old mapping and its PointerBuffer are released by freeBuffer through
+            // mappedAllocations, keyed by the snapshotted allocation (L9).
+            freeableBuffers2.add(new Pair<>(new PendingFree(bufferInfo), 0));
 
             buffers.remove(bufferInfo.id());
         }
@@ -314,12 +321,6 @@ public abstract class MemoryManager {
                 Buffer.BufferInfo info = pending.info();
                 freeBuffer(info.id(), info.allocation());
 
-                // Release the mapped-pointer buffer Map() allocated; freeBuffer has
-                // just unmapped the allocation (chunk VBOs churn constantly).
-                if(pending.data() != null) {
-                    MemoryUtil.memFree(pending.data());
-                }
-
                 if(info.type() == MemoryType.Type.DEVICE_LOCAL) {
                     deviceMemory -= info.bufferSize();
                 } else {
@@ -365,9 +366,6 @@ public abstract class MemoryManager {
         for(Pair<PendingFree, Integer> pair : freeableBuffers2) {
             PendingFree pending = pair.first;
             freeBuffer(pending.info().id(), pending.info().allocation());
-            if(pending.data() != null) {
-                MemoryUtil.memFree(pending.data());
-            }
         }
         freeableBuffers2.clear();
 
@@ -382,6 +380,8 @@ public abstract class MemoryManager {
         images.clear();
 
         for(Long2LongMap.Entry entry : buffers.long2LongEntrySet()) {
+            // Live persistently mapped buffers (frame VBOs, staging, UBOs, batch SSBOs) (L9).
+            unmapIfMapped(entry.getLongValue());
             vmaDestroyBuffer(allocator, entry.getLongKey(), entry.getLongValue());
         }
         buffers.clear();

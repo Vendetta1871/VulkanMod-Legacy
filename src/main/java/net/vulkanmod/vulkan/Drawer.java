@@ -92,6 +92,14 @@ public class Drawer {
     // consumed by a submit before the swapchain cycle may touch the sync objects).
     private boolean recreateAfterPresent;
 
+    /**
+     * True from a successful vkAcquireNextImageKHR until the submit that waits on
+     * imageAvailable[currentFrame] succeeded. A throw in between leaves it set, so the
+     * retry renders into the same imageIndex instead of acquiring again on a semaphore
+     * with a pending signal (R9, VUID-vkAcquireNextImageKHR-semaphore-01286).
+     */
+    private boolean imageAcquired;
+
     public Drawer()
     {
         this(2000000, 200000);
@@ -217,74 +225,94 @@ public class Drawer {
             return;
         }
 
-        // Only wait on a fence that a successful submit will signal (see fencePending).
-        if(fencePending[currentFrame]) {
-            vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
-        }
-        fencePending[currentFrame] = false;
+        if(imageAcquired) {
+            // R9: an earlier call acquired imageIndex and threw before the frame was
+            // submitted. The image and the pending signal of imageAvailable[currentFrame]
+            // are still ours; the fence wait, the rewinds and the frees already ran, so
+            // this call skips straight to recording and reuses imageIndex.
+            recreateAfterPresent |= shouldRecreate;
+            shouldRecreate = false;
+        } else {
+            // Only wait on a fence that a successful submit will signal (see fencePending).
+            if(fencePending[currentFrame]) {
+                vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
+            }
+            fencePending[currentFrame] = false;
 
-        // Uploads issued between frames (animated tiles in runTick etc.) submit through
-        // the TransferQueue; the frame fence waited on above does not cover those
-        // submits. Retire them before rewinding the staging slot, or the next in-frame
-        // upload would overwrite bytes the GPU copy has not read yet (the minimized
-        // path below already does the same). No-op when nothing is pending.
-        TransferQueue.waitPendingFences();
+            // Uploads issued between frames (animated tiles in runTick etc.) submit through
+            // the TransferQueue; the frame fence waited on above does not cover those
+            // submits. Retire them before rewinding the staging slot, or the next in-frame
+            // upload would overwrite bytes the GPU copy has not read yet (the minimized
+            // path below already does the same). No-op when nothing is pending.
+            TransferQueue.waitPendingFences();
 
-        // The frame fence just waited on covers every copy submitted with the previous
-        // occupant of this frame slot (staging included), so the CPU-side allocators
-        // can be rewound here. Doing it at frame start instead of frame end also keeps
-        // the staging buffer safe while minimized (endRenderPass() is skipped then).
-        resetFrameBuffers(currentFrame);
+            // The frame fence just waited on covers every copy submitted with the previous
+            // occupant of this frame slot (staging included), so the CPU-side allocators
+            // can be rewound here. Doing it at frame start instead of frame end also keeps
+            // the staging buffer safe while minimized (endRenderPass() is skipped then).
+            resetFrameBuffers(currentFrame);
 
-        // A frame abandoned between the begin and the end of its transfer command
-        // buffer (submit failure) would leave the flag set; the buffer itself is reset
-        // on its next lazy use.
-        frameTransferRecording = false;
+            // A frame abandoned between the begin and the end of its transfer command
+            // buffer (submit failure) would leave the flag set; the buffer itself is reset
+            // on its next lazy use.
+            frameTransferRecording = false;
 
-        // TransferQueue pool slots are recycled by index; rewinding it once per frame
-        // bounds the pool to the uploads issued between two frames. beginCommands()
-        // still waits on a slot's own fence before reuse, so this is bookkeeping only.
-        TransferQueue.resetCurrent();
+            // TransferQueue pool slots are recycled by index; rewinding it once per frame
+            // bounds the pool to the uploads issued between two frames. beginCommands()
+            // still waits on a slot's own fence before reuse, so this is bookkeeping only.
+            TransferQueue.resetCurrent();
 
-        // Synchronous: freeBuffers mutates the MemoryManager handle maps that the
-        // render thread writes on every chunk upload, so it must not run on a pool
-        // thread (N5). It is cheap - it only frees entries whose frame boundary has
-        // already retired.
-        MemoryManager.freeBuffers();
+            // Synchronous: freeBuffers mutates the MemoryManager handle maps that the
+            // render thread writes on every chunk upload, so it must not run on a pool
+            // thread (N5). It is cheap - it only frees entries whose frame boundary has
+            // already retired.
+            MemoryManager.freeBuffers();
 
-        // Acquire the swapchain image before recording so the frame is rendered into the
-        // image that is later submitted and presented. The acquired index differs from
-        // currentFrame as soon as the presentation engine hands images out of order
-        // (IMMEDIATE/MAILBOX, or after a swapchain recreation).
-        try(MemoryStack stack = stackPush()) {
-
-            IntBuffer pImageIndex = stack.mallocInt(1);
-
-            int vkResult = vkAcquireNextImageKHR(device, Vulkan.getSwapChain(), VUtil.UINT64_MAX,
-                    imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex);
-
-            if(vkResult == VK_ERROR_OUT_OF_DATE_KHR) {
-                // No image was acquired. Recreate before the next acquire and drop this
-                // frame; the frame-slot sync objects survive the recreation (they are
-                // not swapchain objects), so the implementation-defined signal of a
-                // failed acquire can never dangle on a semaphore destroy (N10).
+            // R10: a failed vkCreateSwapchainKHR retired the old swapchain; acquiring from
+            // a retired swapchain is invalid (VUID-vkAcquireNextImageKHR-swapchain-01285).
+            // Retry the creation and drop the frame, exactly like the OUT_OF_DATE path
+            // below (nothing is acquired yet, so no semaphore is involved).
+            if(Vulkan.isSwapchainRetired()) {
                 recreateSwapChain();
-                // The frame is dropped: nothing was recorded yet, endRenderPass()
-                // and submitDraw() bail out on skipRendering.
                 skipRendering = true;
                 return;
-            } else if(vkResult != VK_SUCCESS) {
-                throw new RuntimeException("Cannot get image: " + vkResult);
             }
 
-            imageIndex = pImageIndex.get(0);
+            // Acquire the swapchain image before recording so the frame is rendered into the
+            // image that is later submitted and presented. The acquired index differs from
+            // currentFrame as soon as the presentation engine hands images out of order
+            // (IMMEDIATE/MAILBOX, or after a swapchain recreation).
+            try(MemoryStack stack = stackPush()) {
 
-            // SUBOPTIMAL or a pending resize request: the acquire already signaled the
-            // semaphore, so this frame must be rendered and presented before the
-            // recreation. Dropping it here would leave that signal pending when the
-            // semaphore is destroyed or re-acquired (N10).
-            recreateAfterPresent = shouldRecreate || vkResult == VK_SUBOPTIMAL_KHR;
-            shouldRecreate = false;
+                IntBuffer pImageIndex = stack.mallocInt(1);
+
+                int vkResult = vkAcquireNextImageKHR(device, Vulkan.getSwapChain(), VUtil.UINT64_MAX,
+                        imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex);
+
+                if(vkResult == VK_ERROR_OUT_OF_DATE_KHR) {
+                    // No image was acquired. Recreate before the next acquire and drop this
+                    // frame; the frame-slot sync objects survive the recreation (they are
+                    // not swapchain objects), so the implementation-defined signal of a
+                    // failed acquire can never dangle on a semaphore destroy (N10).
+                    recreateSwapChain();
+                    // The frame is dropped: nothing was recorded yet, endRenderPass()
+                    // and submitDraw() bail out on skipRendering.
+                    skipRendering = true;
+                    return;
+                } else if(vkResult != VK_SUCCESS) {
+                    throw new RuntimeException("Cannot get image: " + vkResult);
+                }
+
+                imageIndex = pImageIndex.get(0);
+                imageAcquired = true;
+
+                // SUBOPTIMAL or a pending resize request: the acquire already signaled the
+                // semaphore, so this frame must be rendered and presented before the
+                // recreation. Dropping it here would leave that signal pending when the
+                // semaphore is destroyed or re-acquired (N10).
+                recreateAfterPresent = shouldRecreate || vkResult == VK_SUBOPTIMAL_KHR;
+                shouldRecreate = false;
+            }
         }
 
         resetDescriptors();
@@ -723,6 +751,8 @@ public class Drawer {
                 throw new RuntimeException("Failed to submit draw command buffer: " + vkResult);
             }
             fencePending[currentFrame] = true;
+            // The submit consumed the acquire's semaphore signal: the next frame acquires (R9).
+            imageAcquired = false;
 
             if(captureRecorded) {
                 vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
