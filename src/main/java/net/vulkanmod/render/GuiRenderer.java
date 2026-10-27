@@ -80,11 +80,13 @@ public class GuiRenderer {
     private static final int IM_STRIDE = 20; // POSITION_TEX: 3 + 2 floats
 
     // --- glyph batching (M11/N18) ---
-    // FontRenderer emits one begin(QUADS)+4-vertex+draw per glyph with the matrix, the
-    // texture and the colour constant across the whole string. Consecutive POSITION_TEX
-    // quad draws that still share all three accumulate here and go out as one Vulkan
-    // draw; any other draw, an immediate-mode run, a blit or the frame end flushes the
-    // batch first, so paint order is preserved. The matrices, colour and blend are
+    // Two producers share one run: BufferBuilder POSITION_TEX quads (HUD icons,
+    // drawTexturedModalRect) and FontRenderer glyphs - one 4-vertex GL_TRIANGLE_STRIP
+    // per glyph inside renderString, re-ordered into a quad (appendImmediateGlyph).
+    // Consecutive draws that share texture, matrix, colour, blend, alpha and logic op
+    // accumulate here and go out as one Vulkan draw; any other draw, a non-glyph
+    // immediate run, a string boundary, a blit or the frame end flushes the batch
+    // first, so paint order is preserved. The matrices, colour and blend are
     // captured when the batch opens - state may move on before the flush (a colour code
     // or a mod's translate with no draw in between), and the batched vertices belong to
     // the state they were captured under.
@@ -92,6 +94,9 @@ public class GuiRenderer {
     private static int glyphBatchVerts;
     private static VulkanImage glyphTexture;
     private static long glyphMatrixVersion;
+    // True when the run holds world-space text (entity pass): flushed with the world
+    // text state (live depth and fog, cull off) instead of the GUI overrides.
+    private static boolean glyphWorld;
     private static float glyphR, glyphG, glyphB, glyphA;
     private static Pipeline.BlendState glyphBlend;
     // The blend factors are part of the batch identity: the crosshair draws its quad
@@ -288,22 +293,12 @@ public class GuiRenderer {
             }
         }
 
-        // Glyph batching (M11/N18): FontRenderer's per-glyph quad draws share texture,
-        // colour and matrix across the string; accumulate them into one draw.
+        // Glyph batching (M11/N18): consecutive icon quads that share texture, colour
+        // and matrix accumulate into one draw.
         if (format == POSITION_TEX && drawMode == 7) {
             if (vertexCount <= GLYPH_BATCH_MAX) {
                 long version = VRenderSystem.getMatrixVersion();
-                if (glyphBatchVerts > 0 && (texture != glyphTexture || version != glyphMatrixVersion
-                        || VRenderSystem.trackedColorR != glyphR || VRenderSystem.trackedColorG != glyphG
-                        || VRenderSystem.trackedColorB != glyphB || VRenderSystem.trackedColorA != glyphA
-                        || VRenderSystem.blendEnabled != glyphBlendEnabled
-                        || VRenderSystem.blendSrcRgb != glyphBlendSrc
-                        || VRenderSystem.blendDstRgb != glyphBlendDst
-                        || VRenderSystem.blendSrcAlpha != glyphBlendSrcA
-                        || VRenderSystem.blendDstAlpha != glyphBlendDstA
-                        || VRenderSystem.getAlphaFunc() != (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
-                        || VRenderSystem.getAlphaRef() != glyphAlphaRef
-                        || !Drawer.currentLogicOpState.equals(glyphLogicOp)
+                if (glyphBatchVerts > 0 && (glyphWorld || !glyphStateMatches(texture, version)
                         || !liveModelViewMatchesBatch())) {
                     flushGlyphBatch();
                 }
@@ -311,7 +306,7 @@ public class GuiRenderer {
                     flushGlyphBatch();
                 }
                 if (glyphBatchVerts == 0) {
-                    startGlyphBatch(texture, version);
+                    startGlyphBatch(texture, version, false);
                 }
                 appendGlyphBatch(buffer, vertexCount);
                 return;
@@ -378,12 +373,28 @@ public class GuiRenderer {
         }
     }
 
+    /** True when the live state still matches the state the open batch was captured under. */
+    private static boolean glyphStateMatches(VulkanImage texture, long version) {
+        return texture == glyphTexture && version == glyphMatrixVersion
+                && VRenderSystem.trackedColorR == glyphR && VRenderSystem.trackedColorG == glyphG
+                && VRenderSystem.trackedColorB == glyphB && VRenderSystem.trackedColorA == glyphA
+                && VRenderSystem.blendEnabled == glyphBlendEnabled
+                && VRenderSystem.blendSrcRgb == glyphBlendSrc
+                && VRenderSystem.blendDstRgb == glyphBlendDst
+                && VRenderSystem.blendSrcAlpha == glyphBlendSrcA
+                && VRenderSystem.blendDstAlpha == glyphBlendDstA
+                && VRenderSystem.getAlphaFunc() == (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
+                && VRenderSystem.getAlphaRef() == glyphAlphaRef
+                && Drawer.currentLogicOpState.equals(glyphLogicOp);
+    }
+
     /** Opens a glyph batch: captures the state the accumulated quads belong to (M11/N18). */
-    private static void startGlyphBatch(VulkanImage texture, long version) {
+    private static void startGlyphBatch(VulkanImage texture, long version, boolean world) {
         if (glyphBatch == null) {
             glyphBatch = MemoryUtil.memAlloc(GLYPH_BATCH_MAX * IM_STRIDE);
         }
         glyphBatch.position(0);
+        glyphWorld = world;
         glyphTexture = texture;
         glyphMatrixVersion = version;
         glyphR = VRenderSystem.trackedColorR;
@@ -430,6 +441,38 @@ public class GuiRenderer {
         flushGlyphBatch();
     }
 
+    /**
+     * Appends the FontRenderer glyph just captured in imBuffer (M11/N18). Inside
+     * renderString no matrix op runs, so the matrix version alone proves the modelview
+     * captured at batch start is still current - no glGetFloatv per glyph.
+     */
+    private static void appendImmediateGlyph(VulkanImage texture) {
+        long version = VRenderSystem.getMatrixVersion();
+        if (glyphBatchVerts > 0 && (glyphWorld != imWorldText || !glyphStateMatches(texture, version))) {
+            flushGlyphBatch();
+        }
+        if (glyphBatchVerts + 4 > GLYPH_BATCH_MAX) {
+            flushGlyphBatch();
+        }
+        if (glyphBatchVerts == 0) {
+            startGlyphBatch(texture, version, imWorldText);
+        }
+        // Strip order v0 v1 v2 v3 -> quad order v0 v1 v3 v2: the same two triangles.
+        copyImVertex(0);
+        copyImVertex(1);
+        copyImVertex(3);
+        copyImVertex(2);
+        glyphBatchVerts += 4;
+    }
+
+    /** imBuffer and the batch share the POSITION_TEX layout (3 + 2 floats). */
+    private static void copyImVertex(int i) {
+        int o = i * IM_STRIDE;
+        glyphBatch.putFloat(imBuffer.getFloat(o)).putFloat(imBuffer.getFloat(o + 4))
+                .putFloat(imBuffer.getFloat(o + 8)).putFloat(imBuffer.getFloat(o + 12))
+                .putFloat(imBuffer.getFloat(o + 16));
+    }
+
     /** Copies one glyph's four textured vertices into the batch (positions are raw). */
     private static void appendGlyphBatch(BufferBuilder buffer, int vertexCount) {
         ByteBuffer src = buffer.getByteBuffer();
@@ -467,6 +510,9 @@ public class GuiRenderer {
             float liveAlphaRef = VRenderSystem.alphaTestRef;
             Pipeline.BlendState liveBlend = Drawer.currentBlendState;
             Pipeline.LogicOpState liveLogicOp = Drawer.currentLogicOpState;
+            // applyWorldTextState overrides cull and the colour mask (N17).
+            boolean liveCull = VRenderSystem.cull;
+            int liveColorMask = VRenderSystem.colorMask;
             VRenderSystem.alphaTest = glyphAlphaTest;
             VRenderSystem.alphaTestFunc = glyphAlphaFunc;
             VRenderSystem.alphaTestRef = glyphAlphaRef;
@@ -474,7 +520,11 @@ public class GuiRenderer {
                 VRenderSystem.applyModelViewMatrix(glyphModelView);
                 VRenderSystem.applyProjectionMatrix(glyphProjection);
                 VRenderSystem.calculateMVP();
-                applyGuiState(guiPipeline, glyphTexture, false);
+                if (glyphWorld) {
+                    applyWorldTextState(guiPipeline, glyphTexture, false);
+                } else {
+                    applyGuiState(guiPipeline, glyphTexture, false);
+                }
                 VRenderSystem.setShaderColor(glyphR, glyphG, glyphB, glyphA);
                 Drawer.currentBlendState = glyphBlend;
                 Drawer.currentLogicOpState = glyphLogicOp;
@@ -486,6 +536,10 @@ public class GuiRenderer {
                 VRenderSystem.alphaTestRef = liveAlphaRef;
                 Drawer.currentBlendState = liveBlend;
                 Drawer.currentLogicOpState = liveLogicOp;
+                if (glyphWorld) {
+                    VRenderSystem.cull = liveCull;
+                    VRenderSystem.colorMask = liveColorMask;
+                }
             }
         } catch (Throwable t) {
             if (errorLogs++ < 3) {
@@ -570,8 +624,15 @@ public class GuiRenderer {
      * shows it mirrored.
      */
     private static void applyWorldTextState(Pipeline pipeline, VulkanImage texture) {
-        VRenderSystem.updateProjectionMatrix();
-        VRenderSystem.updateModelViewMatrix();
+        applyWorldTextState(pipeline, texture, true);
+    }
+
+    /** @param readMatrices false when the caller installed its own captured matrices. */
+    private static void applyWorldTextState(Pipeline pipeline, VulkanImage texture, boolean readMatrices) {
+        if (readMatrices) {
+            VRenderSystem.updateProjectionMatrix();
+            VRenderSystem.updateModelViewMatrix();
+        }
 
         VRenderSystem.disableCull();
 
@@ -590,8 +651,11 @@ public class GuiRenderer {
 
     public static void immediateBegin(int mode) {
         // A pending glyph batch was submitted before this run's draw, so it must go out
-        // first (submission order is the GUI's paint order).
-        flushGlyphBatch();
+        // first (submission order is the GUI's paint order) - unless this strip is the
+        // next glyph of the same string, which immediateEnd may append to the run.
+        if (!inFontString || mode != GL11.GL_TRIANGLE_STRIP) {
+            flushGlyphBatch();
+        }
         // World-space text (name tags, sign text) is drawn by FontRenderer inside the
         // entity pass; it replays with the live world matrices instead of the overlay.
         boolean worldText = !guiPass && EntityRenderer.isEntityPass();
@@ -648,6 +712,13 @@ public class GuiRenderer {
             if (texture == null) {
                 return;
             }
+            // M11/N18: a FontRenderer glyph (one 4-vertex strip inside renderString)
+            // joins the glyph run instead of costing a draw and a glGetFloatv each.
+            if (inFontString && imMode == GL11.GL_TRIANGLE_STRIP && count == 4) {
+                appendImmediateGlyph(texture);
+                return;
+            }
+            flushGlyphBatch(); // immediateBegin kept the run open for this strip
             if (imWorldText) {
                 // applyWorldTextState overrides cull and the colour mask; the rest of
                 // the entity pass must not inherit them (N17).
