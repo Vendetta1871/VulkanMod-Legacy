@@ -56,10 +56,15 @@ public final class CameraHistory {
      * Records the main camera of this frame (first terrain layer).
      * @param modelView     the rotation-only camera model-view
      * @param projRemapped  the unjittered projection, remapped to Vulkan depth
+     * @param glProjection  the raw GL projection (near/far/FOV are read from it)
      */
-    public static void captureMain(Matrix4f modelView, Matrix4f projRemapped) {
+    public static void captureMain(Matrix4f modelView, Matrix4f projRemapped, Matrix4f glProjection) {
         if (valid) return;
         projRemapped.mul(modelView, viewProj);
+        // GL perspective: m22 = -(f+n)/(f-n), m32 = -2fn/(f-n), m11 = cot(fovY/2).
+        near = glProjection.m32() / (glProjection.m22() - 1.0f);
+        far = glProjection.m32() / (glProjection.m22() + 1.0f);
+        fovY = (float) (2.0 * Math.atan(1.0 / glProjection.m11()));
 
         Minecraft mc = Minecraft.getMinecraft();
         Entity e = mc.getRenderViewEntity();
@@ -86,7 +91,13 @@ public final class CameraHistory {
         prevValid = false;
     }
 
+    private static float near = 0.05f, far = 256.0f, fovY = 1.22f;
+
     public static boolean hasPrevious() { return prevValid && valid; }
+    public static float near() { return near; }
+    public static float far() { return far; }
+    /** Vertical field of view in radians. */
+    public static float fovY() { return fovY; }
     public static Matrix4f viewProj() { return viewProj; }
     public static Matrix4f prevViewProj() { return prevViewProj; }
     public static double camX() { return camX; }
@@ -96,7 +107,7 @@ public final class CameraHistory {
     public static double prevCamY() { return prevCamY; }
     public static double prevCamZ() { return prevCamZ; }
 
-    /** Jitter in render-resolution pixels, in [-0.5, 0.5]. */
+    /** Jitter in render-resolution pixels, in [-0.5, 0.5]; +y points down the image (FSR convention). */
     public static float jitterX() { return jitterX; }
     public static float jitterY() { return jitterY; }
 
@@ -106,7 +117,8 @@ public final class CameraHistory {
 
     /**
      * Writes the clip-space jitter translation into a post-projection matrix:
-     * {@code x' = x + (2 jx / W) w}, likewise y. Applied only in the scene phase.
+     * {@code x' = x + (2 jx / W) w}, {@code y' = y - (2 jy / H) w} (NDC +y is the top row).
+     * Applied only in the scene phase.
      */
     public static void applyJitter(Matrix4f clipRemap) {
         if (FrameTargets.phase() != FrameTargets.Phase.SCENE || (jitterX == 0.0f && jitterY == 0.0f)) {
@@ -114,7 +126,7 @@ public final class CameraHistory {
             return;
         }
         clipRemap.m30(2.0f * jitterX / FrameTargets.scene.width());
-        clipRemap.m31(2.0f * jitterY / FrameTargets.scene.height());
+        clipRemap.m31(-2.0f * jitterY / FrameTargets.scene.height());
     }
 
     /** Same phase count as FSR (ffxFsr3GetJitterPhaseCount): 8 * (display / render)^2. */

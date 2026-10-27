@@ -285,7 +285,7 @@ public class VRenderSystem {
         SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
         // History keeps the unjittered camera; draws get the jittered one.
         DEPTH_REMAP.mul(SCRATCH_P, SCRATCH_T1);
-        net.vulkanmod.render.CameraHistory.captureMain(outModelView, SCRATCH_T1);
+        net.vulkanmod.render.CameraHistory.captureMain(outModelView, SCRATCH_T1, SCRATCH_P);
         clipRemap().mul(SCRATCH_P, outProjRemap);
     }
 

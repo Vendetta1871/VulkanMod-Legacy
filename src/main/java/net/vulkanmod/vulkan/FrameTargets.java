@@ -38,7 +38,15 @@ public final class FrameTargets {
     private static float renderScale = readRenderScale();
     private static Phase phase = Phase.NONE;
     private static int generation;
-    private static final boolean BLIT_ONLY = "blit".equalsIgnoreCase(System.getenv("VULKANMOD_UPSCALER"));
+    /**
+     * VULKANMOD_UPSCALER = fsr3 | fsr1 | blit (temporary until the settings screen, F7).
+     * Unset: FSR 3 when the scene is scaled and the native library loads, else FSR 1.
+     * "fsr3" also runs at scale 1 (native AA).
+     */
+    private static final String UPSCALER = System.getenv("VULKANMOD_UPSCALER") == null
+            ? "auto" : System.getenv("VULKANMOD_UPSCALER").toLowerCase();
+    private static final boolean BLIT_ONLY = UPSCALER.equals("blit");
+    private static boolean temporal;
 
     private FrameTargets() {}
 
@@ -83,6 +91,7 @@ public final class FrameTargets {
     }
 
     static void destroy() {
+        Fsr3Upscaler.destroy();
         Fsr1Upscaler.destroy();
         MotionVectorPass.destroy();
         ComputeSets.destroySamplers();
@@ -94,8 +103,22 @@ public final class FrameTargets {
         return depthHasStencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
     }
 
+    private static boolean scaled() {
+        return scene.width() != display.width() || scene.height() != display.height();
+    }
+
+    /** Whether this frame uses the temporal upscaler (decided at frame start: jitter depends on it). */
+    private static boolean wantTemporal() {
+        boolean requested = UPSCALER.equals("fsr3") || (UPSCALER.equals("auto") && scaled());
+        return requested && Fsr3Upscaler.available();
+    }
+
     /** Starts the SCENE phase: clears and begins rendering into the scene target. */
     static void beginFrame(VkCommandBuffer cmd, float[] clearColor, MemoryStack stack) {
+        temporal = wantTemporal();
+        net.vulkanmod.render.CameraHistory.setJitterEnabled(temporal);
+        MotionVectorPass.setEnabled(temporal);
+
         // Contents of the previous frame are discarded (UNDEFINED). The source stages
         // cover the previous frame's upscale read (blit or FSR compute) and depth writes.
         VkImageMemoryBarrier2.Buffer barriers = VkImageMemoryBarrier2.calloc(2, stack);
@@ -129,7 +152,12 @@ public final class FrameTargets {
             blitIntoDisplay(cmd, mv.image, mv.width, mv.height, mv.format,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, stack);
-        } else if (!BLIT_ONLY && (scene.width() != display.width() || scene.height() != display.height())) {
+        } else if (temporal && Fsr3Upscaler.record(cmd, stack)) {
+            // F5: FSR 3 upscale; leaves the display color ready as an attachment.
+            VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
+            depthToAttachment(depth.get(0), display);
+            pipelineBarrier(cmd, depth, stack);
+        } else if (!BLIT_ONLY && scaled()) {
             // F0: FSR 1 upscale; leaves the display color ready as an attachment.
             Fsr1Upscaler.record(cmd, stack);
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);

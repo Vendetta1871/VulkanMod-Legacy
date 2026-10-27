@@ -53,13 +53,13 @@ public final class MotionVectorPass {
         RenderTarget scene = FrameTargets.scene;
         motionVectors.ensure(scene.width(), scene.height());
         sets.write(0, ComputeSets.nearestClampSampler(), scene.depthView(),
-                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, motionVectors.view);
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, motionVectors.view);
         boundGeneration = FrameTargets.generation();
     }
 
     /**
-     * Records the pass right after the scene phase ended. Leaves the scene depth in
-     * DEPTH_STENCIL_READ_ONLY_OPTIMAL and the vectors in SHADER_READ_ONLY_OPTIMAL.
+     * Records the pass right after the scene phase ended. Leaves the scene depth and the
+     * vectors in SHADER_READ_ONLY_OPTIMAL (ffx-api's layout for COMPUTE_READ).
      */
     static void record(VkCommandBuffer cmd, int depthAspect, MemoryStack stack) {
         prepare();
@@ -70,7 +70,7 @@ public final class MotionVectorPass {
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         // Previous readers of the vectors: the upscaler's compute or the debug blit.
         FrameTargets.imageBarrier(pre.get(1), motionVectors.image, VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0,
@@ -105,7 +105,7 @@ public final class MotionVectorPass {
         Matrix4f vp = CameraHistory.viewProj();
         jitteredInverse.identity()
                 .m30(2.0f * CameraHistory.jitterX() / width)
-                .m31(2.0f * CameraHistory.jitterY() / height)
+                .m31(-2.0f * CameraHistory.jitterY() / height)
                 .mul(vp)
                 .invert();
 

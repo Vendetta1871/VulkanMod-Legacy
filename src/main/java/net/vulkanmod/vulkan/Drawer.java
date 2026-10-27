@@ -980,6 +980,14 @@ public class Drawer {
     private static Pipeline lastBindPipeline;
     private static int lastBindFrame = -1;
 
+    /**
+     * Forgets the redundant-bind cache (B6 hook): external code such as ffx-api recorded
+     * its own binds into the frame's command buffer.
+     */
+    public static void invalidateBindState() {
+        lastBindFrame = -1;
+    }
+
     public void bindPipeline(Pipeline pipeline) {
         // The full state is packed into a long: no per-draw state objects are allocated
         // and the variant lookup is a single cached-key comparison in most draws.
