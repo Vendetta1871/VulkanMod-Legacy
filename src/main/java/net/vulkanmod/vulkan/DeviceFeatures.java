@@ -47,6 +47,17 @@ public final class DeviceFeatures {
     public long maxGeometryCount, maxInstanceCount, maxPrimitiveCount;
     public int minAccelerationStructureScratchOffsetAlignment;
 
+    /**
+     * Extra usage for buffers that ray tracing reads as acceleration-structure build input
+     * (T2: chunk arena, index buffers): device address + AS build input. 0 without RT.
+     */
+    public static int rtInputBufferUsage() {
+        DeviceInfo info = Vulkan.getDeviceInfo();
+        if (info == null || info.features == null || !info.features.rayTracingPipeline) return 0;
+        return org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                | KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
+
     /** Device extensions to enable on top of the required ones. */
     final Set<String> extensions = new LinkedHashSet<>();
 

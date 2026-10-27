@@ -16,7 +16,8 @@ public class IndexBuffer extends Buffer {
     }
 
     public IndexBuffer(int size, MemoryType type) {
-        super(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, type);
+        // T2: the shared quad index buffer doubles as BLAS build input.
+        super(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | net.vulkanmod.vulkan.DeviceFeatures.rtInputBufferUsage(), type);
         createIndexBuffer(size);
     }
 
