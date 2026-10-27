@@ -38,6 +38,32 @@ public class VBO {
     private net.vulkanmod.vulkan.rt.RtScene.Section rt;
     private static ByteBuffer scratch = org.lwjgl.system.MemoryUtil.memAlloc(1 << 16);
 
+    // Section being uploaded (ChunkRenderDispatcher.uploadChunk, client thread), for the RT scene.
+    private static net.minecraft.util.math.BlockPos uploadOrigin;
+    private static net.minecraft.util.BlockRenderLayer uploadLayer;
+
+    public static void beginSectionUpload(net.minecraft.util.math.BlockPos origin,
+                                          net.minecraft.util.BlockRenderLayer layer) {
+        uploadOrigin = origin;
+        uploadLayer = layer;
+    }
+
+    public static void endSectionUpload() {
+        uploadOrigin = null;
+        uploadLayer = null;
+    }
+
+    private static int rtMask(net.minecraft.util.BlockRenderLayer layer) {
+        return layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT ? 0
+                : layer == net.minecraft.util.BlockRenderLayer.CUTOUT
+                ? net.vulkanmod.vulkan.rt.RtScene.MASK_CUTOUT : net.vulkanmod.vulkan.rt.RtScene.MASK_OPAQUE;
+    }
+
+    /** The render chunk moved: its old geometry leaves the RT scene until the rebuild. */
+    public void unplace() {
+        if (rt != null) net.vulkanmod.vulkan.rt.RtScene.onClose(rt);
+    }
+
     /**
      * Uploads the vertex data of one chunk layer. The buffer must have position 0 and
      * its limit set to the written byte count (what {@code BufferBuilder.finishDrawing}
@@ -127,6 +153,10 @@ public class VBO {
             if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
                 if (rt == null) rt = new net.vulkanmod.vulkan.rt.RtScene.Section();
                 net.vulkanmod.vulkan.rt.RtScene.onUpload(rt, arenaOffset, vertexCount);
+                if (uploadOrigin != null) {
+                    net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, uploadOrigin.getX(), uploadOrigin.getY(),
+                            uploadOrigin.getZ(), rtMask(uploadLayer));
+                }
             }
         } catch (Throwable t) {
             if (arenaOffset >= 0) {
@@ -228,13 +258,9 @@ public class VBO {
 
             TerrainRenderer.countDraw(TerrainRenderer.currentLayer, vertexCount);
             ChunkBatcher.record(slot, arenaOffset / ChunkBatcher.STRIDE, vertexCount);
-            if (rt != null) {
-                net.minecraft.util.BlockRenderLayer layer = TerrainRenderer.currentLayer;
-                int mask = layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT ? 0
-                        : layer == net.minecraft.util.BlockRenderLayer.CUTOUT
-                        ? net.vulkanmod.vulkan.rt.RtScene.MASK_CUTOUT : net.vulkanmod.vulkan.rt.RtScene.MASK_OPAQUE;
+            if (rt != null && rt.isRegistered()) {
                 net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, TerrainRenderer.pendingX(), TerrainRenderer.pendingY(),
-                        TerrainRenderer.pendingZ(), mask);
+                        TerrainRenderer.pendingZ(), rtMask(TerrainRenderer.currentLayer));
             }
             if (TerrainRenderer.DUMP_MVP && TerrainRenderer.dumpFramesLeft > 0) {
                 TerrainRenderer.dumpSectionMatrix(slot);

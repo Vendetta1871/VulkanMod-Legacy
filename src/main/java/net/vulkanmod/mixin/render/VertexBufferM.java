@@ -28,9 +28,14 @@ import java.nio.ByteBuffer;
  * star buffers keep their GL upload until ported.</p>
  */
 @Mixin(net.minecraft.client.renderer.vertex.VertexBuffer.class)
-public abstract class VertexBufferM {
+public abstract class VertexBufferM implements net.vulkanmod.render.IVboHolder {
 
     private VBO vulkanmod$vbo;
+
+    @Override
+    public VBO vulkanmod$getVbo() {
+        return this.vulkanmod$vbo;
+    }
 
     // Accessor instead of @Shadow: shadowed fields never reach the refmap and would
     // not bind under the SRG runtime names.

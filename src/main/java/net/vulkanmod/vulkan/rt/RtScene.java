@@ -54,6 +54,9 @@ public final class RtScene {
         long blas;
         RtBuffer blasBuffer;
         long blasAddress;
+
+        /** Holds geometry in the scene (unplaced/closed sections are not re-added by a draw). */
+        public boolean isRegistered() { return index >= 0; }
     }
 
     private static final ArrayList<Section> sections = new ArrayList<>();
