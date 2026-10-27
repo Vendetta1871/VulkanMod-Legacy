@@ -5,43 +5,27 @@ import net.vulkanmod.render.CameraHistory;
 import net.vulkanmod.vulkan.rt.RtScene;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryStack;
-import org.lwjgl.util.vma.VmaAllocationCreateInfo;
-import org.lwjgl.util.vma.VmaAllocationInfo;
 import org.lwjgl.vulkan.*;
 
 import java.nio.ByteBuffer;
-import java.nio.LongBuffer;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memByteBuffer;
-import static org.lwjgl.system.MemoryUtil.memCopy;
-import static org.lwjgl.util.vma.Vma.*;
-import static org.lwjgl.vulkan.KHRAccelerationStructure.*;
-import static org.lwjgl.vulkan.KHRRayTracingPipeline.*;
+import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+import static org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
 import static org.lwjgl.vulkan.VK10.*;
-import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-import static org.lwjgl.vulkan.VK12.vkGetBufferDeviceAddress;
 import static org.lwjgl.vulkan.VK13.*;
-import static org.lwjgl.vulkan.KHRSynchronization2.*;
 
 /**
  * VULKANMOD_DEBUG_VIEW=rt (T7 check): traces primary rays against {@link RtScene}'s TLAS
- * at render resolution and shows the result instead of the raster scene. Sections are
- * colored per instance with triangle outlines, so BLAS/TLAS placement can be compared
- * against the raster image.
+ * at render resolution and shows the result instead of the raster scene: textured albedo,
+ * alpha-tested cutout geometry, sun/moon diffuse with ray-traced shadows.
  */
 public final class RtDebugView {
 
     public static final boolean ACTIVE = "rt".equalsIgnoreCase(System.getenv("VULKANMOD_DEBUG_VIEW"));
 
-    private static final int SETS = 8;
-    private static final int GROUPS = 4;
     private static final int PUSH_BYTES = 80;
 
-    private static long setLayout, pool, pipelineLayout, pipeline;
-    private static final long[] sets = new long[SETS];
-    private static long sbtBuffer, sbtAllocation, sbtAddress;
-    private static VkStridedDeviceAddressRegionKHR raygenRegion, missRegion, hitRegion, callableRegion;
+    private static RtPipeline pipeline;
 
     static final StorageImage output = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
@@ -50,139 +34,18 @@ public final class RtDebugView {
 
     private RtDebugView() {}
 
-    private static void init() {
-        VkDevice device = Vulkan.getDevice();
-        DeviceFeatures f = Vulkan.getDeviceInfo().features;
-        try (MemoryStack stack = stackPush()) {
-            LongBuffer p = stack.mallocLong(1);
-
-            int hitStages = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(4, stack);
-            bindings.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
-                    .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-            bindings.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-            bindings.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
-                    .descriptorCount(1).stageFlags(hitStages);
-            bindings.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-                    .descriptorCount(1).stageFlags(hitStages);
-            check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default()
-                    .pBindings(bindings), null, p), "set layout");
-            setLayout = p.get(0);
-
-            VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(4, stack);
-            sizes.get(0).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(SETS);
-            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(SETS);
-            sizes.get(2).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(SETS);
-            sizes.get(3).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(SETS);
-            check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
-                    .maxSets(SETS).pPoolSizes(sizes), null, p), "descriptor pool");
-            pool = p.get(0);
-            LongBuffer layouts = stack.mallocLong(SETS);
-            for (int i = 0; i < SETS; i++) layouts.put(i, setLayout);
-            LongBuffer out = stack.mallocLong(SETS);
-            check(vkAllocateDescriptorSets(device, VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
-                    .descriptorPool(pool).pSetLayouts(layouts), out), "descriptor sets");
-            for (int i = 0; i < SETS; i++) sets[i] = out.get(i);
-
-            VkPushConstantRange.Buffer push = VkPushConstantRange.calloc(1, stack);
-            push.get(0).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR).offset(0).size(PUSH_BYTES);
-            check(vkCreatePipelineLayout(device, VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
-                    .pSetLayouts(stack.longs(setLayout)).pPushConstantRanges(push), null, p), "pipeline layout");
-            pipelineLayout = p.get(0);
-
-            long rgen = module("rt/debug.rgen", ShaderSPIRVUtils.ShaderKind.RAYGEN_SHADER, stack);
-            long miss = module("rt/debug.rmiss", ShaderSPIRVUtils.ShaderKind.MISS_SHADER, stack);
-            long shadowMiss = module("rt/shadow.rmiss", ShaderSPIRVUtils.ShaderKind.MISS_SHADER, stack);
-            long chit = module("rt/debug.rchit", ShaderSPIRVUtils.ShaderKind.CLOSEST_HIT_SHADER, stack);
-            long ahit = module("rt/debug.rahit", ShaderSPIRVUtils.ShaderKind.ANY_HIT_SHADER, stack);
-
-            VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(5, stack);
-            stages.get(0).sType$Default().stage(VK_SHADER_STAGE_RAYGEN_BIT_KHR).module(rgen).pName(stack.UTF8("main"));
-            stages.get(1).sType$Default().stage(VK_SHADER_STAGE_MISS_BIT_KHR).module(miss).pName(stack.UTF8("main"));
-            stages.get(2).sType$Default().stage(VK_SHADER_STAGE_MISS_BIT_KHR).module(shadowMiss).pName(stack.UTF8("main"));
-            stages.get(3).sType$Default().stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR).module(chit).pName(stack.UTF8("main"));
-            stages.get(4).sType$Default().stage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR).module(ahit).pName(stack.UTF8("main"));
-
-            // Groups: raygen | miss (primary), miss (shadow) | hit (closest + any-hit alpha test).
-            VkRayTracingShaderGroupCreateInfoKHR.Buffer groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(GROUPS, stack);
-            for (int i = 0; i < GROUPS; i++) {
-                groups.get(i).sType$Default().generalShader(VK_SHADER_UNUSED_KHR).closestHitShader(VK_SHADER_UNUSED_KHR)
-                        .anyHitShader(VK_SHADER_UNUSED_KHR).intersectionShader(VK_SHADER_UNUSED_KHR);
-            }
-            groups.get(0).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(0);
-            groups.get(1).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(1);
-            groups.get(2).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(2);
-            groups.get(3).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
-                    .closestHitShader(3).anyHitShader(4);
-
-            VkRayTracingPipelineCreateInfoKHR.Buffer info = VkRayTracingPipelineCreateInfoKHR.calloc(1, stack);
-            info.get(0).sType$Default().pStages(stages).pGroups(groups)
-                    .maxPipelineRayRecursionDepth(1).layout(pipelineLayout);
-            check(vkCreateRayTracingPipelinesKHR(device, VK_NULL_HANDLE, VK_NULL_HANDLE, info, null, p), "RT pipeline");
-            pipeline = p.get(0);
-            vkDestroyShaderModule(device, rgen, null);
-            vkDestroyShaderModule(device, miss, null);
-            vkDestroyShaderModule(device, shadowMiss, null);
-            vkDestroyShaderModule(device, chit, null);
-            vkDestroyShaderModule(device, ahit, null);
-
-            // Shader binding table: raygen | 2 misses | hit, each region on the base alignment.
-            int handleSize = f.shaderGroupHandleSize;
-            int handleStride = (int) align(handleSize, f.shaderGroupHandleAlignment);
-            int base = f.shaderGroupBaseAlignment;
-            int raygenSize = (int) align(handleStride, base);
-            int missSize = (int) align(2L * handleStride, base);
-            int hitSize = (int) align(handleStride, base);
-            ByteBuffer handles = stack.malloc(handleSize * GROUPS);
-            check(vkGetRayTracingShaderGroupHandlesKHR(device, pipeline, 0, GROUPS, handles), "group handles");
-
-            long sbtSize = (long) raygenSize + missSize + hitSize + base;
-            VkBufferCreateInfo bufferInfo = VkBufferCreateInfo.calloc(stack).sType$Default().size(sbtSize)
-                    .usage(VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-            VmaAllocationCreateInfo alloc = VmaAllocationCreateInfo.calloc(stack).usage(VMA_MEMORY_USAGE_AUTO)
-                    .flags(VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-            org.lwjgl.PointerBuffer pAlloc = stack.mallocPointer(1);
-            VmaAllocationInfo allocInfo = VmaAllocationInfo.calloc(stack);
-            check(vmaCreateBuffer(Vulkan.getAllocator(), bufferInfo, alloc, p, pAlloc, allocInfo), "SBT buffer");
-            sbtBuffer = p.get(0);
-            sbtAllocation = pAlloc.get(0);
-            long raw = vkGetBufferDeviceAddress(device, VkBufferDeviceAddressInfo.calloc(stack).sType$Default().buffer(sbtBuffer));
-            sbtAddress = align(raw, base);
-            ByteBuffer mapped = memByteBuffer(allocInfo.pMappedData(), (int) sbtSize);
-            int start = (int) (sbtAddress - raw);
-            int[] offsets = {start, start + raygenSize, start + raygenSize + handleStride, start + raygenSize + missSize};
-            for (int g = 0; g < GROUPS; g++) {
-                for (int i = 0; i < handleSize; i++) mapped.put(offsets[g] + i, handles.get(g * handleSize + i));
-            }
-            vmaFlushAllocation(Vulkan.getAllocator(), sbtAllocation, 0, sbtSize);
-
-            raygenRegion = VkStridedDeviceAddressRegionKHR.calloc().deviceAddress(sbtAddress).stride(raygenSize).size(raygenSize);
-            missRegion = VkStridedDeviceAddressRegionKHR.calloc().deviceAddress(sbtAddress + raygenSize)
-                    .stride(handleStride).size(missSize);
-            hitRegion = VkStridedDeviceAddressRegionKHR.calloc().deviceAddress(sbtAddress + raygenSize + missSize)
-                    .stride(handleStride).size(hitSize);
-            callableRegion = VkStridedDeviceAddressRegionKHR.calloc();
-        }
-        Initializer.LOGGER.info("[rt] debug view ready");
-    }
-
-    private static long module(String file, ShaderSPIRVUtils.ShaderKind kind, MemoryStack stack) {
-        ShaderSPIRVUtils.SPIRV spv = ShaderSPIRVUtils.compileShaderFile(file, kind);
-        LongBuffer p = stack.mallocLong(1);
-        check(vkCreateShaderModule(Vulkan.getDevice(), VkShaderModuleCreateInfo.calloc(stack).sType$Default()
-                .pCode(spv.bytecode()), null, p), "shader module " + file);
-        spv.free();
-        return p.get(0);
-    }
-
     /**
      * Traces the debug image at render resolution and leaves it in GENERAL. Returns false
-     * when nothing was traced (no TLAS yet).
+     * when nothing was traced (no TLAS or atlas yet).
      */
     static boolean record(VkCommandBuffer cmd, MemoryStack stack) {
-        if (!RtScene.ready()) return false;
-        if (pipeline == 0L) init();
+        if (!RtScene.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null) return false;
+        if (pipeline == null) {
+            pipeline = new RtPipeline(RtDescriptors.layout(), PUSH_BYTES, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                    "rt/debug.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
+                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit")});
+            Initializer.LOGGER.info("[rt] debug view ready");
+        }
         RenderTarget scene = FrameTargets.scene;
         output.ensure(scene.width(), scene.height());
 
@@ -193,73 +56,23 @@ public final class RtDebugView {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         FrameTargets.pipelineBarrier(cmd, pre, stack);
 
-        // The set of this frame slot is free: its previous use retired with the slot's fence.
-        long set = sets[Drawer.getCurrentFrame() % SETS];
-        VkWriteDescriptorSetAccelerationStructureKHR asInfo = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
-                .sType$Default().pAccelerationStructures(stack.longs(RtScene.tlas()));
-        VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(1, stack);
-        imageInfo.get(0).imageView(output.view).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
-        net.vulkanmod.vulkan.texture.VulkanImage atlas = net.vulkanmod.render.TextureBridge.getAtlasImage();
-        if (atlas == null) return false;
-        VkDescriptorBufferInfo.Buffer dataInfo = VkDescriptorBufferInfo.calloc(1, stack);
-        dataInfo.get(0).buffer(RtScene.instanceDataBuffer()).offset(0).range(RtScene.instanceDataSize());
-        VkDescriptorImageInfo.Buffer atlasInfo = VkDescriptorImageInfo.calloc(1, stack);
-        atlasInfo.get(0).sampler(ComputeSets.nearestClampSampler()).imageView(atlas.getTextureImageView())
-                .imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(4, stack);
-        writes.get(0).sType$Default().pNext(asInfo.address()).dstSet(set).dstBinding(0)
-                .descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1);
-        writes.get(1).sType$Default().dstSet(set).dstBinding(1)
-                .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).pImageInfo(imageInfo);
-        writes.get(2).sType$Default().dstSet(set).dstBinding(2)
-                .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).pBufferInfo(dataInfo);
-        writes.get(3).sType$Default().dstSet(set).dstBinding(3)
-                .descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).pImageInfo(atlasInfo);
-        vkUpdateDescriptorSets(Vulkan.getDevice(), writes, null);
+        long set = RtDescriptors.write(RtDescriptors.PASS_DEBUG, output.view, 0L, 0L);
 
         CameraHistory.viewProj().invert(invViewProj);
         ByteBuffer constants = stack.malloc(PUSH_BYTES);
         invViewProj.get(0, constants);
-        // Sun direction in world axes (vanilla's sky: rotate Y -90, then X by the celestial angle).
-        float sx = 0.0f, sy = 1.0f, daylight = 1.0f;
-        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
-        if (mc.world != null) {
-            double angle = mc.world.getCelestialAngle(mc.getRenderPartialTicks()) * Math.PI * 2.0;
-            sx = (float) -Math.sin(angle);
-            sy = (float) Math.cos(angle);
-            daylight = Math.max(0.0f, Math.min(1.0f, sy * 2.0f + 0.5f));
-        }
-        constants.putFloat(64, sx).putFloat(68, sy).putFloat(72, 0.0f).putFloat(76, daylight);
+        float[] sun = RtLighting.sun();
+        constants.putFloat(64, sun[0]).putFloat(68, sun[1]).putFloat(72, sun[2]).putFloat(76, sun[3]);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout, 0, stack.longs(set), null);
-        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_RAYGEN_BIT_KHR, 0, constants);
-        vkCmdTraceRaysKHR(cmd, raygenRegion, missRegion, hitRegion, callableRegion, scene.width(), scene.height(), 1);
+        pipeline.trace(cmd, set, constants, scene.width(), scene.height());
         return true;
     }
 
     static void destroy() {
-        VkDevice device = Vulkan.getDevice();
         output.destroy();
-        if (pipeline != 0L) {
-            vkDestroyPipeline(device, pipeline, null);
-            vkDestroyPipelineLayout(device, pipelineLayout, null);
-            vkDestroyDescriptorPool(device, pool, null);
-            vkDestroyDescriptorSetLayout(device, setLayout, null);
-            vmaDestroyBuffer(Vulkan.getAllocator(), sbtBuffer, sbtAllocation);
-            raygenRegion.free();
-            missRegion.free();
-            hitRegion.free();
-            callableRegion.free();
-            pipeline = 0L;
+        if (pipeline != null) {
+            pipeline.destroy();
+            pipeline = null;
         }
-    }
-
-    private static long align(long v, long a) {
-        return (v + a - 1) / a * a;
-    }
-
-    private static void check(int rc, String what) {
-        if (rc != VK_SUCCESS) throw new RuntimeException("RT debug view: " + what + " failed: " + rc);
     }
 }

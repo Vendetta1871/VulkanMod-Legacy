@@ -85,7 +85,9 @@ public final class FrameTargets {
         int sw = Math.max(1, Math.round(displayW * renderScale));
         int sh = Math.max(1, Math.round(displayH * renderScale));
         scene.create(sw, sh, COLOR_FORMAT,
-                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, depthFormat);
+                // STORAGE: RT passes modify the scene color in place.
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                        | (net.vulkanmod.vulkan.rt.RtScene.enabled() ? VK_IMAGE_USAGE_STORAGE_BIT : 0), depthFormat);
         // STORAGE: the upscalers write the display color from compute.
         display.create(displayW, displayH, COLOR_FORMAT,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
@@ -96,6 +98,8 @@ public final class FrameTargets {
 
     static void destroy() {
         RtDebugView.destroy();
+        RtShadowPass.destroy();
+        RtDescriptors.destroy();
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.destroy();
         Fsr3Upscaler.destroy();
         Fsr1Upscaler.destroy();
@@ -112,7 +116,7 @@ public final class FrameTargets {
 
     /** Scene color before particles and translucent geometry (F2, auto-reactive input). */
     static final StorageImage opaqueColor = new StorageImage(COLOR_FORMAT,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
     private static boolean opaqueTaken;
 
     /** True when this frame's opaque-only copy exists. */
@@ -157,6 +161,26 @@ public final class FrameTargets {
 
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
         opaqueTaken = true;
+    }
+
+    private static boolean depthReadable;
+
+    /**
+     * Moves the scene depth from attachment to SHADER_READ_ONLY_OPTIMAL once per frame for
+     * the compute and ray-tracing passes after the scene phase (ffx-api expects that layout).
+     */
+    static void sceneDepthToShaderRead(VkCommandBuffer cmd, MemoryStack stack) {
+        if (depthReadable) return;
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        imageBarrier(b.get(0), scene.depthImage(), depthAspect(),
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                        | org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        pipelineBarrier(cmd, b, stack);
+        depthReadable = true;
     }
 
     private static boolean scaled() {
@@ -209,6 +233,7 @@ public final class FrameTargets {
         pipelineBarrier(cmd, barriers, stack);
 
         opaqueTaken = false;
+        depthReadable = false;
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.SCENE;
     }
@@ -228,6 +253,10 @@ public final class FrameTargets {
 
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
             net.vulkanmod.vulkan.rt.RtScene.record(cmd, stack);
+            if (!RtDebugView.ACTIVE) {
+                // T8: shadows darken the scene color before the upscaler reads it.
+                RtShadowPass.record(cmd, stack);
+            }
         }
 
         if (RtDebugView.ACTIVE && net.vulkanmod.vulkan.rt.RtScene.enabled() && RtDebugView.record(cmd, stack)) {
@@ -368,10 +397,11 @@ public final class FrameTargets {
     }
 
     private static void depthToAttachment(VkImageMemoryBarrier2 b, RenderTarget target) {
-        // Source stages also cover the previous frame's compute read (motion vectors).
+        // Source stages also cover the previous frame's compute and RT reads.
         imageBarrier(b, target.depthImage(), depthAspect(),
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT
-                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                        | org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,

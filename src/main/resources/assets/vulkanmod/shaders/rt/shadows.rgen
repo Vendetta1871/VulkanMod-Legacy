@@ -1,0 +1,71 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// Hybrid sun/moon shadows (T8): reconstructs each scene pixel from the depth buffer,
+// traces one shadow ray towards the light and darkens the raster color in place.
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba8) uniform image2D sceneColor;
+layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 5, rgba8) uniform image2D opaqueColor;
+
+layout(push_constant) uniform Constants {
+    mat4 invViewProj;   // jittered: the depth was rendered with it
+    vec4 light;         // xyz: towards the light, w: shadow strength 0..1
+    vec4 flags;         // x > 0: also darken the opaque-only copy
+} pc;
+
+layout(location = 1) rayPayloadEXT float visible;
+
+vec3 unproject(ivec2 p, float depth, vec2 size) {
+    vec2 uv = (vec2(p) + 0.5) / size;
+    // The viewport flips Y: NDC +1 is the top row.
+    vec4 h = pc.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    return h.xyz / h.w;
+}
+
+// Of the two neighbours along an axis, the one closer in depth gives the surface tangent.
+vec3 tangent(ivec2 p, ivec2 axis, float d, vec3 pos, ivec2 size) {
+    ivec2 a = clamp(p + axis, ivec2(0), size - 1);
+    ivec2 b = clamp(p - axis, ivec2(0), size - 1);
+    float da = texelFetch(sceneDepth, a, 0).r;
+    float db = texelFetch(sceneDepth, b, 0).r;
+    return abs(da - d) < abs(db - d)
+            ? unproject(a, da, vec2(size)) - pos
+            : pos - unproject(b, db, vec2(size));
+}
+
+void main() {
+    ivec2 p = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    float d = texelFetch(sceneDepth, p, 0).r;
+    if (d >= 0.99999 || pc.light.w <= 0.0) return;   // sky, clouds past the far plane
+
+    vec3 pos = unproject(p, d, vec2(size));
+    vec3 n = normalize(cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size)));
+    vec3 view = pos - unproject(p, 0.0, vec2(size));
+    if (dot(n, view) > 0.0) n = -n;
+
+    // Only occlusion darkens: faces turned away from the light keep vanilla's own face
+    // shading (this also leaves the undersides of clouds, which are not in the TLAS, alone).
+    float ndl = dot(n, pc.light.xyz);
+    float lit = 1.0;
+    if (ndl > 0.0) {
+        visible = 0.0;
+        float dist = length(view);
+        vec3 origin = pos + n * (0.02 + 0.002 * dist);
+        traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                    0xFF, 0, 0, 0, origin, 0.0, pc.light.xyz, 512.0, 1);
+        lit = visible;
+    }
+
+    float factor = 1.0 - pc.light.w * (1.0 - lit);
+    vec4 c = imageLoad(sceneColor, p);
+    imageStore(sceneColor, p, vec4(c.rgb * factor, c.a));
+    if (pc.flags.x > 0.0) {
+        // Keeps FSR's auto-reactive mask from flagging every shadowed pixel.
+        vec4 o = imageLoad(opaqueColor, p);
+        imageStore(opaqueColor, p, vec4(o.rgb * factor, o.a));
+    }
+}
