@@ -207,8 +207,8 @@ public class Vulkan {
         createSwapChain();
         createImageViews();
         // B2: the frame renders into offscreen targets and is copied to the swapchain.
-        SceneTargets.init(findDepthFormat());
-        SceneTargets.create(swapChainExtent.width(), swapChainExtent.height());
+        FrameTargets.init(findDepthFormat());
+        FrameTargets.resize(swapChainExtent.width(), swapChainExtent.height());
 
         createStagingBuffers();
     }
@@ -292,7 +292,7 @@ public class Vulkan {
 
         createImageViews();
         // The caller (Drawer.recreateSwapChain) waited for the device to idle.
-        SceneTargets.create(swapChainExtent.width(), swapChainExtent.height());
+        FrameTargets.resize(swapChainExtent.width(), swapChainExtent.height());
 
         Initializer.LOGGER.info("[swapchain] recreated {}x{} -> {}x{}", oldW, oldH,
                 swapChainExtent.width(), swapChainExtent.height());
@@ -355,7 +355,7 @@ public class Vulkan {
             swapChain = 0L;
         }
 
-        SceneTargets.destroy();
+        FrameTargets.destroy();
 
         // Pipelines reference the shared samplers, so they are destroyed first.
         if(swapchainCreated) {
@@ -939,26 +939,6 @@ public class Vulkan {
 
             return pImageView.get(0);
         }
-    }
-
-    public static VkViewport.Buffer viewport(MemoryStack stack) {
-        VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
-        viewport.x(0.0f);
-        viewport.y(swapChainExtent.height());
-        viewport.width(swapChainExtent.width());
-        viewport.height(-swapChainExtent.height());
-        viewport.minDepth(0.0f);
-        viewport.maxDepth(1.0f);
-
-        return viewport;
-    }
-
-    public static VkRect2D.Buffer scissor(MemoryStack stack) {
-        VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
-        scissor.offset(VkOffset2D.calloc(stack).set(0, 0));
-        scissor.extent(swapChainExtent);
-
-        return scissor;
     }
 
     public static void copyStagingtoLocalBuffer(long srcBuffer, long dstBuffer, long dstOffset, long size) {

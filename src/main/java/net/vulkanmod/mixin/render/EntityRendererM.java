@@ -70,6 +70,8 @@ public abstract class EntityRendererM {
     @Inject(method = "renderHand(FI)V", at = @At("HEAD"))
     private void vulkanmod$beginHand(float partialTicks, int pass, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            // B3: the hand draws at display resolution over the upscaled world.
+            net.vulkanmod.vulkan.Drawer.enterDisplayPhase();
             net.vulkanmod.render.EntityRenderer.setHandPass(true);
         }
     }
@@ -107,6 +109,8 @@ public abstract class EntityRendererM {
             // is the only reliable "HUD begins" point.
             net.vulkanmod.render.EntityRenderer.setRainPass(false);
             GuiRenderer.setGuiPass(true);
+            // B3: the GUI draws at display resolution (no-op when the hand switched already).
+            net.vulkanmod.vulkan.Drawer.enterDisplayPhase();
         }
         self.setupOverlayRendering();
     }

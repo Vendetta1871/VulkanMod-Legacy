@@ -435,12 +435,13 @@ public class Pipeline {
             pipelineInfo.pDynamicState(dynamicStates);
             pipelineInfo.layout(pipelineLayout);
             // B4: dynamic rendering - the pipeline names its attachment formats instead
-            // of a render pass. All raster pipelines currently target the scene set.
+            // of a render pass. Scene and display targets share the formats, so one
+            // pipeline serves both phases.
             VkPipelineRenderingCreateInfo renderingInfo = VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
                     .colorAttachmentCount(1)
-                    .pColorAttachmentFormats(stack.ints(SceneTargets.COLOR_FORMAT))
-                    .depthAttachmentFormat(SceneTargets.depthFormat())
-                    .stencilAttachmentFormat(SceneTargets.stencilFormat());
+                    .pColorAttachmentFormats(stack.ints(FrameTargets.COLOR_FORMAT))
+                    .depthAttachmentFormat(FrameTargets.depthFormat())
+                    .stencilAttachmentFormat(VK_FORMAT_UNDEFINED);
             pipelineInfo.pNext(renderingInfo.address());
             pipelineInfo.renderPass(VK_NULL_HANDLE);
             pipelineInfo.subpass(0);

@@ -350,17 +350,12 @@ public class Drawer {
                 throw new RuntimeException("Failed to begin recording command buffer:" + err);
             }
 
-            // B2: world and GUI render into the scene targets; endRenderPass() copies the
-            // result into the acquired swapchain image.
+            // B2/B3: the world renders into the scene target; the hand and GUI switch to
+            // the display target (enterDisplayPhase); endRenderPass() copies the result
+            // into the acquired swapchain image. Viewport and scissor follow the target.
             float[] clear = new float[4];
             VRenderSystem.clearColor.get(0, clear);
-            SceneTargets.beginRendering(commandBuffer, clear, stack);
-
-            VkViewport.Buffer pViewport = Vulkan.viewport(stack);
-            vkCmdSetViewport(commandBuffer, 0, pViewport);
-
-            VkRect2D.Buffer pScissor = Vulkan.scissor(stack);
-            vkCmdSetScissor(commandBuffer, 0, pScissor);
+            FrameTargets.beginFrame(commandBuffer, clear, stack);
 
             vkCmdSetDepthBias(commandBuffer, 0.0F, 0.0F, 0.0F);
 
@@ -375,7 +370,7 @@ public class Drawer {
 
         try(MemoryStack stack = stackPush()) {
             VkExtent2D extent = getSwapchainExtent();
-            SceneTargets.endAndPresentCopy(commandBuffer, getSwapChainImages().get(imageIndex),
+            FrameTargets.endFrame(commandBuffer, getSwapChainImages().get(imageIndex),
                     Vulkan.getSwapChainImageFormat(), extent.width(), extent.height(), stack);
         }
 
@@ -572,6 +567,17 @@ public class Drawer {
 
     public static Drawer getInstance() { return INSTANCE; }
 
+    /**
+     * Switches the frame from the scene target to the display target (B3). Called where
+     * vanilla starts the hand and the GUI; a no-op once switched or outside a frame.
+     */
+    public static void enterDisplayPhase() {
+        if(!isActive() || FrameTargets.phase() != FrameTargets.Phase.SCENE) return;
+        try(MemoryStack stack = stackPush()) {
+            FrameTargets.enterDisplayPhase(commandBuffers.get(currentFrame), stack);
+        }
+    }
+
     public static int getCurrentFrame() { return currentFrame; }
 
     /** True while the command buffer of the current frame is recording. */
@@ -734,7 +740,7 @@ public class Drawer {
             submitInfo.waitSemaphoreCount(1);
             submitInfo.pWaitSemaphores(stackGet().longs(imageAvailableSemaphores.get(currentFrame)));
             // The swapchain image is first touched by the copy at the end of the frame
-            // (SceneTargets.endAndPresentCopy), so rendering does not wait for the acquire.
+            // (FrameTargets.endFrame), so rendering does not wait for the acquire.
             submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_TRANSFER_BIT));
 
             submitInfo.pSignalSemaphores(stackGet().longs(renderFinishedSemaphores.get(imageIndex)));
@@ -1061,7 +1067,7 @@ public class Drawer {
             //Rect to clear
             VkRect2D renderArea = VkRect2D.calloc(stack);
             renderArea.offset(VkOffset2D.calloc(stack).set(0, 0));
-            renderArea.extent(getSwapchainExtent());
+            renderArea.extent().set(FrameTargets.currentWidth(), FrameTargets.currentHeight());
 
             VkClearRect.Buffer pRect = VkClearRect.calloc(1, stack);
             pRect.get(0).rect(renderArea);
