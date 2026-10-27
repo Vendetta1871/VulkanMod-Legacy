@@ -68,7 +68,9 @@ public class EndPortalRenderer {
         }
 
         int vertexCount = buffer.getVertexCount();
-        int outStride = OUTPUT_FORMAT.getIntegerSize();
+        // Byte strides: getIntegerSize() counts 4-byte UNITS, but the ByteBuffer offsets
+        // below (and the scratch capacity) are in BYTES - use getSize() for both.
+        int outStride = OUTPUT_FORMAT.getSize();
         if (scratch == null || scratch.capacity() < vertexCount * outStride) {
             scratch = MemoryUtil.memAlloc(Math.max(vertexCount * outStride, 1024));
         }
@@ -89,7 +91,7 @@ public class EndPortalRenderer {
             float[] planeT = VRenderSystem.texGenPlaneT;
             float[] planeR = VRenderSystem.texGenPlaneR;
 
-            int inStride = POSITION_COLOR.getIntegerSize();
+            int inStride = POSITION_COLOR.getSize();
             ByteBuffer src = buffer.getByteBuffer();
             scratch.position(0);
             for (int i = 0; i < vertexCount; i++) {

@@ -322,6 +322,12 @@ public class AutoTest {
 
                 if (STATE_MODE) {
                     int t = ++ticks;
+                    // Effect particles (portal block sparkles, potion swirls around the
+                    // player) land randomly and pollute the GL/Vulkan diff pairs - the
+                    // engine is wiped every tick so captures stay clean.
+                    if (mc.effectRenderer != null) {
+                        mc.effectRenderer.clearEffects(mc.world);
+                    }
                     if (t == 5) {
                         // Pin the camera to an absolute column: the world-spawn search
                         // jitters by a block between runs, which shifts near-field
@@ -394,24 +400,34 @@ public class AutoTest {
                         capture(mc, "stateBorders");
                     } else if (t == 120) {
                         mc.debugRenderer.toggleChunkBorders();
-                        // End portal planes (bug D): POSITION_COLOR quads with eye-linear
-                        // texgen replayed through EndPortalRenderer. Place one a few
-                        // blocks ahead and tilt the view down so it fills the frame.
-                        // The rotation is pinned so the GL reference run sees the same
-                        // camera and the same placement spot.
-                        mc.player.rotationYaw = 45.0F;
-                        mc.player.rotationPitch = 25.0F;
-                        double lx = mc.player.getLook(1.0F).x;
-                        double lz = mc.player.getLook(1.0F).z;
-                        int px = net.minecraft.util.math.MathHelper.floor(
-                                (float) (mc.player.posX + lx * 4.0));
-                        int pz = net.minecraft.util.math.MathHelper.floor(
-                                (float) (mc.player.posZ + lz * 4.0));
-                        serverCommand(mc, "setblock " + px + " "
-                                + (int) mc.player.posY + " " + pz + " minecraft:end_portal");
-                    } else if (t == 125) {
-                        capture(mc, "statePortal");
+                        // End portal planes (bug D): build a real portal - 3x3 portal
+                        // blocks ringed by 12 end_portal_frame blocks - so the TESR's
+                        // shouldRenderFace culling matches what players actually see.
+                        // The camera looks down at the ring from a corner: a plane that
+                        // lies flat vs one that stands up is unambiguous from there.
+                        int hudTopY = mc.world.getTopSolidOrLiquidBlock(
+                                new BlockPos(PIN_X + 8, 0, PIN_Z)).getY();
+                        int cx = PIN_X + 8, cz = PIN_Z, cy = hudTopY - 1;
+                        for (int dx = -2; dx <= 2; dx++) {
+                            for (int dz = -2; dz <= 2; dz++) {
+                                boolean ring = Math.abs(dx) == 2 || Math.abs(dz) == 2;
+                                serverCommand(mc, "setblock " + (cx + dx) + " " + cy + " "
+                                        + (cz + dz) + " minecraft:"
+                                        + (ring ? "end_portal_frame" : "end_portal"));
+                                serverCommand(mc, "setblock " + (cx + dx) + " " + (cy + 1) + " "
+                                        + (cz + dz) + " minecraft:air");
+                            }
+                        }
+                        tpPlayer(mc, cx + 5.5, cy + 4.5, cz + 5.5);
+                        double dx = cx + 0.5 - (cx + 5.5);
+                        double dy = cy + 1.0 - (cy + 4.5);
+                        double dz = cz + 0.5 - (cz + 5.5);
+                        mc.player.rotationYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                        mc.player.rotationPitch = (float) Math.toDegrees(
+                                Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)));
                     } else if (t == 130) {
+                        capture(mc, "statePortal");
+                    } else if (t == 135) {
                         // The GUI->world boundary: the Nether/End failure mode (no sky
                         // or cloud pass to mask a leaked "depthFunc ALWAYS").
                         capture(mc, "statePostGui");
@@ -1021,6 +1037,9 @@ public class AutoTest {
 
     private static void endStage(Minecraft mc) {
         int t = ++ticks;
+        if (mc.effectRenderer != null && mc.world != null) {
+            mc.effectRenderer.clearEffects(mc.world); // keep the beam frame clean
+        }
         if (t == 5) {
             IntegratedServer server = mc.getIntegratedServer();
             if (server != null) {
