@@ -42,6 +42,7 @@
     "render.GlStateManagerImmediateM",
     "render.GlStateManagerMatrixM",
     "render.GlStateManagerTexGenM",
+    "render.GlStateManagerTextureM",
     "render.GameSettingsM",
     "render.ParticleManagerM",
     "render.FramebufferM"

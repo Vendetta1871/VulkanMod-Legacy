@@ -63,11 +63,6 @@ public class TextureUtilM {
         invalidate(textureId);
     }
 
-    @Inject(method = "deleteTexture", at = @At("HEAD"))
-    private static void vulkanmod$deleteTexture(int textureId, CallbackInfo ci) {
-        invalidate(textureId);
-    }
-
     private static void invalidate(int texId) {
         TextureBridge.invalidateForUpload(texId);
     }
