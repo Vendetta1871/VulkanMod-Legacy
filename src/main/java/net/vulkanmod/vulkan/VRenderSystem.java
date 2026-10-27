@@ -571,17 +571,30 @@ public class VRenderSystem {
     public static void disableBlend() { blendEnabled = false; }
 
     public static void tryBlendFuncSeparate(int srcRgb, int dstRgb, int srcAlpha, int dstAlpha) {
+        if (srcRgb != blendSrcRgb || dstRgb != blendDstRgb
+                || srcAlpha != blendSrcAlpha || dstAlpha != blendDstAlpha) {
+            cachedBlendState = null;
+        }
         blendSrcRgb = srcRgb;
         blendDstRgb = dstRgb;
         blendSrcAlpha = srcAlpha;
         blendDstAlpha = dstAlpha;
     }
 
+    // BlendState is immutable, so one instance per factor set is shared by every draw.
+    // Only the blend setters and resetState write the factors; both drop the cache.
+    private static Pipeline.BlendState cachedBlendState;
+
     public static Pipeline.BlendState getBlendState() {
         if (!blendEnabled) {
             return Pipeline.NO_BLEND_STATE;
         }
-        return new Pipeline.BlendState(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
+        Pipeline.BlendState state = cachedBlendState;
+        if (state == null) {
+            state = new Pipeline.BlendState(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
+            cachedBlendState = state;
+        }
+        return state;
     }
 
     public static void enableColorLogicOp() {
@@ -709,6 +722,7 @@ public class VRenderSystem {
         blendDstRgb = 0;
         blendSrcAlpha = 1;
         blendDstAlpha = 0;
+        cachedBlendState = null;
         alphaTestFunc = 516;
         alphaTestRef = 0.1f;
         logicOpEnabled = false;

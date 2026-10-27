@@ -2,7 +2,7 @@ package net.vulkanmod.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonSyntaxException;
+import com.google.gson.JsonParseException;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -11,6 +11,7 @@ import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 /**
  * Renderer settings persisted as JSON, mirroring the original VulkanMod config.
@@ -34,15 +35,24 @@ public class Config {
         }
 
         // L14: a corrupt or unreadable file must not kill the game - fall back to the
-        // defaults (the caller writes a fresh file over the broken one).
+        // defaults. The caller writes a fresh file over the broken one, so keep a copy.
+        // JsonParseException covers both JsonSyntaxException and JsonIOException.
         try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
             return GSON.fromJson(reader, Config.class);
-        } catch (JsonSyntaxException e) {
-            net.vulkanmod.Initializer.LOGGER.error("Failed to parse VulkanMod config, using defaults: {}", path, e);
-            return null;
-        } catch (IOException e) {
+        } catch (JsonParseException | IOException e) {
             net.vulkanmod.Initializer.LOGGER.error("Failed to load VulkanMod config, using defaults: {}", path, e);
+            backup(path);
             return null;
+        }
+    }
+
+    private static void backup(Path path) {
+        Path copy = path.resolveSibling(path.getFileName() + ".bak");
+        try {
+            Files.copy(path, copy, StandardCopyOption.REPLACE_EXISTING);
+            net.vulkanmod.Initializer.LOGGER.warn("Saved the unreadable VulkanMod config as {}", copy);
+        } catch (IOException e) {
+            net.vulkanmod.Initializer.LOGGER.warn("Could not back up the VulkanMod config: {}", path, e);
         }
     }
 

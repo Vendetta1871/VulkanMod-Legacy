@@ -1113,11 +1113,26 @@ public class Vulkan {
 
             VkCommandBuffer commandBuffer = beginImmediateCmd();
 
-            VkBufferCopy.Buffer copyRegion = VkBufferCopy.create(1);
+            VkBufferCopy.Buffer copyRegion = VkBufferCopy.calloc(1, stack);
             copyRegion.size(size);
             copyRegion.dstOffset(dstOffset);
 
+            // Readback path (MemoryTypes.copyFromBuffer): earlier submits may still have
+            // writes to the source pending, and the caller maps the destination right after
+            // the fence, so make the copy's writes visible to the host (N2).
+            VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack);
+            barrier.sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+            barrier.srcAccessMask(VK_ACCESS_MEMORY_WRITE_BIT);
+            barrier.dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, barrier, null, null);
+
             vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, copyRegion);
+
+            barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            barrier.dstAccessMask(VK_ACCESS_HOST_READ_BIT);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT, 0, barrier, null, null);
 
             endImmediateCmd();
         }

@@ -12,8 +12,6 @@ import org.lwjgl.vulkan.VkMemoryBarrier;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
-import java.util.ArrayDeque;
-import java.util.Deque;
 
 import static net.vulkanmod.vulkan.Vulkan.copyStagingtoLocalBuffer;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -64,9 +62,12 @@ public class ChunkArena {
      * rebuild must not be handed out again until every frame that could still be reading it
      * has retired; uploads run before the frame's in-flight fence, so a fixed delay of
      * {@code swapchainImages + 1} frames is used (mirrors {@code MemoryManager}'s deferred
-     * buffer free).
+     * buffer free). A FIFO ring of {@code offset << 32 | size, frame} pairs, so a free does
+     * not allocate.
      */
-    private final Deque<long[]> pending = new ArrayDeque<>();
+    private long[] pending = new long[2 * 64];
+    private int pendingHead;
+    private int pendingCount;
     private long frameId;
     private final int freeDelay;
 
@@ -115,8 +116,9 @@ public class ChunkArena {
             }
         }
 
-        if (highWater + size > capacity) {
-            grow(highWater + size);
+        long needed = (long) highWater + size;
+        if (needed > capacity) {
+            grow(needed);
         }
         int offset = highWater;
         highWater += size;
@@ -133,7 +135,20 @@ public class ChunkArena {
         if (size <= 0 || generation != this.generation) {
             return;
         }
-        pending.addLast(new long[]{offset, size, frameId + freeDelay});
+        if (2 * pendingCount == pending.length) {
+            long[] grown = new long[pending.length * 2];
+            for (int i = 0; i < pendingCount; ++i) {
+                int src = (pendingHead + 2 * i) % pending.length;
+                grown[2 * i] = pending[src];
+                grown[2 * i + 1] = pending[src + 1];
+            }
+            pending = grown;
+            pendingHead = 0;
+        }
+        int tail = (pendingHead + 2 * pendingCount) % pending.length;
+        pending[tail] = (long) offset << 32 | size;
+        pending[tail + 1] = frameId + freeDelay;
+        ++pendingCount;
     }
 
     /** The token {@link #free} requires; changes on every {@link #reset()}. */
@@ -144,9 +159,11 @@ public class ChunkArena {
     /** Advances the frame clock and releases any ranges whose delay has elapsed. */
     public void tick() {
         ++frameId;
-        while (!pending.isEmpty() && pending.peekFirst()[2] <= frameId) {
-            long[] p = pending.pollFirst();
-            insertFree((int) p[0], (int) p[1]);
+        while (pendingCount > 0 && pending[pendingHead + 1] <= frameId) {
+            long range = pending[pendingHead];
+            pendingHead = (pendingHead + 2) % pending.length;
+            --pendingCount;
+            insertFree((int) (range >>> 32), (int) range);
         }
     }
 
@@ -163,7 +180,8 @@ public class ChunkArena {
 
         ++generation;
         freeCount = 0;
-        pending.clear();
+        pendingHead = 0;
+        pendingCount = 0;
         highWater = 0;
     }
 
@@ -247,7 +265,7 @@ public class ChunkArena {
         copyStagingtoLocalBuffer(staging.getBufferId(), staging.getOffset(), buffer, offset, bytes);
     }
 
-    private void grow(int needed) {
+    private void grow(long needed) {
         // Long math: capacity * 2 overflows negative past 1 GiB, and Math.max would then
         // silently pick the (still too small) needed value, turning every later alloc into
         // another grow (M22).
