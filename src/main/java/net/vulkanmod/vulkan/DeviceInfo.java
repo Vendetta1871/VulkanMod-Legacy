@@ -27,6 +27,7 @@ public class DeviceInfo {
     public final String driverVersion;
     /** Set once the logical device is created (B1). */
     public DeviceFeatures features;
+    public final float maxSamplerAnisotropy;
 
     static {
         cpuInfo = System.getProperty("os.arch", "unknown");
@@ -37,6 +38,7 @@ public class DeviceInfo {
         this.vendorId = String.valueOf(properties.vendorID());
         this.deviceName = properties.deviceNameString();
         this.driverVersion = String.valueOf(properties.driverVersion());
+        this.maxSamplerAnisotropy = properties.limits().maxSamplerAnisotropy();
     }
 
     private String unsupportedExtensions(Set<String> requiredExtensions) {

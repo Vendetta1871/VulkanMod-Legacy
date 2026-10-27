@@ -520,6 +520,17 @@ public class VulkanImage {
         return created;
     }
 
+    private static float anisotropy() {
+        net.vulkanmod.vulkan.DeviceInfo info = net.vulkanmod.vulkan.Vulkan.getDeviceInfo();
+        if (info == null || info.features == null || !info.features.samplerAnisotropy) return 1.0f;
+        float wanted = 16.0f;
+        String env = System.getenv("VULKANMOD_ANISO");
+        if (env != null) {
+            try { wanted = Float.parseFloat(env); } catch (NumberFormatException ignored) {}
+        }
+        return Math.min(wanted, info.maxSamplerAnisotropy);
+    }
+
     private static long createSampler(boolean blur, boolean clamp, boolean mipmap, float lodBias) {
 
         try(MemoryStack stack = stackPush()) {
@@ -550,8 +561,10 @@ public class VulkanImage {
                 samplerInfo.addressModeW(VK_SAMPLER_ADDRESS_MODE_REPEAT);
             }
 
-            samplerInfo.anisotropyEnable(false);
-            //samplerInfo.maxAnisotropy(16.0f);
+            // Mipmapped world textures keep detail at grazing angles (VULKANMOD_ANISO=0 disables).
+            float aniso = mipmap ? anisotropy() : 1.0f;
+            samplerInfo.anisotropyEnable(aniso > 1.0f);
+            samplerInfo.maxAnisotropy(Math.max(aniso, 1.0f));
             samplerInfo.borderColor(VK_BORDER_COLOR_INT_OPAQUE_WHITE);
             samplerInfo.unnormalizedCoordinates(false);
             samplerInfo.compareEnable(false);
