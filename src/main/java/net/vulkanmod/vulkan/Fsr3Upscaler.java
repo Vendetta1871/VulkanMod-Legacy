@@ -20,9 +20,6 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class Fsr3Upscaler {
 
-    /** RCAS sharpness, 0..1 (VULKANMOD_FSR3_SHARPNESS). */
-    private static final float SHARPNESS = readFloat("VULKANMOD_FSR3_SHARPNESS", 0.3f, 0.0f, 1.0f);
-
     /** ffxContext handle storage (a pointer-sized native slot). */
     private static long pContext;
     private static boolean contextValid;
@@ -34,15 +31,6 @@ final class Fsr3Upscaler {
     private static ByteBuffer dispatchDesc;
 
     private Fsr3Upscaler() {}
-
-    private static float readFloat(String env, float def, float min, float max) {
-        try {
-            String v = System.getenv(env);
-            return v != null ? Math.max(min, Math.min(max, Float.parseFloat(v))) : def;
-        } catch (NumberFormatException e) {
-            return def;
-        }
-    }
 
     /** True when the native library is present and no context creation failed. */
     static boolean available() {
@@ -152,8 +140,9 @@ final class Fsr3Upscaler {
         d.putInt(DU_RENDER_SIZE + 4, scene.height());
         d.putInt(DU_UPSCALE_SIZE, display.width());
         d.putInt(DU_UPSCALE_SIZE + 4, display.height());
-        d.put(DU_SHARPEN, (byte) (SHARPNESS > 0.0f ? 1 : 0));
-        d.putFloat(DU_SHARPNESS, SHARPNESS);
+        float sharpness = Initializer.CONFIG.effectiveFsr3Sharpness();
+        d.put(DU_SHARPEN, (byte) (sharpness > 0.0f ? 1 : 0));
+        d.putFloat(DU_SHARPNESS, sharpness);
         d.putFloat(DU_FRAME_TIME, frameMs);
         d.putFloat(DU_PRE_EXPOSURE, 1.0f);
         d.put(DU_RESET, (byte) (resetNext || !CameraHistory.hasPrevious() ? 1 : 0));

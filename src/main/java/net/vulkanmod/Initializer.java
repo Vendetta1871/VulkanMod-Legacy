@@ -43,6 +43,15 @@ public class Initializer {
     private static class WindowNotReady extends Exception {
     }
 
+    private static Path configPath;
+
+    /** Writes the current settings back to config/vulkanmod_settings.json. */
+    public static void saveConfig() {
+        if (CONFIG != null && configPath != null) {
+            CONFIG.write(configPath);
+        }
+    }
+
     public static void init() {
         if (initialized) {
             return;
@@ -51,7 +60,7 @@ public class Initializer {
 
         LOGGER.info("== VulkanMod ==");
 
-        Path configPath = Paths.get("config", "vulkanmod_settings.json").toAbsolutePath();
+        configPath = Paths.get("config", "vulkanmod_settings.json").toAbsolutePath();
         CONFIG = Config.load(configPath);
         if (CONFIG == null) {
             CONFIG = new Config();

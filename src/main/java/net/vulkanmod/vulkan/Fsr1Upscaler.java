@@ -16,9 +16,6 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class Fsr1Upscaler {
 
-    /** RCAS sharpness in stops: 0 = maximum; AMD's default is 0.2. */
-    private static final float SHARPNESS = readSharpness();
-
     private static final int EASU = 0, RCAS = 1;
 
     private static ComputeSets sets;
@@ -31,15 +28,6 @@ final class Fsr1Upscaler {
 
     private Fsr1Upscaler() {}
 
-    private static float readSharpness() {
-        String env = System.getenv("VULKANMOD_FSR_SHARPNESS");
-        try {
-            return env != null ? Math.max(0.0f, Math.min(2.0f, Float.parseFloat(env))) : 0.2f;
-        } catch (NumberFormatException e) {
-            return 0.2f;
-        }
-    }
-
     private static void init() {
         sets = new ComputeSets(2);
         long[] layouts = {sets.layout};
@@ -51,7 +39,7 @@ final class Fsr1Upscaler {
                 ShaderSPIRVUtils.ShaderKind.COMPUTE_SHADER);
         rcas = new ComputePipeline(rcasSpv, layouts, 16);
         rcasSpv.free();
-        Initializer.LOGGER.info("[fsr1] ready, sharpness {}", SHARPNESS);
+        Initializer.LOGGER.info("[fsr1] ready");
     }
 
     /** Makes the intermediate match the display extent and points the sets at the current images. */
@@ -110,7 +98,8 @@ final class Fsr1Upscaler {
         FrameTargets.pipelineBarrier(cmd, mid, stack);
 
         ByteBuffer rcasCon = stack.calloc(16);
-        rcasCon.putInt(0, Float.floatToRawIntBits((float) Math.pow(2.0, -SHARPNESS)));
+        float sharpness = Initializer.CONFIG.effectiveFsr1Sharpness();
+        rcasCon.putInt(0, Float.floatToRawIntBits((float) Math.pow(2.0, -sharpness)));
         rcas.bind(cmd);
         sets.bind(cmd, rcas.layout(), RCAS);
         vkCmdPushConstants(cmd, rcas.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, rcasCon);

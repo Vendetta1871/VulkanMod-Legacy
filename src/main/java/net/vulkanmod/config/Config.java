@@ -24,6 +24,52 @@ public class Config {
     /** Batch GUI draws through the Vulkan GUI renderer. */
     public boolean guiOptimizations = true;
 
+    /** World resolution relative to the window, 0.25..1; below 1 the upscaler fills in (F7). */
+    public float renderScale = 1.0f;
+    /** auto (FSR 3 when scaled and available, else FSR 1) | fsr3 | fsr1 | blit. */
+    public String upscaler = "auto";
+    /** FSR 1 RCAS sharpness in stops: 0 = strongest. */
+    public float fsr1Sharpness = 0.2f;
+    /** FSR 3 sharpening strength 0..1: 0 = off. */
+    public float fsr3Sharpness = 0.3f;
+
+    // Environment overrides (tests and autotest runs) take precedence over the file.
+
+    public float effectiveRenderScale() {
+        return clamp(envFloat("VULKANMOD_RENDER_SCALE", renderScale), 0.25f, 1.0f);
+    }
+
+    public String effectiveUpscaler() {
+        String env = System.getenv("VULKANMOD_UPSCALER");
+        String v = (env != null ? env : upscaler == null ? "auto" : upscaler).toLowerCase();
+        return switch (v) {
+            case "fsr3", "fsr1", "blit" -> v;
+            default -> "auto";
+        };
+    }
+
+    public float effectiveFsr1Sharpness() {
+        return clamp(envFloat("VULKANMOD_FSR_SHARPNESS", fsr1Sharpness), 0.0f, 2.0f);
+    }
+
+    public float effectiveFsr3Sharpness() {
+        return clamp(envFloat("VULKANMOD_FSR3_SHARPNESS", fsr3Sharpness), 0.0f, 1.0f);
+    }
+
+    private static float envFloat(String name, float fallback) {
+        String v = System.getenv(name);
+        if (v == null) return fallback;
+        try {
+            return Float.parseFloat(v);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static float clamp(float v, float min, float max) {
+        return Float.isNaN(v) ? min : Math.max(min, Math.min(max, v));
+    }
+
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
             .excludeFieldsWithModifiers(Modifier.PRIVATE)

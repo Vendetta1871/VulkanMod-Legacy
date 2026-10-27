@@ -35,17 +35,16 @@ public final class FrameTargets {
 
     private static int depthFormat;
     private static boolean depthHasStencil;
-    private static float renderScale = readRenderScale();
+    private static float renderScale = 1.0f;
     private static Phase phase = Phase.NONE;
     private static int generation;
     /**
-     * VULKANMOD_UPSCALER = fsr3 | fsr1 | blit (temporary until the settings screen, F7).
-     * Unset: FSR 3 when the scene is scaled and the native library loads, else FSR 1.
+     * auto | fsr3 | fsr1 | blit (Config.upscaler, VULKANMOD_UPSCALER overrides).
+     * auto: FSR 3 when the scene is scaled and the native library loads, else FSR 1.
      * "fsr3" also runs at scale 1 (native AA).
      */
-    private static final String UPSCALER = System.getenv("VULKANMOD_UPSCALER") == null
-            ? "auto" : System.getenv("VULKANMOD_UPSCALER").toLowerCase();
-    private static final boolean BLIT_ONLY = UPSCALER.equals("blit");
+    private static String upscaler = "auto";
+    private static boolean blitOnly;
     private static boolean temporal;
 
     private FrameTargets() {}
@@ -60,18 +59,23 @@ public final class FrameTargets {
     public static int currentWidth() { return phase == Phase.SCENE ? scene.width() : display.width(); }
     public static int currentHeight() { return phase == Phase.SCENE ? scene.height() : display.height(); }
 
-    private static float readRenderScale() {
-        // Temporary switch until the settings screen exists (F7).
-        String env = System.getenv("VULKANMOD_RENDER_SCALE");
-        if (env == null) return 1.0f;
-        try {
-            return Math.max(0.25f, Math.min(1.0f, Float.parseFloat(env)));
-        } catch (NumberFormatException e) {
-            return 1.0f;
+    /**
+     * Re-reads the upscaling settings (F7). A changed render scale recreates the targets
+     * with the next swapchain recreation, which runs at the start of the next frame.
+     */
+    public static void applySettings() {
+        net.vulkanmod.config.Config config = net.vulkanmod.Initializer.CONFIG;
+        upscaler = config.effectiveUpscaler();
+        blitOnly = upscaler.equals("blit");
+        float scale = config.effectiveRenderScale();
+        if (scale != renderScale) {
+            renderScale = scale;
+            if (display.width() > 0) Drawer.shouldRecreate = true;
         }
     }
 
     static void init(int depthFormat) {
+        applySettings();
         FrameTargets.depthFormat = depthFormat;
         depthHasStencil = depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT || depthFormat == VK_FORMAT_D24_UNORM_S8_UINT;
     }
@@ -125,12 +129,12 @@ public final class FrameTargets {
         float bias = (float) (Math.log(ratio) / Math.log(2.0)) - (temporal ? 1.0f : 0.0f);
         // Quantized: every distinct value creates a sampler variant.
         lodBias = Math.round(bias * 8.0f) / 8.0f;
-        lodBiasActive = !BLIT_ONLY && lodBias != 0.0f;
+        lodBiasActive = !blitOnly && lodBias != 0.0f;
     }
 
     /** Whether this frame uses the temporal upscaler (decided at frame start: jitter depends on it). */
     private static boolean wantTemporal() {
-        boolean requested = UPSCALER.equals("fsr3") || (UPSCALER.equals("auto") && scaled());
+        boolean requested = upscaler.equals("fsr3") || (upscaler.equals("auto") && scaled());
         return requested && Fsr3Upscaler.available();
     }
 
@@ -179,7 +183,7 @@ public final class FrameTargets {
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
             depthToAttachment(depth.get(0), display);
             pipelineBarrier(cmd, depth, stack);
-        } else if (!BLIT_ONLY && scaled()) {
+        } else if (!blitOnly && scaled()) {
             // F0: FSR 1 upscale; leaves the display color ready as an attachment.
             Fsr1Upscaler.record(cmd, stack);
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
