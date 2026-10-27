@@ -179,7 +179,12 @@ public class Drawer {
         try(MemoryStack stack = stackPush()) {
             VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
 
-            vkCmdSetLineWidth(commandBuffer, VRenderSystem.getLineWidth());
+            // The dragon's healing beams also come through here as a triangle strip; only
+            // line pipelines declare the dynamic line width (VUID-vkCmdDraw-None-08608).
+            int topology = VRenderSystem.topology;
+            if (topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP) {
+                vkCmdSetLineWidth(commandBuffer, VRenderSystem.getLineWidth());
+            }
             vkCmdBindVertexBuffers(commandBuffer, 0, stack.longs(vertexBuffer.getId()), stack.longs(vertexBuffer.getOffset()));
             vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
         }
