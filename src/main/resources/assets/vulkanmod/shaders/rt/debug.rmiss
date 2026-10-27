@@ -1,8 +1,10 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
 
-layout(location = 0) rayPayloadInEXT vec4 payload;
+layout(location = 0) rayPayloadInEXT Payload payload;
 
 void main() {
-    payload = vec4(0.45, 0.62, 0.95, 1.0);
+    payload.t = -1.0;
 }

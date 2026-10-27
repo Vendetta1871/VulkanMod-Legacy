@@ -61,6 +61,8 @@ public final class RtScene {
 
     private static RtBuffer scratch;
     private static RtBuffer[] instanceBuffers = new RtBuffer[INSTANCE_RING];
+    /** Per TLAS instance (gl_InstanceID): device address of the section's vertices. */
+    private static RtBuffer[] instanceDataBuffers = new RtBuffer[INSTANCE_RING];
     private static int instanceRingIndex;
 
     private static long tlas;
@@ -165,6 +167,10 @@ public final class RtScene {
     public static boolean ready() { return tlasBuilt; }
     public static int instanceCount() { return tlasInstanceCount; }
 
+    /** This frame's instance data buffer (one uint64 vertex address per instance). */
+    public static long instanceDataBuffer() { return instanceDataBuffers[instanceRingIndex].buffer; }
+    public static long instanceDataSize() { return instanceDataBuffers[instanceRingIndex].size; }
+
     /**
      * Records BLAS builds for queued sections and the TLAS build. Runs outside rendering,
      * after the scene phase; the frame's arena uploads were submitted before this command
@@ -240,8 +246,9 @@ public final class RtScene {
                 VkAccelerationStructureGeometryKHR.Buffer geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack);
                 geometry.get(0).sType$Default()
                         .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR)
-                        // Cutout layers are treated as opaque until any-hit alpha testing exists.
-                        .flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+                        // Cutout sections run the any-hit alpha test; once per primitive is enough.
+                        .flags(s.mask == MASK_OPAQUE ? VK_GEOMETRY_OPAQUE_BIT_KHR
+                                : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR);
                 geometry.get(0).geometry().triangles().sType$Default()
                         .vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
                         .vertexStride(ChunkBatcher.STRIDE)
@@ -326,6 +333,18 @@ public final class RtScene {
                 instanceBuffers[instanceRingIndex] = instances;
             }
 
+            RtBuffer data = instanceDataBuffers[instanceRingIndex];
+            if (data == null || data.size < (long) Math.max(1, count) * 8) {
+                if (data != null) {
+                    RtBuffer old = data;
+                    RtBuffer.defer(old::destroyNow);
+                }
+                data = RtBuffer.create(Math.max((long) count * 8, 4096L * 8) * 2,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+                instanceDataBuffers[instanceRingIndex] = data;
+            }
+            long arenaAddress = RtBuffer.addressOf(ChunkBatcher.arena().bufferId());
+
             double cx = CameraHistory.camX(), cy = CameraHistory.camY(), cz = CameraHistory.camZ();
             ByteBuffer m = instances.mapped;
             int n = 0;
@@ -340,6 +359,7 @@ public final class RtScene {
                 // SBT offset 0; the geometry is flagged opaque already.
                 m.putInt(o + 52, 0);
                 m.putLong(o + 56, s.blasAddress);
+                data.mapped.putLong(n * 8, arenaAddress + s.arenaOffset);
                 n++;
             }
             tlasInstanceCount = n;
@@ -425,6 +445,7 @@ public final class RtScene {
         if (scratch != null) { scratch.destroyNow(); scratch = null; }
         for (int i = 0; i < INSTANCE_RING; i++) {
             if (instanceBuffers[i] != null) { instanceBuffers[i].destroyNow(); instanceBuffers[i] = null; }
+            if (instanceDataBuffers[i] != null) { instanceDataBuffers[i].destroyNow(); instanceDataBuffers[i] = null; }
         }
         RtBuffer.flushAll();
         tlasBuilt = false;

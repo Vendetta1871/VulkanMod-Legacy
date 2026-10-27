@@ -1,0 +1,16 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#define RT_HIT
+#include "common.glsl"
+// Alpha test for cutout sections (grass, leaves, flowers): vanilla's 0.1 threshold.
+
+hitAttributeEXT vec2 bary;
+
+void main() {
+    ChunkVertex a, b, c;
+    fetchTriangle(a, b, c);
+    if (textureLod(blockAtlas, interpolateUv(a, b, c, bary), 0.0).a < 0.1) {
+        ignoreIntersectionEXT;
+    }
+}
