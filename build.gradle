@@ -113,6 +113,16 @@ processResources {
     filesMatching('mcmod.info') {
         expand version: modVersion
     }
+    // FSR 3 native libraries (F5): -PffxNatives=<dir> with linux-x64/libamd_fidelityfx_vk.so
+    // and/or windows-x64/amd_fidelityfx_vk.dll. Without it the jar falls back to FSR 1.
+    def ffxNatives = project.findProperty('ffxNatives')
+    if (ffxNatives) {
+        inputs.dir ffxNatives
+        from(ffxNatives) {
+            include 'linux-x64/libamd_fidelityfx_vk.so', 'windows-x64/amd_fidelityfx_vk.dll'
+            into 'natives'
+        }
+    }
 }
 
 def generatedVersionDir = layout.buildDirectory.dir('generated/sources/version/java')

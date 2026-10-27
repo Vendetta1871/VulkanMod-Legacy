@@ -1,0 +1,87 @@
+--- a/sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.h
++++ b/sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.h
+@@ -41,7 +41,11 @@
+ //   - On Windows, critical section and events are faster than their std counterparts
+ //   - using Win32 threads to set the priorities
+ //   - this needs to be ported to standard C++ or other platform if necessary
++#ifdef _WIN32
+ #include <Windows.h>
++#else
++#include "ffx_linux_compat.h"
++#endif
+ 
+ #define FFX_FRAME_INTERPOLATION_SWAP_CHAIN_VERSION                     1
+ #define FFX_FRAME_INTERPOLATION_SWAP_CHAIN_MAX_BUFFER_COUNT            6
+--- a/sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_Helpers.h
++++ b/sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK_Helpers.h
+@@ -27,8 +27,12 @@
+ #include <FidelityFX/host/ffx_assert.h>
+ #include <FidelityFX/host/backends/vk/ffx_vk.h>
+ 
++#ifdef _WIN32
+ #include <Windows.h>
+ #include <synchapi.h>
++#else
++#include "ffx_linux_compat.h"
++#endif
+ 
+ 
+ void waitForPerformanceCount(const int64_t targetCount);
+--- a/sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp
++++ b/sdk/src/backends/vk/FrameInterpolationSwapchain/FrameInterpolationSwapchainVK.cpp
+@@ -660,7 +660,7 @@
+         switch (key)
+         {
+             case FFX_FI_SWAPCHAIN_CONFIGURE_KEY_WAITCALLBACK:
+-                pSwapChainVK->setWaitCallback(static_cast<FfxWaitCallbackFunc>(valuePtr));
++                pSwapChainVK->setWaitCallback(reinterpret_cast<FfxWaitCallbackFunc>(valuePtr));
+             break;
+             case FFX_FI_SWAPCHAIN_CONFIGURE_KEY_FRAMEPACINGTUNING:
+                 if (valuePtr != nullptr)
+@@ -1184,7 +1184,8 @@
+                     // if no frame was presented, we still need to update the semaphore
+                     if (toWait.count > 0)
+                     {
+-                        presenter->presentQueue.submit(VK_NULL_HANDLE, toWait, SubmissionSemaphores());
++                        SubmissionSemaphores noSignalSemaphores;
++                        presenter->presentQueue.submit(VK_NULL_HANDLE, toWait, noSignalSemaphores);
+                     }
+ 
+                     numFramesSentForPresentation = entry.numFramesSentForPresentationBase + entry.numFramesToPresent;
+@@ -1357,8 +1358,10 @@
+ 
+     VkImageCompressionControlEXT             imageCompressionControl;
+     VkImageFormatListCreateInfo              imageFormatList;
++#ifdef VK_USE_PLATFORM_WIN32_KHR
+     VkSurfaceFullScreenExclusiveInfoEXT      surfaceFullScreenExclusive;
+     VkSurfaceFullScreenExclusiveWin32InfoEXT surfaceFullScreenExclusiveWin32;
++#endif // VK_USE_PLATFORM_WIN32_KHR
+     VkSwapchainCounterCreateInfoEXT          swapchainCounter;
+     VkSwapchainDisplayNativeHdrCreateInfoAMD swapchainDisplayNativeHdr;
+     VkSwapchainPresentModesCreateInfoEXT     swapchainPresentModes;
+@@ -1392,6 +1395,7 @@
+         case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO:
+             FFX_USE_PNEXT_AS_IS(imageFormatList, VkImageFormatListCreateInfo);
+             break;
++#ifdef VK_USE_PLATFORM_WIN32_KHR
+         case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT:
+             realSwapchainCreateInfo.surfaceFullScreenExclusive       = *reinterpret_cast<const VkSurfaceFullScreenExclusiveInfoEXT*>(pCurrent);
+             realSwapchainCreateInfo.surfaceFullScreenExclusive.pNext = const_cast<void*>(realSwapchainCreateInfo.swapchain.pNext);  // because pNext is void* instead of const void* in vulkan header
+@@ -1400,6 +1404,7 @@
+         case VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT:
+             FFX_USE_PNEXT_AS_IS(surfaceFullScreenExclusiveWin32, VkSurfaceFullScreenExclusiveWin32InfoEXT);
+             break;
++#endif // VK_USE_PLATFORM_WIN32_KHR
+         case VK_STRUCTURE_TYPE_SWAPCHAIN_COUNTER_CREATE_INFO_EXT:
+             FFX_USE_PNEXT_AS_IS(swapchainCounter, VkSwapchainCounterCreateInfoEXT);
+             break;
+@@ -2823,7 +2828,8 @@
+         // if no frame was presented, we still need to update the semaphore
+         if (toWait.count > 0)
+         {
+-            res = presentInfo.gameQueue.submit(VK_NULL_HANDLE, toWait, SubmissionSemaphores());
++            SubmissionSemaphores noSignalSemaphores;
++            res = presentInfo.gameQueue.submit(VK_NULL_HANDLE, toWait, noSignalSemaphores);
+         }
+     }
+ 

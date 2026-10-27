@@ -1,0 +1,28 @@
+--- a/sdk/include/FidelityFX/host/ffx_types.h
++++ b/sdk/include/FidelityFX/host/ffx_types.h
+@@ -77,7 +77,14 @@
+ #define FFX_API __declspec(dllexport)
+ #endif // #if defined (FFX_GCC)
+ 
++#if defined(_WIN32)
+ #define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 128)
++#else
++/// On non-Windows platforms <c>wchar_t</c> is 4 bytes wide instead of 2, which
++/// grows the private context structures (resource name arrays) well beyond the
++/// Windows sizing, so the opaque context needs more room.
++#define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 256)
++#endif
+ 
+ /// Maximum supported number of simultaneously bound SRVs.
+ ///
+@@ -102,7 +109,9 @@
+ /// Maximum number of queued frames in the backend
+ ///
+ /// @ingroup Defines
+-#define FFX_MAX_QUEUED_FRAMES          (4)
++// Linux port: views live this many UnregisterResources calls, not frames. Two dispatches
++// per frame (upscale + reactive mask) with up to three frames in flight need more than 4.
++#define FFX_MAX_QUEUED_FRAMES          (8)
+ 
+ /// Maximum number of resources per effect context
+ ///

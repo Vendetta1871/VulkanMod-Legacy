@@ -1,0 +1,71 @@
+--- a/ffx-api/src/ffx_provider.cpp
++++ b/ffx-api/src/ffx_provider.cpp
+@@ -30,7 +30,9 @@
+ #include <array>
+ #include <optional>
+ 
++#ifdef FFX_BACKEND_DX12
+ #include <d3d12.h>
++#endif // FFX_BACKEND_DX12
+ 
+ #ifdef FFX_BACKEND_DX12
+ #include "dx12/ffx_provider_framegenerationswapchain_dx12.h"
+@@ -55,6 +57,7 @@
+ 
+ static std::array<std::optional<ffxProviderExternal>, 10> externalProviders = {};
+ 
++#ifdef FFX_BACKEND_DX12
+ MIDL_INTERFACE("b58d6601-7401-4234-8180-6febfc0e484c")
+ IAmdExtFfxApi : public IUnknown
+ {
+@@ -130,11 +133,16 @@
+     }
+     
+ }
++#endif // FFX_BACKEND_DX12
+ 
+ const ffxProvider* GetffxProvider(ffxStructType_t descType, uint64_t overrideId, void* device)
+ {
+     // check driver-side providers
++#ifdef FFX_BACKEND_DX12
+     GetExternalProviders(reinterpret_cast<ID3D12Device*>(device), descType);
++#else
++    (void)device;
++#endif // FFX_BACKEND_DX12
+ 
+     // If we are overriding, do not make the best provider choice decision
+     if (overrideId)
+@@ -217,7 +225,11 @@
+     uint64_t count = 0;
+ 
+     // check driver-side providers
++#ifdef FFX_BACKEND_DX12
+     GetExternalProviders(reinterpret_cast<ID3D12Device*>(device), descType);
++#else
++    (void)device;
++#endif // FFX_BACKEND_DX12
+ 
+     for (const auto& provider : externalProviders)
+     {
+--- a/ffx-api/src/ffx_provider.h
++++ b/ffx-api/src/ffx_provider.h
+@@ -23,7 +23,7 @@
+ #pragma once
+ #include <ffx_api/ffx_api.hpp>
+ #include <ffx_api/ffx_api_types.h>
+-#include <FidelityFx/host/ffx_types.h>
++#include <FidelityFX/host/ffx_types.h>
+ 
+ #define VERIFY(_cond, _retcode) \
+     if (!(_cond)) return _retcode
+--- a/ffx-api/src/backends.h
++++ b/ffx-api/src/backends.h
+@@ -23,7 +23,7 @@
+ #pragma once
+ #include "ffx_provider.h"
+ #include <ffx_api/ffx_api.hpp>
+-#include <FidelityFx/host/ffx_interface.h>
++#include <FidelityFX/host/ffx_interface.h>
+ 
+ ffxReturnCode_t CreateBackend(const ffxCreateContextDescHeader* desc, bool& backendFound, FfxInterface* iface, size_t contexts, Allocator& alloc);
+ 

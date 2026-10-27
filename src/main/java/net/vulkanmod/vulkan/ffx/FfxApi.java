@@ -90,16 +90,19 @@ public final class FfxApi {
     private FfxApi() {}
 
     /**
-     * Loads the native library once. Path: VULKANMOD_FFX_LIB, else the platform name
-     * (amd_fidelityfx_vk.dll / libamd_fidelityfx_vk.so) through the system search path.
+     * Loads the native library once. Order: VULKANMOD_FFX_LIB; the copy bundled in the jar
+     * (natives/<platform>/, extracted to config/vulkanmod/natives); the platform name
+     * through the system search path.
      */
     public static synchronized boolean load() {
         if (loadAttempted) return library != null;
         loadAttempted = true;
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        String fileName = windows ? "amd_fidelityfx_vk.dll" : "libamd_fidelityfx_vk.so";
         String path = System.getenv("VULKANMOD_FFX_LIB");
         if (path == null || path.isEmpty()) {
-            path = System.getProperty("os.name", "").toLowerCase().contains("win")
-                    ? "amd_fidelityfx_vk.dll" : "libamd_fidelityfx_vk.so";
+            String bundled = extractBundled((windows ? "windows-x64/" : "linux-x64/") + fileName, fileName);
+            path = bundled != null ? bundled : fileName;
         }
         try {
             SharedLibrary lib = APIUtil.apiCreateLibrary(path);
@@ -120,6 +123,31 @@ public final class FfxApi {
         } catch (Throwable t) {
             Initializer.LOGGER.info("[ffx] native library not available ({}): {}", path, t.getMessage());
             return false;
+        }
+    }
+
+    /** Copies natives/<resource> out of the jar when present; returns the file path or null. */
+    private static String extractBundled(String resource, String fileName) {
+        if (!"amd64".equals(System.getProperty("os.arch")) && !"x86_64".equals(System.getProperty("os.arch"))) {
+            return null;
+        }
+        try (java.io.InputStream in = FfxApi.class.getResourceAsStream("/natives/" + resource)) {
+            if (in == null) return null;
+            byte[] bytes = in.readAllBytes();
+            java.nio.file.Path dir = java.nio.file.Paths.get("config", "vulkanmod", "natives").toAbsolutePath();
+            java.nio.file.Files.createDirectories(dir);
+            java.nio.file.Path file = dir.resolve(fileName);
+            // Rewrite only when the bundled copy changed (a loaded library must not be overwritten).
+            if (!java.nio.file.Files.isRegularFile(file)
+                    || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(file), bytes)) {
+                java.nio.file.Path tmp = dir.resolve(fileName + ".tmp");
+                java.nio.file.Files.write(tmp, bytes);
+                java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            return file.toString();
+        } catch (java.io.IOException e) {
+            Initializer.LOGGER.warn("[ffx] could not extract bundled {}: {}", resource, e.toString());
+            return null;
         }
     }
 

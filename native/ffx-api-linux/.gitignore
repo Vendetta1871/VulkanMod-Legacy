@@ -1,0 +1,6 @@
+ffx-sdk-1.1.4/
+src/
+generated/
+build/
+build-*/
+wineprefix/

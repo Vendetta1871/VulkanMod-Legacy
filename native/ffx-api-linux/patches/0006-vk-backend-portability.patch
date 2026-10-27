@@ -1,0 +1,193 @@
+--- a/sdk/src/backends/vk/ffx_vk.cpp
++++ b/sdk/src/backends/vk/ffx_vk.cpp
+@@ -29,8 +29,6 @@
+ 
+ #ifdef _WIN32
+ #include <windows.h>
+-#else
+-#include <codecvt>  // this is deprecated so it's just a fallback solution
+ #endif  // _WIN32
+ 
+ #include <vulkan/vulkan.h>
+@@ -272,6 +270,20 @@
+ 
+ } BackendContext_VK;
+ 
++// The scratch buffer is carved up into typed sub-arrays. Some of the element
++// types have a strict alignment requirement (EffectContext is declared
++// alignas(32)) and compilers emit aligned vector stores when clearing them, so
++// every sub-array must start at an address that satisfies the strictest of
++// them. MSVC tolerates the 4-byte alignment the original code used, GCC and
++// Clang do not. The extra slack in ffxGetScratchMemorySizeVK covers the
++// padding needed to align the first sub-array after BackendContext_VK, as the
++// scratch buffer itself is only guaranteed to be as aligned as the caller
++// makes it.
++// Declared as uintptr_t so that FFX_ALIGN_UP() produces a full width mask when
++// applied to pointers: with a 32-bit mask operand the inverted mask would be
++// zero-extended and clear the upper half of the address.
++constexpr uintptr_t SCRATCH_ARRAY_ALIGNMENT = 32;
++
+ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t maxContexts)
+ {
+     uint32_t numExtensions = 0;
+@@ -280,16 +292,16 @@
+         vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &numExtensions, nullptr);
+ 
+     uint32_t extensionPropArraySize = sizeof(VkExtensionProperties) * numExtensions;
+-    uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
+-    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+-    uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
+-    uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
+-    uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
+-    uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
+-    
+-    return FFX_ALIGN_UP(sizeof(BackendContext_VK) + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
++    uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), SCRATCH_ARRAY_ALIGNMENT);
++    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), SCRATCH_ARRAY_ALIGNMENT);
++    uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, SCRATCH_ARRAY_ALIGNMENT);
++    uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), SCRATCH_ARRAY_ALIGNMENT);
++    uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), SCRATCH_ARRAY_ALIGNMENT);
++    uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), SCRATCH_ARRAY_ALIGNMENT);
++
++    return FFX_ALIGN_UP(sizeof(BackendContext_VK) + SCRATCH_ARRAY_ALIGNMENT + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
+                             pipelineArraySize + resourceArraySize + contextArraySize,
+-                        sizeof(uint64_t));
++                        SCRATCH_ARRAY_ALIGNMENT);
+ }
+ 
+ // Create a FfxDevice from a VkDevice
+@@ -1117,17 +1129,96 @@
+     }
+ }
+ #else
++// std::wstring_convert/std::codecvt have been removed from recent C++ standard
++// libraries, so the UTF-8 <-> UTF-32 (wchar_t on this platform) conversions the
++// backend needs for debug names are implemented directly.
++static uint32_t decodeUTF8(const unsigned char*& cursor)
++{
++    const uint32_t lead = *cursor++;
++    if (lead < 0x80)
++        return lead;
++
++    uint32_t codePoint = 0;
++    uint32_t trailing  = 0;
++    if ((lead & 0xE0) == 0xC0)
++    {
++        codePoint = lead & 0x1F;
++        trailing  = 1;
++    }
++    else if ((lead & 0xF0) == 0xE0)
++    {
++        codePoint = lead & 0x0F;
++        trailing  = 2;
++    }
++    else if ((lead & 0xF8) == 0xF0)
++    {
++        codePoint = lead & 0x07;
++        trailing  = 3;
++    }
++    else
++    {
++        return 0xFFFD;  // invalid lead byte
++    }
++
++    for (uint32_t i = 0; i < trailing; ++i)
++    {
++        if ((*cursor & 0xC0) != 0x80)
++            return 0xFFFD;
++        codePoint = (codePoint << 6) | (*cursor++ & 0x3F);
++    }
++    return codePoint;
++}
++
+ void ConvertUTF8ToUTF16(const char* inputName, wchar_t* outputBuffer, size_t outputLen)
+ {
+     memset(outputBuffer, 0, outputLen * sizeof(wchar_t));
+-    std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
+-    wcscpy_s(outputBuffer, outputLen, converter.from_bytes(inputName).c_str());
++    if (inputName == nullptr || outputLen == 0)
++        return;
++
++    size_t         written = 0;
++    const unsigned char* cursor = reinterpret_cast<const unsigned char*>(inputName);
++    while (*cursor != 0 && (written + 1) < outputLen)
++    {
++        outputBuffer[written++] = static_cast<wchar_t>(decodeUTF8(cursor));
++    }
+ }
+ void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBuffer, size_t outputLen)
+ {
+     memset(outputBuffer, 0, outputLen * sizeof(char));
+-    std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
+-    strcpy_s(outputBuffer, outputLen, converter.to_bytes(inputName).c_str());
++    if (inputName == nullptr || outputLen == 0)
++        return;
++
++    size_t written = 0;
++    for (const wchar_t* cursor = inputName; *cursor != 0; ++cursor)
++    {
++        const uint32_t codePoint = static_cast<uint32_t>(*cursor);
++        if (codePoint < 0x80)
++        {
++            if ((written + 1) >= outputLen) break;
++            outputBuffer[written++] = static_cast<char>(codePoint);
++        }
++        else if (codePoint < 0x800)
++        {
++            if ((written + 2) >= outputLen) break;
++            outputBuffer[written++] = static_cast<char>(0xC0 | (codePoint >> 6));
++            outputBuffer[written++] = static_cast<char>(0x80 | (codePoint & 0x3F));
++        }
++        else if (codePoint < 0x10000)
++        {
++            if ((written + 3) >= outputLen) break;
++            outputBuffer[written++] = static_cast<char>(0xE0 | (codePoint >> 12));
++            outputBuffer[written++] = static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
++            outputBuffer[written++] = static_cast<char>(0x80 | (codePoint & 0x3F));
++        }
++        else
++        {
++            if ((written + 4) >= outputLen) break;
++            outputBuffer[written++] = static_cast<char>(0xF0 | (codePoint >> 18));
++            outputBuffer[written++] = static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
++            outputBuffer[written++] = static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
++            outputBuffer[written++] = static_cast<char>(0x80 | (codePoint & 0x3F));
++        }
++    }
+ }
+ #endif  // _WIN32
+ 
+@@ -1402,13 +1493,14 @@
+         new (&backendContext->uniformBufferMutex) std::mutex();
+ 
+         // Map all of our pointers
+-        uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
+-        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+-        uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
+-        uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
+-        uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
+-        uint32_t contextArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
++        uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), SCRATCH_ARRAY_ALIGNMENT);
++        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), SCRATCH_ARRAY_ALIGNMENT);
++        uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, SCRATCH_ARRAY_ALIGNMENT);
++        uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), SCRATCH_ARRAY_ALIGNMENT);
++        uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), SCRATCH_ARRAY_ALIGNMENT);
++        uint32_t contextArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * sizeof(BackendContext_VK::EffectContext), SCRATCH_ARRAY_ALIGNMENT);
+         uint8_t* pMem = (uint8_t*)((BackendContext_VK*)(backendContext + 1));
++        pMem = (uint8_t*)(FFX_ALIGN_UP((uintptr_t)pMem, SCRATCH_ARRAY_ALIGNMENT));
+ 
+         // Map gpu job array
+         backendContext->pGpuJobs = (FfxGpuJobDescription*)pMem;
+@@ -1485,6 +1577,12 @@
+         backendContext->vkFunctionTable.vkDestroyShaderModule = (PFN_vkDestroyShaderModule)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkDestroyShaderModule");
+         backendContext->vkFunctionTable.vkGetBufferMemoryRequirements = (PFN_vkGetBufferMemoryRequirements)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkGetBufferMemoryRequirements");
+         backendContext->vkFunctionTable.vkGetBufferMemoryRequirements2KHR = (PFN_vkGetBufferMemoryRequirements2KHR)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkGetBufferMemoryRequirements2KHR");
++        // Not every Vulkan loader/driver exposes the KHR alias of this promoted
++        // Vulkan 1.1 entry point, so fall back to the core name.
++        if (backendContext->vkFunctionTable.vkGetBufferMemoryRequirements2KHR == nullptr)
++        {
++            backendContext->vkFunctionTable.vkGetBufferMemoryRequirements2KHR = (PFN_vkGetBufferMemoryRequirements2KHR)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkGetBufferMemoryRequirements2");
++        }
+         backendContext->vkFunctionTable.vkGetImageMemoryRequirements = (PFN_vkGetImageMemoryRequirements)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkGetImageMemoryRequirements");
+         backendContext->vkFunctionTable.vkAllocateDescriptorSets = (PFN_vkAllocateDescriptorSets)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkAllocateDescriptorSets");
+         backendContext->vkFunctionTable.vkFreeDescriptorSets = (PFN_vkFreeDescriptorSets)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkFreeDescriptorSets");
