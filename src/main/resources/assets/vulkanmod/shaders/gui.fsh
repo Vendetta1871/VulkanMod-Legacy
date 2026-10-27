@@ -37,8 +37,8 @@ void main() {
         else if (alphaFunc == 514) keep = abs(color.a - AlphaRef) < 0.0039;   // EQUAL
         else if (alphaFunc == 515) keep = color.a <= AlphaRef;                // LEQUAL
         else if (alphaFunc == 516) keep = color.a > AlphaRef;                 // GREATER
-        else if (alphaFunc == 517) keep = color.a >= AlphaRef;                // GEQUAL
-        else if (alphaFunc == 518) keep = abs(color.a - AlphaRef) >= 0.0039;  // NOTEQUAL
+        else if (alphaFunc == 517) keep = abs(color.a - AlphaRef) >= 0.0039;  // NOTEQUAL
+        else if (alphaFunc == 518) keep = color.a >= AlphaRef;                // GEQUAL
         else keep = true;                                                      // ALWAYS
         if (!keep) {
             discard;
