@@ -348,10 +348,18 @@ public class AutoTest {
                         // Pin the camera to an absolute column: the world-spawn search
                         // jitters by a block between runs, which shifts near-field
                         // parallax and makes the Vulkan/GL pair non-comparable.
-                        mc.player.capabilities.allowFlying = true;
-                        mc.player.capabilities.isFlying = true;
                         int topY = mc.world.getTopSolidOrLiquidBlock(
                                 new BlockPos(PIN_X, 0, PIN_Z)).getY();
+                        if (topY < 0) {
+                            // Right after world entry the PIN column's chunk can still be
+                            // empty: getTopSolidOrLiquidBlock walks an empty chunk down to
+                            // y=-1 and the pin would drop the camera to y=1 inside the
+                            // ground. Retry next tick until the column reports a surface.
+                            --ticks;
+                            return;
+                        }
+                        mc.player.capabilities.allowFlying = true;
+                        mc.player.capabilities.isFlying = true;
                         tpPlayer(mc, PIN_X + 0.5, topY + 2.0, PIN_Z + 0.5);
                         mc.player.rotationYaw = 0.0f;
                         mc.player.rotationPitch = 30.0f;
