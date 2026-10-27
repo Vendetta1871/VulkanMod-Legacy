@@ -414,9 +414,9 @@ public class VRenderSystem {
         return TextureMatrix;
     }
 
-    /** The active unit's current texture matrix (the one the eye-linear planes feed). */
-    public static Matrix4f getTextureMatrix4f() {
-        return new Matrix4f(texUnit(0).cur);
+    /** Copies texture unit 0's current matrix into dest (no allocation; the End portal replay). */
+    public static Matrix4f getTextureMatrix4f(Matrix4f dest) {
+        return dest.set(texUnit(0).cur);
     }
 
     /**

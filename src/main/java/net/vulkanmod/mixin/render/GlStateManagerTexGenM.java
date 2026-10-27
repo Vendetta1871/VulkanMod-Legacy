@@ -16,6 +16,12 @@ import java.nio.FloatBuffer;
  * {@code GL_EYE_PLANE} coefficients ({@code texGen(TexGen, 9474, FloatBuffer)}); its
  * Vulkan replay ({@code EndPortalRenderer}) computes the generated coordinates on the
  * CPU from these mirrored planes, because Kirino never runs the fixed-function texgen.
+ *
+ * <p>The coefficients are stored as specified, without GL's {@code (M⁻¹)ᵀ} transform.
+ * The portal TESR specifies the planes under the same modelview it draws with, so the
+ * transform cancels and the replay evaluates the raw planes on the object position (R4);
+ * a caller that specifies planes under one modelview and draws under another would need
+ * the transform mirrored here instead.</p>
  */
 @Mixin(GlStateManager.class)
 public abstract class GlStateManagerTexGenM {
