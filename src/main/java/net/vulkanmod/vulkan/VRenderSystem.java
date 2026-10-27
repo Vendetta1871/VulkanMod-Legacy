@@ -139,6 +139,11 @@ public class VRenderSystem {
      * Written once at device creation by {@code Vulkan.createLogicalDevice}.
      */
     private static float maxLineWidth = 1.0f;
+    /**
+     * The narrowest one: lineWidthRange[0] with wideLines, 1.0 otherwise - without the
+     * feature the width must be exactly 1.0 (VUID-vkCmdSetLineWidth-lineWidth-00788, M3).
+     */
+    private static float minLineWidth = 1.0f;
     private static float pointSize = 1.0f;
     private static double gameTime = 0.0;
 
@@ -528,9 +533,12 @@ public class VRenderSystem {
     public static void setLineWidth(float v) { lineWidth = v; }
 
     /** Clamped to the device's line-width range before it reaches vkCmdSetLineWidth (M3). */
-    public static float getLineWidth() { return Math.min(lineWidth, maxLineWidth); }
+    public static float getLineWidth() { return Math.max(minLineWidth, Math.min(lineWidth, maxLineWidth)); }
 
-    public static void setMaxLineWidth(float max) { maxLineWidth = Math.max(1.0f, max); }
+    public static void setLineWidthRange(float min, float max) {
+        minLineWidth = Math.min(1.0f, Math.max(0.0f, min));
+        maxLineWidth = Math.max(minLineWidth, max);
+    }
     public static float getShaderLineWidth() { return lineWidth; }
 
     public static void setPointSize(float v) { pointSize = v; }

@@ -621,9 +621,11 @@ public class Vulkan {
             logicOpSupported = supportedFeatures.logicOp();
             // M3: vkCmdSetLineWidth must stay inside limits.lineWidthRange
             // (VUID-vkCmdSetLineWidth-lineWidth-00788). Without wideLines the range is
-            // [1,1], so a mirrored glLineWidth above 1 has to clamp to 1.
-            VRenderSystem.setMaxLineWidth(supportedFeatures.wideLines()
-                    ? deviceProperties.limits().lineWidthRange(1) : 1.0f);
+            // [1,1], so a mirrored glLineWidth has to clamp to exactly 1 - both bounds.
+            boolean wideLines = supportedFeatures.wideLines();
+            VRenderSystem.setLineWidthRange(
+                    wideLines ? deviceProperties.limits().lineWidthRange(0) : 1.0f,
+                    wideLines ? deviceProperties.limits().lineWidthRange(1) : 1.0f);
 
             VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.create();
 
@@ -862,7 +864,8 @@ public class Vulkan {
             VkSubpassDependency.Buffer dependency = VkSubpassDependency.create(1);
             dependency.srcSubpass(VK_SUBPASS_EXTERNAL);
             dependency.dstSubpass(0);
-            dependency.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+            dependency.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                    | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
             dependency.srcAccessMask(VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
             dependency.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
             dependency.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);

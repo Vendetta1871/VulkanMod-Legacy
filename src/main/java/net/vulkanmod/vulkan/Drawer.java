@@ -43,7 +43,12 @@ public class Drawer {
     private static List<VkCommandBuffer> transferCommandBuffers;
     private boolean frameTransferRecording;
 
-    private static Set<Pipeline> usedPipelines = new HashSet<>();
+    /**
+     * Per frame slot: pipelines that allocated descriptor sets from that slot's pools since
+     * it was last reset (N4). Sets come from descriptorPools[currentFrame] only, so a slot's
+     * pools are reset exactly for the pipelines that used that slot.
+     */
+    private static List<Set<Pipeline>> usedPipelines;
 
     private VertexBuffer[] vertexBuffers;
     private AutoIndexBuffer quadsIndexBuffer;
@@ -109,6 +114,10 @@ public class Drawer {
         INSTANCE = this;
         device = Vulkan.getDevice();
         MAX_FRAMES_IN_FLIGHT = getSwapChainImages().size();
+        usedPipelines = new ArrayList<>(MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            usedPipelines.add(new HashSet<>());
+        }
         vertexBuffers = new VertexBuffer[MAX_FRAMES_IN_FLIGHT];
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
             vertexBuffers[i] = new VertexBuffer(VBOSize, MemoryTypes.HOST_MEM);
@@ -163,7 +172,6 @@ public class Drawer {
         vertexBuffer.copyToVertexBuffer(vertexFormat.getSize(), vertexCount, buffer);
 
         Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
-        usedPipelines.add(boundPipeline);
         bindPipeline(boundPipeline);
 
         uploadAndBindUBOs(boundPipeline);
@@ -510,12 +518,13 @@ public class Drawer {
     }
 
     private static void resetDescriptors() {
-        for(Pipeline pipeline : usedPipelines) {
+        Set<Pipeline> used = usedPipelines.get(currentFrame);
+        for(Pipeline pipeline : used) {
             pipeline.resetDescriptorPool(currentFrame);
         }
         Pipeline.processPendingDescriptorPools();
 
-        usedPipelines.clear();
+        used.clear();
     }
 
     private void assertCommandBufferState() {
@@ -863,14 +872,6 @@ public class Drawer {
         }
     }
 
-    public void rebuildInstance() {
-        vkDeviceWaitIdle(device);
-
-        Vulkan.recreateSwapChain();
-        // The constructor republishes INSTANCE (see M9: no eager static Drawer).
-        new Drawer();
-    }
-
     public static void setProjectionMatrix(Matrix4f mat4) {
         projectionMatrix = mat4;
     }
@@ -898,7 +899,6 @@ public class Drawer {
     private void draw(VertexBuffer vertexBuffer, IndexBuffer indexBuffer, int indexCount) {
 
         Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
-        usedPipelines.add(boundPipeline);
         bindPipeline(boundPipeline);
 
         uploadAndBindUBOs(boundPipeline);
@@ -910,7 +910,6 @@ public class Drawer {
         vertexBuffer.copyToVertexBuffer(vertexFormat.getSize(), vertexCount, buffer);
 
         Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
-        usedPipelines.add(boundPipeline);
         bindPipeline(boundPipeline);
 
         uploadAndBindUBOs(boundPipeline);
@@ -998,7 +997,7 @@ public class Drawer {
             lastBindFrame = currentFrame;
         }
 
-        usedPipelines.add(pipeline);
+        usedPipelines.get(currentFrame).add(pipeline);
     }
 
     public void pushConstants(Pipeline pipeline) {

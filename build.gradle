@@ -116,7 +116,7 @@ processResources {
 }
 
 def generatedVersionDir = layout.buildDirectory.dir('generated/sources/version/java')
-tasks.register('generateVersionSource') {
+def generateVersionSource = tasks.register('generateVersionSource') {
     inputs.property 'version', modVersion
     outputs.dir generatedVersionDir
     doLast {
@@ -134,8 +134,9 @@ public final class BuildConfig {
 """
     }
 }
-sourceSets.main.java.srcDir generatedVersionDir
-compileJava.dependsOn 'generateVersionSource'
+// R23: a task provider (not the bare directory) makes every consumer of the main
+// sources - compileJava, sourcesJar, IDE models - depend on the generator.
+sourceSets.main.java.srcDir(generateVersionSource)
 
 // Merge the LWJGL Vulkan bindings and natives into the mod jar. The natives keep
 // the <os>/<arch>/<package>/ layout LWJGL's loader searches inside the jar.

@@ -5,12 +5,8 @@ import org.lwjgl.system.NativeResource;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 
 import static org.lwjgl.system.MemoryUtil.NULL;
 import static org.lwjgl.util.shaderc.Shaderc.*;
@@ -29,16 +25,6 @@ public class ShaderSPIRVUtils {
             String source = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             return compileShader(shaderFile, source, shaderKind);
         } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    public static SPIRV compileShaderAbsoluteFile(String shaderFile, ShaderKind shaderKind) {
-        try {
-            String source = new String(Files.readAllBytes(Paths.get(new URI(shaderFile))));
-            return compileShader(shaderFile, source, shaderKind);
-        } catch (IOException | URISyntaxException e) {
             e.printStackTrace();
         }
         return null;
