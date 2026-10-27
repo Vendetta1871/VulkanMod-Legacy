@@ -92,10 +92,13 @@ public class AutoTest {
 
     /**
      * Save folder to open instead of generating {@code vm_autotest}. Point it at a copy of a
-     * real save to reproduce bugs that only show up in that terrain.
+     * real save to reproduce bugs that only show up in that terrain. The FPS bench uses its
+     * own persistent {@code vm_autotest_bench}: a fresh world would measure chunk generation.
      */
-    private static final String WORLD_NAME =
-            System.getenv().getOrDefault("VULKANMOD_AUTOTEST_WORLD", "vm_autotest");
+    private static final String WORLD_NAME = System.getenv().getOrDefault("VULKANMOD_AUTOTEST_WORLD",
+            System.getenv("VULKANMOD_AUTOTEST_FPS") != null ? "vm_autotest_bench" : "vm_autotest");
+    /** True when this run had to generate the world, so FPS numbers include generation. */
+    private static boolean worldGenerated;
 
     /**
      * Time-series repro: with {@code VULKANMOD_AUTOTEST_BURST=1} the world is entered exactly
@@ -176,6 +179,8 @@ public class AutoTest {
     private static final boolean END_MODE = System.getenv("VULKANMOD_AUTOTEST_END") != null;
     /** Absolute camera column for STATE_MODE (near the fixed-seed world spawn). */
     private static final int PIN_X = 200, PIN_Z = 112;
+    /** Surface Y of the STATE portal ring, set by the server task; -1 until built. */
+    private static volatile int portalY = -1;
     private static int fpsSamples;
     private static long fpsSum, fpsMin = Long.MAX_VALUE, fpsMax;
     private static double pinX, pinY, pinZ;
@@ -241,6 +246,17 @@ public class AutoTest {
                         WorldSettings settings = new WorldSettings(0x5EEDL, GameType.CREATIVE,
                                 false, false, WorldType.DEFAULT);
                         settings.enableCommands();
+                        // Every run starts from a freshly generated world: a reused save
+                        // keeps the dimension, position, effects and terrain edits of the
+                        // previous mode (after END every later run started in the End).
+                        if (WORLD_NAME.equals("vm_autotest")
+                                && System.getenv("VULKANMOD_AUTOTEST_KEEP_WORLD") == null) {
+                            mc.getSaveLoader().flushCache();
+                            boolean deleted = mc.getSaveLoader().deleteWorldDirectory(WORLD_NAME);
+                            Initializer.LOGGER.info("[autotest] fresh world {} (old save deleted: {})",
+                                    WORLD_NAME, deleted);
+                        }
+                        worldGenerated = !new File(new File(mc.gameDir, "saves"), WORLD_NAME + "/level.dat").exists();
                         Initializer.LOGGER.info("[autotest] launching integrated world {}", WORLD_NAME);
                         mc.launchIntegratedServer(WORLD_NAME, WORLD_NAME, settings);
                         stage = 1;
@@ -405,19 +421,41 @@ public class AutoTest {
                         // shouldRenderFace culling matches what players actually see.
                         // The camera looks down at the ring from a corner: a plane that
                         // lies flat vs one that stands up is unambiguous from there.
-                        int hudTopY = mc.world.getTopSolidOrLiquidBlock(
-                                new BlockPos(PIN_X + 8, 0, PIN_Z)).getY();
-                        int cx = PIN_X + 8, cz = PIN_Z, cy = hudTopY - 1;
-                        for (int dx = -2; dx <= 2; dx++) {
-                            for (int dz = -2; dz <= 2; dz++) {
-                                boolean ring = Math.abs(dx) == 2 || Math.abs(dz) == 2;
-                                serverCommand(mc, "setblock " + (cx + dx) + " " + cy + " "
-                                        + (cz + dz) + " minecraft:"
-                                        + (ring ? "end_portal_frame" : "end_portal"));
-                                serverCommand(mc, "setblock " + (cx + dx) + " " + (cy + 1) + " "
-                                        + (cz + dz) + " minecraft:air");
-                            }
+                        // Built on the server: the client heightmap can lag behind and put
+                        // the ring under the surface, out of view (R26). The view corridor
+                        // up to the camera is cleared so grass or leaves cannot hide it.
+                        portalY = -1;
+                        IntegratedServer server = mc.getIntegratedServer();
+                        if (server != null) {
+                            server.addScheduledTask(() -> {
+                                net.minecraft.world.World world = server.getWorld(0);
+                                int cx = PIN_X + 8, cz = PIN_Z;
+                                int cy = world.getTopSolidOrLiquidBlock(new BlockPos(cx, 0, cz)).getY() - 1;
+                                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                                for (int dx = -2; dx <= 6; dx++) {
+                                    for (int dz = -2; dz <= 6; dz++) {
+                                        for (int dy = 1; dy <= 6; dy++) {
+                                            world.setBlockState(c.setPos(cx + dx, cy + dy, cz + dz),
+                                                    Blocks.AIR.getDefaultState());
+                                        }
+                                    }
+                                }
+                                for (int dx = -2; dx <= 2; dx++) {
+                                    for (int dz = -2; dz <= 2; dz++) {
+                                        boolean ring = Math.abs(dx) == 2 || Math.abs(dz) == 2;
+                                        world.setBlockState(c.setPos(cx + dx, cy, cz + dz), ring
+                                                ? Blocks.END_PORTAL_FRAME.getDefaultState()
+                                                : Blocks.END_PORTAL.getDefaultState());
+                                    }
+                                }
+                                portalY = cy;
+                            });
                         }
+                    } else if (t == 124 && portalY >= 0) {
+                        int cx = PIN_X + 8, cz = PIN_Z, cy = portalY;
+                        Initializer.LOGGER.info("[autotest] STATE portal at {},{},{}", cx, cy, cz);
+                        // Command feedback in the chat covers the ring.
+                        mc.ingameGUI.getChatGUI().clearChatMessages(false);
                         tpPlayer(mc, cx + 5.5, cy + 4.5, cz + 5.5);
                         double dx = cx + 0.5 - (cx + 5.5);
                         double dy = cy + 1.0 - (cy + 4.5);
@@ -425,7 +463,10 @@ public class AutoTest {
                         mc.player.rotationYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
                         mc.player.rotationPitch = (float) Math.toDegrees(
                                 Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)));
-                    } else if (t == 130) {
+                    } else if (t == 133) {
+                        if (portalY < 0) {
+                            Initializer.LOGGER.warn("[autotest] STATE portal was not built in time");
+                        }
                         capture(mc, "statePortal");
                     } else if (t == 135) {
                         // The GUI->world boundary: the Nether/End failure mode (no sky
@@ -899,18 +940,19 @@ public class AutoTest {
             // somewhere different in every run and the Vulkan/GL captures would not match.
             int bx = -598, bz = 610;
             BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
-            // Deterministic across runs: wipe the footprint+corridor column first (previous
-            // runs stacked platforms here, which made getTopSolidOrLiquidBlock climb +10
-            // every run), then build at a fixed height above the lake surface. Flag 2 keeps
-            // the client sync but skips the expensive neighbor updates.
+            int py = 75;
+            // Deterministic across runs: wipe the footprint+corridor column first (old saves
+            // stacked platforms here), then build at a fixed height above the lake surface.
+            // The wipe starts at the platform: carving the terrain below opened a pit whose
+            // skylight was not yet propagated at capture time, so it rendered black. Flag 2
+            // keeps the client sync but skips the expensive neighbor updates.
             for (int dx = -1; dx <= 9; dx++) {
                 for (int dz = -12; dz <= 1; dz++) {
-                    for (int dy = 60; dy <= 170; dy++) {
+                    for (int dy = py; dy <= 170; dy++) {
                         world.setBlockState(c.setPos(bx + dx, dy, bz + dz), Blocks.AIR.getDefaultState(), 2);
                     }
                 }
             }
-            int py = 75;
             // Drop the props previous runs spawned (the block wipe cannot remove entities).
             for (net.minecraft.entity.Entity e : new java.util.ArrayList<>(world.loadedEntityList)) {
                 if ((e instanceof net.minecraft.entity.item.EntityItem
@@ -1593,6 +1635,10 @@ public class AutoTest {
             mc.gameSettings.limitFramerate = Integer.MAX_VALUE;
             mc.gameSettings.enableVsync = false;
             try { org.lwjgl.opengl.Display.setVSyncEnabled(false); } catch (Throwable ignored) { }
+            // The swapchain present mode does not follow enableVsync by itself (M8).
+            if (Initializer.isVulkanActive()) {
+                net.vulkanmod.vulkan.Vulkan.setVsync(false);
+            }
             int rd = envInt("VULKANMOD_AUTOTEST_RENDER", 8);
             mc.gameSettings.renderDistanceChunks = rd;
             setWorldTime(6000L); // noon: full-bright, removes time-of-day variance
@@ -1689,6 +1735,10 @@ public class AutoTest {
                     fpsSamples, mc.displayWidth, mc.displayHeight, mc.isFullScreen(),
                     String.format("%.1f", mc.player.posX),
                     String.format("%.1f", mc.player.posY), String.format("%.1f", mc.player.posZ));
+            if (worldGenerated) {
+                Initializer.LOGGER.warn("[autotest] FPS RESULT is not representative: {} was generated "
+                        + "during this run; run the bench again", WORLD_NAME);
+            }
             // Second atlas dump ~measure frames after the capture one: the animated tiles must
             // have advanced, proving the tile mirror is live (not stale at the stitched frame).
             try {

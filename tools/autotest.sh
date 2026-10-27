@@ -6,6 +6,10 @@
 #   VULKANMOD_AUTOTEST_WARMUP=240 tools/autotest.sh
 #   VULKANMOD_AUTOTEST_STAY=1 tools/autotest.sh   - keep the game open after captures
 cd "$(dirname "$0")/.." || exit 1
+if [ "${XDG_SESSION_TYPE:-tty}" = tty ]; then
+    echo "warning: no desktop session (XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unset}); over ssh GL can land on the wrong GPU and crash." >&2
+    echo "         run from the desktop or export its DISPLAY/WAYLAND_DISPLAY/XDG_SESSION_TYPE." >&2
+fi
 rm -f run/client/vm_autotest_*.png
 mkdir -p build
 VULKANMOD_AUTOTEST=1 ./gradlew runClient "$@" 2>&1 | tee build/autotest.log
