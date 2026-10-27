@@ -126,6 +126,18 @@ public class VRenderSystem {
     public static final int FOG_EXP2 = 3;
 
     private static int fogState = FOG_LINEAR;
+
+    /**
+     * GL_FOG_DISTANCE_MODE_NV (0x855A) value mirrored from
+     * {@code GlStateManager.glFogi} (R16). Vanilla's {@code setupFog} sets it to
+     * GL_EYE_RADIAL_NV (0x855B) whenever the GL_NV_fog_distance extension is
+     * present and never resets it, so the default is GL_EYE_PLANE_ABSOLUTE_NV
+     * (0x855C), the |z| metric the drivers without the extension use. Fed to the
+     * fog shaders as the {@code FogRadial} UBO field; deliberately not reset in
+     * {@link #resetState()}, matching the sticky GL state it mirrors.
+     */
+    private static int fogDistanceMode = 0x855C;
+
     private static float fogStart = 0.95f;
     private static float fogEnd = 1.0f;
     private static float fogDensity = 0.1f;
@@ -495,6 +507,11 @@ public class VRenderSystem {
 
     public static void setFogState(int state) { fogState = state; }
     public static int getFogState() { return fogState; }
+
+    public static void setFogDistanceMode(int mode) { fogDistanceMode = mode; }
+
+    /** 1 when vanilla requested the GL_EYE_RADIAL_NV fog metric, 0 for the |z| one. */
+    public static int getFogRadial() { return fogDistanceMode == 0x855B ? 1 : 0; }
 
     // --- Fixed-function alpha test (live func/ref), fed to the terrain/entity/GUI shaders ---
 

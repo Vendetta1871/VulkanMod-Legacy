@@ -12,6 +12,7 @@ layout(binding = 0) uniform UniformBufferObject {
     mat4 MVP;
     mat4 ModelViewMat;
     vec2 UvOffset;
+    int FogRadial;
 };
 
 layout(location = 0) out vec2 texCoord0;
@@ -25,5 +26,5 @@ void main() {
 
     texCoord0 = UV0 + UvOffset;
     vertexColor = Color;
-    vertexDistance = abs(viewPos.z);
+    vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
 }

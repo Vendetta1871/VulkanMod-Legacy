@@ -8,7 +8,8 @@
                 { "name": "ModelViewMat", "type": "matrix4x4", "count": 16 },
                 { "name": "TextureMat", "type": "matrix4x4", "count": 16 },
                 { "name": "Light0_Direction", "type": "float", "count": 3 },
-                { "name": "Light1_Direction", "type": "float", "count": 3 }
+                { "name": "Light1_Direction", "type": "float", "count": 3 },
+                { "name": "FogRadial", "type": "int", "count": 1 }
             ]
         },
         {

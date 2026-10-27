@@ -11,6 +11,7 @@ layout(location = 1) in vec2 UV0;
 layout(binding = 0) uniform UniformBufferObject {
     mat4 MVP;
     mat4 ModelViewMat;
+    int FogRadial;
 };
 
 layout(location = 0) out vec2 texCoord0;
@@ -22,5 +23,5 @@ void main() {
     texCoord0 = UV0;
     // World-space text (name tags, sign text) renders with the live world matrices
     // and the frame's fog; the GUI pass sets FOG_NONE so this stays unused there.
-    vertexDistance = abs(viewPos.z);
+    vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
 }

@@ -6,7 +6,8 @@
             "fields": [
                 { "name": "MVP", "type": "matrix4x4", "count": 16 },
                 { "name": "ModelViewMat", "type": "matrix4x4", "count": 16 },
-                { "name": "UvOffset", "type": "float", "count": 2 }
+                { "name": "UvOffset", "type": "float", "count": 2 },
+                { "name": "FogRadial", "type": "int", "count": 1 }
             ]
         },
         {

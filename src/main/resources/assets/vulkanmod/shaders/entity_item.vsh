@@ -17,6 +17,7 @@ layout(binding = 0) uniform UniformBufferObject {
     mat4 TextureMat;
     vec3 Light0_Direction;
     vec3 Light1_Direction;
+    int FogRadial;
 };
 
 layout(location = 0) out float vertexDistance;
@@ -29,7 +30,7 @@ void main() {
 
     gl_Position = MVP * vec4(Position, 1.0);
 
-    vertexDistance = abs(viewPos.z);
+    vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
     // The enchantment glint scrolls its UVs through the GL texture matrix (the only
     // vanilla draw that touches the texture stack); every other item keeps it identity.
     texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;

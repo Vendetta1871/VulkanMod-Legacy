@@ -15,6 +15,7 @@ layout(location = 3) in ivec2 LightMapCoord;
 layout(binding = 0) uniform UniformBufferObject {
     mat4 MVP;
     mat4 ModelViewMat;
+    int FogRadial;
 };
 
 layout(location = 0) out float vertexDistance;
@@ -27,7 +28,7 @@ void main() {
 
     gl_Position = MVP * vec4(Position, 1.0);
 
-    vertexDistance = abs(viewPos.z);
+    vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
     texCoord0 = UV0;
     vertexColor = VertexColor;
 

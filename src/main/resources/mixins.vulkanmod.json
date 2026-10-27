@@ -37,6 +37,7 @@
     "render.GlStateManagerAlphaM",
     "render.GlStateManagerBlendM",
     "render.GlStateManagerDepthM",
+    "render.GlStateManagerFogM",
     "render.OpenGlHelperM",
     "render.GlStateManagerLightM",
     "render.GlStateManagerImmediateM",

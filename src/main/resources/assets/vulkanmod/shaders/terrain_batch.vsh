@@ -17,8 +17,16 @@ layout(location = 2) in vec2 UV0;
 layout(location = 3) in ivec2 UV2;
 layout(location = 4) in float ChunkSlot;
 
-// binding 0 (MVP UBO) is intentionally unused here; it is kept only so the descriptor
-// layout matches terrain_batch.json's numbering (fog=1, Sampler0=2, Sampler2=3, SSBO=4).
+// binding 0 carries only the FogRadial fog metric (R16); the MVP / ModelViewMat fields
+// are unused here (the matrices come from the ChunkMatrices SSBO below), but the block
+// layout must match terrain_batch.json so the descriptor numbering stays identical
+// (fog=1, Sampler0=2, Sampler2=3, SSBO=4).
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 MVP;
+    mat4 ModelViewMat;
+    int FogRadial;
+};
+
 struct ChunkMatrix {
     mat4 mvp;
     mat4 modelView;
@@ -39,9 +47,10 @@ void main() {
     vec4 viewPos = cm.modelView * vec4(Position, 1.0);
     gl_Position = cm.mvp * vec4(Position, 1.0);
 
-    // The GL fixed-function fog coordinate is the eye-space DEPTH (|z|), not the
-    // radial distance - radial fog would be thicker at the screen edges than GL (L2).
-    vertexDistance = abs(viewPos.z);
+    // GL measures linear fog by eye-space depth (|z|), or by radial distance when
+    // the GL_NV_fog_distance extension is present; vanilla picks the radial mode
+    // through glFogi(GL_FOG_DISTANCE_MODE_NV), mirrored into FogRadial (R16).
+    vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
 
     vertexColor = Color;
     texCoord0 = UV0;

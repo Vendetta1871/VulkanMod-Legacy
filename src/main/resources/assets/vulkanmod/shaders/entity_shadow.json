@@ -23,7 +23,8 @@
           "name": "Light1_Direction",
           "type": "float",
           "count": 3
-        }
+        },
+        { "name": "FogRadial", "type": "int", "count": 1 }
       ]
     },
     {
