@@ -140,6 +140,17 @@ public class Pipeline {
     // R13: per-draw needsUpload results, reused by the upload loop.
     private boolean[] uboUpload = new boolean[0];
     private final List<String> samplers = new ArrayList<>();
+
+    /**
+     * Clamp depth instead of clipping at the far plane (F3: clouds keep the main camera's
+     * depth range and must not vanish beyond it). Set right after construction, before
+     * any variant is built. Ignored without the depthClamp feature.
+     */
+    private boolean depthClamp;
+
+    public void setDepthClamp(boolean clamp) {
+        this.depthClamp = clamp && Vulkan.getDeviceInfo().features.depthClamp;
+    }
     private final List<String> ssbos = new ArrayList<>();
     private final PushConstant pushConstant = new PushConstant();
 
@@ -351,7 +362,7 @@ public class Pipeline {
 
             VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.create();
             rasterizer.sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
-            rasterizer.depthClampEnable(false);
+            rasterizer.depthClampEnable(depthClamp);
             rasterizer.rasterizerDiscardEnable(false);
             rasterizer.polygonMode(VK_POLYGON_MODE_FILL);
             rasterizer.lineWidth(1.0f);

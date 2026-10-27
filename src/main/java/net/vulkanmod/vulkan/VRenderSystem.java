@@ -200,6 +200,18 @@ public class VRenderSystem {
         calculateMVP();
     }
 
+    /**
+     * Replaces the depth row of the mirrored GL projection with a perspective one for
+     * [near, far] (F3). Clouds use vanilla's farPlane*4 projection; with the main camera's
+     * depth range their depth matches the rest of the scene, so motion vectors rebuilt
+     * from depth and FSR's depth inputs stay consistent. x, y and w are untouched.
+     */
+    public static void overrideProjectionDepth(float near, float far) {
+        // Column-major: m22 at 10, m32 at 14.
+        projectionMatrixF.put(10, -(far + near) / (far - near));
+        projectionMatrixF.put(14, -2.0f * far * near / (far - near));
+    }
+
     public static void updateProjectionMatrix() {
         org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_PROJECTION_MATRIX,
                 projectionMatrixF.position(0).limit(16));

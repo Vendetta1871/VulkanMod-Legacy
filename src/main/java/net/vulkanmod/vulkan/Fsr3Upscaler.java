@@ -28,11 +28,27 @@ final class Fsr3Upscaler {
     private static boolean resetNext = true;
     private static long lastDispatchNanos;
 
+    private static final float REACTIVE_SCALE = envFloat("VULKANMOD_FSR3_REACTIVE_SCALE", 3.0f);
+
+    private static float envFloat(String name, float def) {
+        try {
+            String v = System.getenv(name);
+            return v != null ? Float.parseFloat(v) : def;
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    private static final boolean DEBUG_VIEW = System.getenv("VULKANMOD_FSR3_DEBUG") != null;
+
     private static ByteBuffer dispatchDesc;
     private static ByteBuffer reactiveDesc;
 
-    /** F2: auto-generated reactive mask (render resolution). */
-    private static final StorageImage reactive = new StorageImage(VK_FORMAT_R8_UNORM,
+    /**
+     * F2: auto-generated reactive mask (render resolution). R32F although FSR documents R8:
+     * the SDK 1.1.4 GLSL declares the auto-reactive output as r32f.
+     */
+    private static final StorageImage reactive = new StorageImage(VK_FORMAT_R32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
     private Fsr3Upscaler() {}
@@ -138,7 +154,7 @@ final class Fsr3Upscaler {
         noResource(d, DU_EXPOSURE);
         if (useReactive) {
             resource(d, DU_REACTIVE, reactive.image, reactive.width, reactive.height,
-                    FORMAT_R8_UNORM, USAGE_READ_ONLY, STATE_COMPUTE_READ);
+                    FORMAT_R32_FLOAT, USAGE_READ_ONLY, STATE_COMPUTE_READ);
         } else {
             noResource(d, DU_REACTIVE);
         }
@@ -165,7 +181,8 @@ final class Fsr3Upscaler {
         d.putFloat(DU_FOV, CameraHistory.fovY());
         // One block is a meter.
         d.putFloat(DU_METERS, 1.0f);
-        d.putInt(DU_FLAGS, 0);
+        // VULKANMOD_FSR3_DEBUG=1: FSR's own debug view (inputs, history, reactivity).
+        d.putInt(DU_FLAGS, DEBUG_VIEW ? 1 : 0);
 
         int rc = FfxApi.dispatch(pContext, memAddress(d));
         resetNext = false;
@@ -188,7 +205,7 @@ final class Fsr3Upscaler {
 
     /**
      * F2: FSR's auto-reactive pass marks pixels that changed between the opaque-only copy
-     * and the final scene color (particles, water, weather). AMD's sample settings.
+     * and the final scene color (particles, water, weather). continuous mask.
      * Expects the scene color already in SHADER_READ_ONLY_OPTIMAL.
      */
     private static boolean generateReactive(VkCommandBuffer cmd, RenderTarget scene, MemoryStack stack) {
@@ -211,14 +228,15 @@ final class Fsr3Upscaler {
         resource(r, DR_COLOR, scene.colorImage(), scene.width(), scene.height(),
                 FORMAT_R8G8B8A8_UNORM, USAGE_RENDERTARGET, STATE_COMPUTE_READ);
         resource(r, DR_OUT, reactive.image, reactive.width, reactive.height,
-                FORMAT_R8_UNORM, USAGE_UAV, STATE_UNORDERED_ACCESS);
+                FORMAT_R32_FLOAT, USAGE_UAV, STATE_UNORDERED_ACCESS);
         r.putInt(DR_RENDER_SIZE, scene.width());
         r.putInt(DR_RENDER_SIZE + 4, scene.height());
-        r.putFloat(DR_SCALE, 1.0f);
+        // Continuous, amplified mask instead of AMD's binary default (cutoff 0.2): rain and
+        // other faint alpha-blended layers change the color by less than the cutoff.
+        r.putFloat(DR_SCALE, REACTIVE_SCALE);
         r.putFloat(DR_CUTOFF, 0.2f);
         r.putFloat(DR_BINARY, 0.9f);
-        r.putInt(DR_FLAGS, AUTOREACTIVE_APPLY_TONEMAP | AUTOREACTIVE_APPLY_THRESHOLD
-                | AUTOREACTIVE_USE_COMPONENTS_MAX);
+        r.putInt(DR_FLAGS, AUTOREACTIVE_APPLY_TONEMAP | AUTOREACTIVE_USE_COMPONENTS_MAX);
 
         int rc = FfxApi.dispatch(pContext, memAddress(r));
         if (rc != RETURN_OK) {

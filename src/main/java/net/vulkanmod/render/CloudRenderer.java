@@ -72,6 +72,7 @@ public class CloudRenderer {
 
     public static void init() {
         cloudPipeline = new Pipeline(POSITION_TEX_COLOR, "clouds");
+        cloudPipeline.setDepthClamp(true);
         cloudBuffer = MemoryUtil.memAlloc(FANCY_VERTS_MAX * POSITION_TEX_COLOR.getSize());
     }
 
@@ -137,6 +138,10 @@ public class CloudRenderer {
 
         // --- state mirrored from GL at the head of renderClouds ---
         VRenderSystem.updateProjectionMatrix();
+        if (net.vulkanmod.vulkan.Vulkan.getDeviceInfo().features.depthClamp) {
+            // F3: depth in the main camera's range (last captured), clamped beyond its far plane.
+            VRenderSystem.overrideProjectionDepth(CameraHistory.near(), CameraHistory.far());
+        }
         VRenderSystem.updateModelViewMatrix();
         Matrix4f headMV = new Matrix4f(VRenderSystem.getModelViewMatrix4f());
         // Same camera-relative space as the sky: the modelview at renderClouds is the

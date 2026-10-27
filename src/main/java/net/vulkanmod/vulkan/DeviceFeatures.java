@@ -26,7 +26,7 @@ public final class DeviceFeatures {
 
     // Core 1.0
     public boolean samplerAnisotropy, wideLines, multiDrawIndirect, logicOp;
-    public boolean independentBlend, shaderInt64, fragmentStoresAndAtomics;
+    public boolean independentBlend, shaderInt64, fragmentStoresAndAtomics, depthClamp;
     public boolean storageImageReadWithoutFormat, storageImageWriteWithoutFormat;
 
     // Core 1.2
@@ -115,6 +115,7 @@ public final class DeviceFeatures {
         e.multiDrawIndirect(multiDrawIndirect = f.multiDrawIndirect());
         e.logicOp(logicOp = f.logicOp());
         e.independentBlend(independentBlend = f.independentBlend());
+        e.depthClamp(depthClamp = f.depthClamp());
         e.shaderInt64(shaderInt64 = f.shaderInt64());
         e.fragmentStoresAndAtomics(fragmentStoresAndAtomics = f.fragmentStoresAndAtomics());
         e.shaderStorageImageReadWithoutFormat(storageImageReadWithoutFormat = f.shaderStorageImageReadWithoutFormat());
