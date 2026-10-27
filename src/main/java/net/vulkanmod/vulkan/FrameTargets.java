@@ -143,8 +143,54 @@ public final class FrameTargets {
      * upscaler; once per frame. Rendering resumes with color and depth loaded.
      */
     public static void snapshotOpaque(VkCommandBuffer cmd, MemoryStack stack) {
-        if (phase != Phase.SCENE || !temporal || opaqueTaken) return;
+        if (phase != Phase.SCENE || opaqueDone) return;
+        boolean shadows = rtShadowsWanted();
+        if (!temporal && !shadows) return;
+        opaqueDone = true;
         vkCmdEndRendering(cmd);
+        if (shadows) {
+            // T8: shadows land on opaque geometry only; water and particles blend over them.
+            recordRtShadows(cmd, stack);
+            depthBackToAttachment(cmd, stack);
+        }
+        if (temporal) copyOpaque(cmd, stack);
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+    }
+
+    private static boolean opaqueDone, rtRecorded;
+
+    private static boolean rtShadowsWanted() {
+        return net.vulkanmod.vulkan.rt.RtScene.enabled() && !RtDebugView.ACTIVE;
+    }
+
+    private static void recordRtShadows(VkCommandBuffer cmd, MemoryStack stack) {
+        recordRtScene(cmd, stack);
+        RtShadowPass.record(cmd, stack);
+    }
+
+    /** Builds this frame's TLAS once, outside rendering. */
+    private static void recordRtScene(VkCommandBuffer cmd, MemoryStack stack) {
+        if (rtRecorded) return;
+        rtRecorded = true;
+        net.vulkanmod.vulkan.rt.RtScene.record(cmd, stack);
+    }
+
+    /** Returns the scene depth to the attachment layout, contents kept, for the rest of the scene. */
+    private static void depthBackToAttachment(VkCommandBuffer cmd, MemoryStack stack) {
+        if (!depthReadable) return;
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        imageBarrier(b.get(0), scene.depthImage(), depthAspect(),
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                        | org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        pipelineBarrier(cmd, b, stack);
+        depthReadable = false;
+    }
+
+    private static void copyOpaque(VkCommandBuffer cmd, MemoryStack stack) {
         opaqueColor.ensure(scene.width(), scene.height());
 
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
@@ -173,8 +219,6 @@ public final class FrameTargets {
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         pipelineBarrier(cmd, post, stack);
-
-        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
         opaqueTaken = true;
     }
 
@@ -247,7 +291,7 @@ public final class FrameTargets {
         depthToAttachment(barriers.get(1), scene);
         pipelineBarrier(cmd, barriers, stack);
 
-        opaqueTaken = false;
+        opaqueTaken = opaqueDone = rtRecorded = false;
         depthReadable = false;
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 0);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
@@ -268,11 +312,9 @@ public final class FrameTargets {
         }
 
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
-            net.vulkanmod.vulkan.rt.RtScene.record(cmd, stack);
-            if (!RtDebugView.ACTIVE) {
-                // T8: shadows darken the scene color before the upscaler reads it.
-                RtShadowPass.record(cmd, stack);
-            }
+            // Frames without particles or translucent geometry get the shadows here.
+            if (rtShadowsWanted() && !opaqueDone) recordRtShadows(cmd, stack);
+            else recordRtScene(cmd, stack);
             net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 4);
         }
 

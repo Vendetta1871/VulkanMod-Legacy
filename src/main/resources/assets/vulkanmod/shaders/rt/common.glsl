@@ -28,6 +28,7 @@ struct Payload {
     float t;          // < 0: miss
     vec3 normal;
     float skyLight;   // 0..1
+    float blockLight; // 0..1
 };
 
 #ifdef RT_HIT

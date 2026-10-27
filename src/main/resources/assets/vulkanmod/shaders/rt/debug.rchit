@@ -21,9 +21,12 @@ void main() {
 
     float sky = (float((a.light >> 16) & 0xFFFFu) * w.x + float((b.light >> 16) & 0xFFFFu) * w.y
             + float((c.light >> 16) & 0xFFFFu) * w.z) / 240.0;
+    float block = (float(a.light & 0xFFFFu) * w.x + float(b.light & 0xFFFFu) * w.y
+            + float(c.light & 0xFFFFu) * w.z) / 240.0;
 
     payload.albedo = albedo;
     payload.t = gl_HitTEXT;
     payload.normal = n;
     payload.skyLight = clamp(sky, 0.0, 1.0);
+    payload.blockLight = clamp(block, 0.0, 1.0);
 }

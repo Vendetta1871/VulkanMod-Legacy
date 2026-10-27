@@ -41,8 +41,8 @@ final class RtShadowPass {
 
         if (pipeline == null) {
             pipeline = new RtPipeline(RtDescriptors.layout(), PUSH_BYTES, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
-                    "rt/shadows.rgen", new String[]{"rt/shadow.rmiss"},
-                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup(null, "rt/debug.rahit")});
+                    "rt/shadows.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
+                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit")});
             Initializer.LOGGER.info("[rt] shadows ready");
         }
         RenderTarget scene = FrameTargets.scene;
