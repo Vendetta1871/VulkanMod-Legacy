@@ -1,0 +1,135 @@
+package net.vulkanmod.render;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.entity.Entity;
+import net.vulkanmod.vulkan.FrameTargets;
+import org.joml.Matrix4f;
+
+/**
+ * Camera state of this and the previous frame plus sub-pixel jitter (B7).
+ *
+ * <p>View-projections are unjittered, already remapped to Vulkan depth, and camera
+ * relative: 1.12 renders with a rotation-only model-view and translates geometry by
+ * {@code origin - camera}. Reprojecting a point {@code p} (relative to the current
+ * camera) into the previous frame is {@code prevViewProj * (p + cam - prevCam)}.</p>
+ *
+ * <p>Jitter shifts every projection used while the scene phase is active (terrain,
+ * sky, clouds, entities), never the hand or the GUI, which render in the display phase.</p>
+ */
+public final class CameraHistory {
+
+    private static final Matrix4f viewProj = new Matrix4f();
+    private static final Matrix4f prevViewProj = new Matrix4f();
+    private static double camX, camY, camZ;
+    private static double prevCamX, prevCamY, prevCamZ;
+    private static boolean valid, prevValid;
+
+    /** Temporary switch until a temporal upscaler (F5) turns jitter on. */
+    private static boolean jitterEnabled = System.getenv("VULKANMOD_JITTER") != null;
+    private static int jitterIndex;
+    private static float jitterX, jitterY;
+
+    private CameraHistory() {}
+
+    /** Rotates the history and picks this frame's jitter. Called once at frame start. */
+    public static void beginFrame() {
+        if (valid) {
+            prevViewProj.set(viewProj);
+            prevCamX = camX;
+            prevCamY = camY;
+            prevCamZ = camZ;
+            prevValid = true;
+        }
+        valid = false;
+
+        if (jitterEnabled) {
+            int phases = jitterPhaseCount(FrameTargets.scene.width(), FrameTargets.display.width());
+            jitterIndex = (jitterIndex % phases) + 1;
+            jitterX = (float) halton(jitterIndex, 2) - 0.5f;
+            jitterY = (float) halton(jitterIndex, 3) - 0.5f;
+        } else {
+            jitterX = jitterY = 0.0f;
+        }
+    }
+
+    /**
+     * Records the main camera of this frame (first terrain layer).
+     * @param modelView     the rotation-only camera model-view
+     * @param projRemapped  the unjittered projection, remapped to Vulkan depth
+     */
+    public static void captureMain(Matrix4f modelView, Matrix4f projRemapped) {
+        if (valid) return;
+        projRemapped.mul(modelView, viewProj);
+
+        Minecraft mc = Minecraft.getMinecraft();
+        Entity e = mc.getRenderViewEntity();
+        if (e != null) {
+            double pt = mc.getRenderPartialTicks();
+            camX = e.lastTickPosX + (e.posX - e.lastTickPosX) * pt;
+            camY = e.lastTickPosY + (e.posY - e.lastTickPosY) * pt;
+            camZ = e.lastTickPosZ + (e.posZ - e.lastTickPosZ) * pt;
+        }
+        valid = true;
+        if (!logged && prevValid) {
+            logged = true;
+            net.vulkanmod.Initializer.LOGGER.info("[camera] history active; jitter {} ({} phases)",
+                    jitterEnabled ? "on" : "off",
+                    jitterPhaseCount(FrameTargets.scene.width(), FrameTargets.display.width()));
+        }
+    }
+
+    private static boolean logged;
+
+    /** Drops the history: teleport, dimension change, resize, respawn. */
+    public static void reset() {
+        valid = false;
+        prevValid = false;
+    }
+
+    public static boolean hasPrevious() { return prevValid && valid; }
+    public static Matrix4f viewProj() { return viewProj; }
+    public static Matrix4f prevViewProj() { return prevViewProj; }
+    public static double camX() { return camX; }
+    public static double camY() { return camY; }
+    public static double camZ() { return camZ; }
+    public static double prevCamX() { return prevCamX; }
+    public static double prevCamY() { return prevCamY; }
+    public static double prevCamZ() { return prevCamZ; }
+
+    /** Jitter in render-resolution pixels, in [-0.5, 0.5]. */
+    public static float jitterX() { return jitterX; }
+    public static float jitterY() { return jitterY; }
+
+    public static void setJitterEnabled(boolean enabled) {
+        jitterEnabled = enabled;
+    }
+
+    /**
+     * Writes the clip-space jitter translation into a post-projection matrix:
+     * {@code x' = x + (2 jx / W) w}, likewise y. Applied only in the scene phase.
+     */
+    public static void applyJitter(Matrix4f clipRemap) {
+        if (FrameTargets.phase() != FrameTargets.Phase.SCENE || (jitterX == 0.0f && jitterY == 0.0f)) {
+            clipRemap.m30(0.0f).m31(0.0f);
+            return;
+        }
+        clipRemap.m30(2.0f * jitterX / FrameTargets.scene.width());
+        clipRemap.m31(2.0f * jitterY / FrameTargets.scene.height());
+    }
+
+    /** Same phase count as FSR (ffxFsr3GetJitterPhaseCount): 8 * (display / render)^2. */
+    static int jitterPhaseCount(int renderWidth, int displayWidth) {
+        float ratio = renderWidth > 0 ? (float) displayWidth / renderWidth : 1.0f;
+        return Math.max(1, (int) (8.0f * ratio * ratio));
+    }
+
+    static double halton(int index, int base) {
+        double f = 1.0, r = 0.0;
+        while (index > 0) {
+            f /= base;
+            r += f * (index % base);
+            index /= base;
+        }
+        return r;
+    }
+}

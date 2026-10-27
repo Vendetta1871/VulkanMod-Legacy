@@ -155,6 +155,7 @@ public class Initializer {
             net.vulkanmod.render.TextureBridge.beginFrame();
             net.vulkanmod.render.TerrainRenderer.onFrameBegin();
             Drawer.getInstance().initiateRenderPass();
+            net.vulkanmod.render.CameraHistory.beginFrame();
         } catch (Throwable t) {
             reportFrameError("begin", t);
         }

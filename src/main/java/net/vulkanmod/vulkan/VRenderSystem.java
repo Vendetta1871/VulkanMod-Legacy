@@ -255,11 +255,19 @@ public class VRenderSystem {
             0, 0, 0.5f, 0f,
             0, 0, 0.5f, 1f);
 
+    /** DEPTH_REMAP plus the scene-phase jitter translation (B7). */
+    private static final org.joml.Matrix4f CLIP_REMAP = new org.joml.Matrix4f(DEPTH_REMAP);
+
+    private static org.joml.Matrix4f clipRemap() {
+        net.vulkanmod.render.CameraHistory.applyJitter(CLIP_REMAP);
+        return CLIP_REMAP;
+    }
+
     public static void calculateMVP() {
         SCRATCH_MV.set(modelViewMatrixF.position(0).limit(16));
         SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
 
-        DEPTH_REMAP.mul(SCRATCH_P, SCRATCH_T1).mul(SCRATCH_MV, SCRATCH_T2);
+        clipRemap().mul(SCRATCH_P, SCRATCH_T1).mul(SCRATCH_MV, SCRATCH_T2);
 
         MVP.position(0);
         SCRATCH_T2.get(MVP);
@@ -275,7 +283,10 @@ public class VRenderSystem {
         updateModelViewMatrix();
         outModelView.set(modelViewMatrixF.position(0).limit(16));
         SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
-        DEPTH_REMAP.mul(SCRATCH_P, outProjRemap);
+        // History keeps the unjittered camera; draws get the jittered one.
+        DEPTH_REMAP.mul(SCRATCH_P, SCRATCH_T1);
+        net.vulkanmod.render.CameraHistory.captureMain(outModelView, SCRATCH_T1);
+        clipRemap().mul(SCRATCH_P, outProjRemap);
     }
 
     /**

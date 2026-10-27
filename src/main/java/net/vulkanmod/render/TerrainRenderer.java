@@ -38,16 +38,18 @@ public class TerrainRenderer {
     public static final boolean NO_TRANSLUCENT = System.getenv("VULKANMOD_NO_TRANSLUCENT") != null;
 
     /**
-     * Performance knob: VULKANMOD_BATCH=1 renders chunk sections through the batched path
-     * (shared vertex arena + per-section matrix SSBO + one indirect draw per layer) instead of
-     * one draw call per section. See {@link ChunkBatcher}.
+     * Chunk sections render through the batched path (shared vertex arena + per-section
+     * matrix SSBO + one indirect draw per layer), see {@link ChunkBatcher}. Default since B8:
+     * camera history and ray tracing build on the persistent arena. VULKANMOD_BATCH=0 falls
+     * back to one draw call per section.
      */
-    public static final boolean BATCH = isEnvOn("VULKANMOD_BATCH");
+    public static final boolean BATCH = isEnvOn("VULKANMOD_BATCH", true);
 
-    /** Env knob parsing: set to a value starting with "0" to explicitly switch it off. */
-    private static boolean isEnvOn(String name) {
+    /** Env knob parsing: unset gives the default; a value starting with "0" switches it off. */
+    private static boolean isEnvOn(String name, boolean def) {
         String v = System.getenv(name);
-        return v != null && !v.isEmpty() && v.charAt(0) != '0';
+        if (v == null || v.isEmpty()) return def;
+        return v.charAt(0) != '0';
     }
 
     /** Diagnostic: VULKANMOD_NO_TERRAIN=1 skips the whole chunk pass (to bound terrain cost). */

@@ -293,6 +293,7 @@ public class Vulkan {
         createImageViews();
         // The caller (Drawer.recreateSwapChain) waited for the device to idle.
         FrameTargets.resize(swapChainExtent.width(), swapChainExtent.height());
+        net.vulkanmod.render.CameraHistory.reset();
 
         Initializer.LOGGER.info("[swapchain] recreated {}x{} -> {}x{}", oldW, oldH,
                 swapChainExtent.width(), swapChainExtent.height());
