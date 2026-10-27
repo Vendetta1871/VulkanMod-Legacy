@@ -1,0 +1,37 @@
+#version 450
+// F1: camera motion vectors from scene depth. Output is previous UV minus current UV,
+// jitter-free, at render resolution. Moving entities are not handled here.
+
+layout(set = 0, binding = 0) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 1, rg16f) uniform writeonly image2D motionVectors;
+
+layout(push_constant) uniform Constants {
+    // Current jittered clip (pixel NDC + depth) -> previous unjittered clip.
+    mat4 toPrevClip;
+    // Current jittered clip -> current unjittered clip.
+    mat4 toCurClip;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+vec2 clipToUv(vec4 clip) {
+    vec2 ndc = clip.xy / clip.w;
+    // The viewport flips Y: NDC +1 is the top row.
+    return vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+void main() {
+    ivec2 size = imageSize(motionVectors);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, size))) return;
+
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    float depth = texelFetch(sceneDepth, p, 0).r;
+    vec4 clip = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+
+    vec2 mv = clipToUv(pc.toPrevClip * clip) - clipToUv(pc.toCurClip * clip);
+#ifdef DEBUG_VIEW
+    mv = mv * 50.0 + 0.5;
+#endif
+    imageStore(motionVectors, p, vec4(mv, 0.0, 0.0));
+}

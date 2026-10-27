@@ -84,6 +84,8 @@ public final class FrameTargets {
 
     static void destroy() {
         Fsr1Upscaler.destroy();
+        MotionVectorPass.destroy();
+        ComputeSets.destroySamplers();
         scene.destroy();
         display.destroy();
     }
@@ -118,26 +120,39 @@ public final class FrameTargets {
         if (phase != Phase.SCENE) return;
         vkCmdEndRendering(cmd);
 
-        if (!BLIT_ONLY && (scene.width() != display.width() || scene.height() != display.height())) {
+        if (MotionVectorPass.enabled()) {
+            MotionVectorPass.record(cmd, depthAspect(), stack);
+        }
+
+        if (MotionVectorPass.DEBUG_VIEW) {
+            StorageImage mv = MotionVectorPass.motionVectors;
+            blitIntoDisplay(cmd, mv.image, mv.width, mv.height, mv.format,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, stack);
+        } else if (!BLIT_ONLY && (scene.width() != display.width() || scene.height() != display.height())) {
             // F0: FSR 1 upscale; leaves the display color ready as an attachment.
             Fsr1Upscaler.record(cmd, stack);
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
             depthToAttachment(depth.get(0), display);
             pipelineBarrier(cmd, depth, stack);
         } else {
-            blitUpscale(cmd, stack);
+            blitIntoDisplay(cmd, scene.colorImage(), scene.width(), scene.height(), COLOR_FORMAT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, stack);
         }
 
         beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, stack);
         phase = Phase.DISPLAY;
     }
 
-    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack) {
+    /** Copies or linearly blits {@code src} into the display color and readies it as an attachment. */
+    private static void blitIntoDisplay(VkCommandBuffer cmd, long src, int srcW, int srcH, int srcFormat,
+                                        int srcLayout, long srcStage, long srcAccess, MemoryStack stack) {
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
-        imageBarrier(pre.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
-                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        imageBarrier(pre.get(0), src, VK_IMAGE_ASPECT_COLOR_BIT,
+                srcStage, srcAccess,
                 VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                srcLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         // The previous frame's swapchain copy read the display color.
         imageBarrier(pre.get(1), display.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0,
@@ -145,7 +160,7 @@ public final class FrameTargets {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         pipelineBarrier(cmd, pre, stack);
 
-        copyOrBlit(cmd, scene.colorImage(), scene.width(), scene.height(), COLOR_FORMAT,
+        copyOrBlit(cmd, src, srcW, srcH, srcFormat,
                 display.colorImage(), display.width(), display.height(), COLOR_FORMAT, stack);
 
         VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(2, stack);
@@ -234,8 +249,10 @@ public final class FrameTargets {
     }
 
     private static void depthToAttachment(VkImageMemoryBarrier2 b, RenderTarget target) {
+        // Source stages also cover the previous frame's compute read (motion vectors).
         imageBarrier(b, target.depthImage(), depthAspect(),
-                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT
+                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
