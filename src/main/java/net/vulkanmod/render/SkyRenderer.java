@@ -57,6 +57,11 @@ public class SkyRenderer {
     private static ByteBuffer sunBuffer;
     private static ByteBuffer moonBuffer;
     private static ByteBuffer fanBuffer;
+    /** Vanilla's below-horizon box (5 quads around the eye, L7). */
+    private static ByteBuffer belowHorizonBuffer;
+    // Scratch for the below-horizon modelviews (L7): applyModelViewMatrix copies the
+    // matrix, so one field serves both uses in the frame.
+    private static final Matrix4f SCRATCH_HEAD = new Matrix4f();
     private static int builtMoonPhase = -1;
 
     // Persistent device-side copies of the constant sky geometry (M12): uploaded once,
@@ -104,6 +109,7 @@ public class SkyRenderer {
         sunBuffer = buildSun();
         moonBuffer = MemoryUtil.memAlloc(4 * POSITION_TEX.getSize());
         fanBuffer = MemoryUtil.memAlloc(18 * POSITION_COLOR.getSize());
+        belowHorizonBuffer = MemoryUtil.memAlloc(20 * POSITION.getSize());
         endSkyBuffer = buildEndSkyFace();
     }
 
@@ -188,14 +194,16 @@ public class SkyRenderer {
         // glSkyList2 after the stars, and :228 below overwrites the state with NONE.
         final int fogState = VRenderSystem.getFogState();
 
-        VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
-        if (boolState(GL11.GL_DEPTH_TEST)) {
+        // Depth from the GL-truth mirror (N1): a glGet* hands back garbage when the
+        // context does not answer, and Pipeline then throws "unknown depth function"
+        // (R24).
+        VRenderSystem.depthMask(VRenderSystem.glDepthMask);
+        if (VRenderSystem.glDepthTest) {
             VRenderSystem.enableDepthTest();
         } else {
             VRenderSystem.disableDepthTest();
         }
-        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, (java.nio.IntBuffer) int1());
-        VRenderSystem.depthFunc(int1().get(0));
+        VRenderSystem.depthFunc(VRenderSystem.glDepthFun);
         // Vanilla keeps GL_CULL_FACE enabled through all of renderSky (renderWorldPass
         // enables it before the sky). That is what makes the two sky planes one-sided:
         // the y=+16 plane (front face down) covers the upper hemisphere and the y=-16
@@ -317,16 +325,56 @@ public class SkyRenderer {
         // instead of adding to it (L7). Drawing both planes up front made additive
         // stars visible through the lower sky.
         VRenderSystem.setFogState(fogState);
-        VRenderSystem.setShaderColor(r, g, b, 1.0f);
         VRenderSystem.setShaderPipeline(skyPipeline);
         Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
-        VRenderSystem.applyModelViewMatrix(headMV);
-        VRenderSystem.calculateMVP();
         if (skyPlane2Vbo == null) {
             buildSkyPlane();
             skyPlane2Vbo = uploadStatic(skyPlane2Buffer, SKY_PLANE_VERTS, POSITION);
         }
+        // Vanilla: d3 = eyeY - world.getHorizon(). The plane buffer sits at y=-16 and
+        // rides translate(0, -(d3 - 16), 0), so its edge lands exactly on the world
+        // horizon at any altitude; below the horizon (d3 < 0, e.g. a cave under the
+        // floor) vanilla first draws the plane at +12 and a black box around the eye
+        // down to -(d3 + 65), then the coloured plane (L7). The port used to draw it
+        // at a fixed -16 under the eye with the plain sky colour.
+        double horizonDelta = mc.player != null
+                ? mc.player.getPositionEyes(partialTicks).y - world.getHorizon() : 16.0;
+        if (horizonDelta < 0.0) {
+            VRenderSystem.setShaderColor(0.0f, 0.0f, 0.0f, 1.0f);
+            VRenderSystem.applyModelViewMatrix(SCRATCH_HEAD.set(headMV).translate(0.0f, 12.0f, 0.0f));
+            VRenderSystem.calculateMVP();
+            drawStaticQuads(drawer, skyPlane2Vbo, SKY_PLANE_VERTS);
+            VRenderSystem.applyModelViewMatrix(headMV);
+            VRenderSystem.calculateMVP();
+            buildBelowHorizonBox(-(float) (horizonDelta + 65.0));
+            drawer.draw(belowHorizonBuffer, 7, POSITION, 20);
+        }
+        if (world.provider.isSkyColored()) {
+            VRenderSystem.setShaderColor(r * 0.2f + 0.04f, g * 0.2f + 0.04f, b * 0.6f + 0.1f, 1.0f);
+        } else {
+            VRenderSystem.setShaderColor(r, g, b, 1.0f);
+        }
+        VRenderSystem.applyModelViewMatrix(
+                SCRATCH_HEAD.set(headMV).translate(0.0f, -(float) (horizonDelta - 16.0), 0.0f));
+        VRenderSystem.calculateMVP();
         drawStaticQuads(drawer, skyPlane2Vbo, SKY_PLANE_VERTS);
+    }
+
+    /** Vanilla's below-horizon box, exact vertex order (cull-compatible, L7). */
+    private static void buildBelowHorizonBox(float bottom) {
+        ByteBuffer buf = belowHorizonBuffer;
+        buf.position(0);
+        putPos(buf, -1.0f, bottom, 1.0f);  putPos(buf, 1.0f, bottom, 1.0f);
+        putPos(buf, 1.0f, -1.0f, 1.0f);    putPos(buf, -1.0f, -1.0f, 1.0f);
+        putPos(buf, -1.0f, -1.0f, -1.0f);  putPos(buf, 1.0f, -1.0f, -1.0f);
+        putPos(buf, 1.0f, bottom, -1.0f);  putPos(buf, -1.0f, bottom, -1.0f);
+        putPos(buf, 1.0f, -1.0f, -1.0f);   putPos(buf, 1.0f, -1.0f, 1.0f);
+        putPos(buf, 1.0f, bottom, 1.0f);   putPos(buf, 1.0f, bottom, -1.0f);
+        putPos(buf, -1.0f, bottom, -1.0f); putPos(buf, -1.0f, bottom, 1.0f);
+        putPos(buf, -1.0f, -1.0f, 1.0f);   putPos(buf, -1.0f, -1.0f, -1.0f);
+        putPos(buf, -1.0f, -1.0f, -1.0f);  putPos(buf, -1.0f, -1.0f, 1.0f);
+        putPos(buf, 1.0f, -1.0f, 1.0f);    putPos(buf, 1.0f, -1.0f, -1.0f);
+        buf.position(0);
     }
 
     /**

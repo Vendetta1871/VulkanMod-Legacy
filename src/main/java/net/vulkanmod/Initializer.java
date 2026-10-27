@@ -100,6 +100,13 @@ public class Initializer {
             TerrainRenderer.init();
             SkyRenderer.init();
             CloudRenderer.init();
+            // R20: reload the Vulkan cloud texture with the resource packs (a pack's
+            // clouds.png used to be ignored until restart, and one load failure
+            // disabled Vulkan clouds for the session).
+            if (Minecraft.getMinecraft().getResourceManager()
+                    instanceof net.minecraft.client.resources.IReloadableResourceManager rm) {
+                rm.registerReloadListener(CloudRenderer::onResourceManagerReload);
+            }
             WorldBorderRenderer.init();
             DebugLinesRenderer.init();
             EntityRenderer.init();

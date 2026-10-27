@@ -31,9 +31,10 @@ import static org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
  * camera position), so the walls are drawn with a rotation-only modelview, exactly like
  * the sky/cloud/border passes. The line width comes from the mirrored
  * {@code glLineWidth} through the line pipeline's dynamic line-width state; depth and
- * fog states are read from the live GL state. The {@code POSITION_COLOR} lines always
- * blend with SRC_ALPHA/ONE_MINUS_SRC_ALPHA so the alpha-0 strip joints fade out instead
- * of painting an opaque web, while the textured beam draws keep the mirrored blend.</p>
+ * fog states are read from the live GL state. Blend is mirrored like every other state:
+ * vanilla hides the alpha-0 strip joints with the alpha test (GREATER 0.1), which the
+ * line shader now runs too, so forcing SRC_ALPHA/ONE_MINUS_SRC_ALPHA to fade them out
+ * is no longer needed (R18).</p>
  *
  * <p>The dragon's healing beams ({@code RenderDragon.renderCrystalBeams}) are the one
  * world-pass {@code POSITION_TEX_COLOR} strip draw: same replay path, but through the
@@ -141,31 +142,23 @@ public class DebugLinesRenderer {
 
             snapshotFog();
 
-            // Depth state straight from the live GL: the selection box draws with
-            // depthMask(false), the debug renderers with the world default.
-            if (boolState(GL11.GL_DEPTH_TEST)) {
+            // Depth from the GL-truth mirror (N1): the selection box draws with
+            // depthMask(false), the debug renderers with the world default. A glGet*
+            // hands back garbage when the context does not answer (R24).
+            if (VRenderSystem.glDepthTest) {
                 VRenderSystem.enableDepthTest();
             } else {
                 VRenderSystem.disableDepthTest();
             }
-            GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, int1());
-            VRenderSystem.depthFunc(int1().get(0));
-            VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
+            VRenderSystem.depthFunc(VRenderSystem.glDepthFun);
+            VRenderSystem.depthMask(VRenderSystem.glDepthMask);
 
-            if (textured) {
-                // Beams run under whatever blend the entity pass left behind, like vanilla.
-                Drawer.currentBlendState = VRenderSystem.getBlendState();
-            } else {
-                // The debug renderers build their LINE_STRIPs with alpha-0 "pen-up" joints
-                // between the visible segments (chunk borders connect every chunk corner,
-                // the sight lines start at the eye with alpha 0). Vanilla 1.12.2 disables
-                // blend around these draws, which turns those joints into the opaque web
-                // across the middle of the chunk that real players never accept; the
-                // reference look fades them out. SRC_ALPHA/ONE_MINUS_SRC_ALPHA reproduces
-                // it: alpha-1 segments stay solid, alpha-0 joints vanish, the red sight
-                // lines fade toward the crosshair.
-                Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
-            }
+            // Blend mirrored for both paths (R18): vanilla draws the debug lines with
+            // blend disabled and hides the alpha-0 "pen-up" joints with the alpha test
+            // (GREATER 0.1), which the line shader now runs; the beams keep whatever
+            // blend the entity pass left behind, like vanilla. Forcing SRC_ALPHA here
+            // made the red sight lines (alpha 0.5) half-transparent.
+            Drawer.currentBlendState = VRenderSystem.getBlendState();
 
             VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
             if (textured) {

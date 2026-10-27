@@ -27,7 +27,7 @@ public class VRenderSystem {
     // --- Depth / mask / cull state (GL defaults) ---
     public static boolean depthTest = true;
     public static boolean depthMask = true;
-    public static int depthFun = 515; // GL_LESS
+    public static int depthFun = 515; // GL_LEQUAL (515; the GL context default is GL_LESS = 513)
 
     public static int colorMask = Pipeline.ColorMask.getColorMask(true, true, true, true);
 
@@ -38,9 +38,11 @@ public class VRenderSystem {
     // double as the per-pass override channel (sky/clouds/GUI/world-border write them
     // directly), so a pass can always recover the state vanilla actually left behind.
     // The terrain's first layer re-syncs the live fields from these as a safety net.
+    // The depth-func default is GL_LEQUAL (515), not the GL context default GL_LESS:
+    // vanilla's Framebuffer.bindFramebuffer sets LEQUAL before every world frame.
     public static boolean glDepthTest = true;
     public static boolean glDepthMask = true;
-    public static int glDepthFun = 515; // GL_LESS
+    public static int glDepthFun = 515; // GL_LEQUAL
     public static boolean glCull = true;
 
     // Input-assembly topology of the pipeline variant selected at draw time. GL's
@@ -397,7 +399,12 @@ public class VRenderSystem {
 
     public static void texMatrixRotate(float angleDeg, float x, float y, float z) {
         if (matrixMode == 5890) {
-            texUnit(texUnit).cur.rotate((float) Math.toRadians(angleDeg), x, y, z);
+            // glRotatef normalizes the axis; joml rotates about the vector as given,
+            // so a non-unit axis would scale the texture (R22).
+            float len = (float) Math.sqrt(x * x + y * y + z * z);
+            if (len > 1.0e-4f) {
+                texUnit(texUnit).cur.rotate((float) Math.toRadians(angleDeg), x / len, y / len, z / len);
+            }
         }
     }
 

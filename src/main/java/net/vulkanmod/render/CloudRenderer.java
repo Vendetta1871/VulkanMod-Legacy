@@ -147,15 +147,16 @@ public class CloudRenderer {
 
         snapshotFog();
 
-        // renderSky restores depthMask(true), so the clouds write depth just like vanilla.
-        VRenderSystem.depthMask(boolState(GL11.GL_DEPTH_WRITEMASK));
-        if (boolState(GL11.GL_DEPTH_TEST)) {
+        // renderSky restores depthMask(true), so the clouds write depth just like
+        // vanilla. Depth comes from the GL-truth mirror (N1), not a glGet* that hands
+        // back garbage when the context does not answer (R24).
+        VRenderSystem.depthMask(VRenderSystem.glDepthMask);
+        if (VRenderSystem.glDepthTest) {
             VRenderSystem.enableDepthTest();
         } else {
             VRenderSystem.disableDepthTest();
         }
-        GL11.glGetIntegerv(GL11.GL_DEPTH_FUNC, (java.nio.IntBuffer) int1());
-        VRenderSystem.depthFunc(int1().get(0));
+        VRenderSystem.depthFunc(VRenderSystem.glDepthFun);
 
         // Vanilla disables culling for the whole cloud draw (the flat quads are seen from
         // both sides). At this hook point the live GL cull state is still the enabled one
@@ -359,6 +360,16 @@ public class CloudRenderer {
     }
 
     // --- cloud texture ---
+
+    /** Resource reload: drop the cached cloud image and any earlier failure (R20). Deferred free. */
+    public static void onResourceManagerReload(net.minecraft.client.resources.IResourceManager manager) {
+        VulkanImage old = cloudTexture;
+        cloudTexture = null;
+        textureFailed = false;
+        if (old != null) {
+            old.free();
+        }
+    }
 
     private static boolean ensureCloudTexture() {
         if (cloudTexture != null) {

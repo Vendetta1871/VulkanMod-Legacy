@@ -9,7 +9,8 @@ import java.nio.FloatBuffer;
 public class Vec2f extends Field {
 
     protected Vec2f(String name, AlignedStruct ubo) {
-        super(name, 2, 4, ubo.getCurrentOffset());
+        // Units are floats: std140 vec2 = base alignment 8 bytes = 2 floats (R14).
+        super(name, 2, 2, ubo.getCurrentOffset());
 
         ubo.setCurrentOffset(offset + size);
         setFunction();
