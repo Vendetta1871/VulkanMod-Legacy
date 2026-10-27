@@ -116,9 +116,8 @@ public final class RtScene {
         }
         enabled = true;
         Initializer.LOGGER.info("[rt] on");
-        if (net.vulkanmod.vulkan.FrameTargets.display.width() > 0) {
-            net.vulkanmod.vulkan.Drawer.shouldRecreate = true;
-        }
+        // The scene color needs STORAGE before the first RT frame records.
+        net.vulkanmod.vulkan.FrameTargets.recreateIfCreated();
         // Sections uploaded while RT was off carry no RT state: rebuild them.
         if (mc.world != null && mc.renderGlobal != null) {
             mc.renderGlobal.loadRenderers();
@@ -219,6 +218,7 @@ public final class RtScene {
      */
     public static void record(VkCommandBuffer cmd, MemoryStack stack) {
         RtBuffer.tick();
+        breadcrumb(cmd, stack, 1);
 
         VkMemoryBarrier2.Buffer pre = VkMemoryBarrier2.calloc(1, stack);
         pre.get(0).sType$Default()
@@ -231,7 +231,9 @@ public final class RtScene {
                         | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
         vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre));
 
-        if (buildBlases(cmd)) {
+        boolean built = buildBlases(cmd);
+        if (built) breadcrumb(cmd, stack, 2);
+        if (built) {
             // The TLAS build reads the new BLASes and reuses the scratch buffer.
             memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                     VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
@@ -239,10 +241,54 @@ public final class RtScene {
                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
         }
         buildTlas(cmd);
+        breadcrumb(cmd, stack, 3);
         memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                 VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    }
+
+    // --- GPU hang breadcrumbs (VULKANMOD_RT_LOG): the last value the GPU wrote shows
+    // which RT step a hung frame is stuck in. ---
+
+    private static RtBuffer crumbs;
+    private static long crumbFrame;
+
+    /**
+     * Writes (frame << 4 | step) once everything recorded before has finished. Steps:
+     * 0 frame start, 1 RT start, 2 BLAS builds done, 3 TLAS build done, 4 RT passes done,
+     * 5 frame end (swapchain copy done).
+     */
+    public static void breadcrumb(VkCommandBuffer cmd, MemoryStack stack, int step) {
+        if (!LOG) return;
+        if (crumbs == null) {
+            crumbs = RtBuffer.create(64, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            Thread watchdog = new Thread(RtScene::watchdog, "RT hang watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
+        }
+        if (step == 0) crumbFrame++;
+        memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0);
+        vkCmdFillBuffer(cmd, crumbs.buffer, 0, 4, (int) (crumbFrame << 4 | step));
+    }
+
+    private static void watchdog() {
+        int last = -1;
+        long since = System.currentTimeMillis();
+        while (true) {
+            try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+            RtBuffer c = crumbs;
+            if (c == null) continue;
+            int v = c.mapped.getInt(0);
+            if (v != last) {
+                last = v;
+                since = System.currentTimeMillis();
+            } else if (System.currentTimeMillis() - since > 10000) {
+                Initializer.LOGGER.error("[rt] GPU stuck: last breadcrumb frame {} step {} (CPU recorded frame {})",
+                        v >>> 4, v & 15, crumbFrame);
+                since = System.currentTimeMillis();
+            }
+        }
     }
 
     private static void memoryBarrier(VkCommandBuffer cmd, MemoryStack stack, long srcStage, long srcAccess,

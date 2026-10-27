@@ -77,6 +77,13 @@ public final class FrameTargets {
         }
     }
 
+    /** Recreates the targets at the current extent (settings changed their usage); waits for idle. */
+    public static void recreateIfCreated() {
+        if (display.width() <= 0) return;
+        vkDeviceWaitIdle(Vulkan.getDevice());
+        resize(display.width(), display.height());
+    }
+
     /** Destroys the RT passes' pipelines and descriptors (RT turned off; device idle). */
     public static void releaseRtPasses() {
         RtDebugView.destroy();
@@ -242,6 +249,7 @@ public final class FrameTargets {
 
         opaqueTaken = false;
         depthReadable = false;
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 0);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.SCENE;
     }
@@ -265,6 +273,7 @@ public final class FrameTargets {
                 // T8: shadows darken the scene color before the upscaler reads it.
                 RtShadowPass.record(cmd, stack);
             }
+            net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 4);
         }
 
         if (RtDebugView.ACTIVE && net.vulkanmod.vulkan.rt.RtScene.enabled() && RtDebugView.record(cmd, stack)) {
@@ -361,6 +370,7 @@ public final class FrameTargets {
                 VK_PIPELINE_STAGE_2_NONE, 0,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         pipelineBarrier(cmd, post, stack);
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 5);
     }
 
     private static void beginRendering(VkCommandBuffer cmd, RenderTarget target, int colorLoadOp,

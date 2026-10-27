@@ -159,6 +159,35 @@ public class AutoTest {
     private static final boolean FPS_MODE = System.getenv("VULKANMOD_AUTOTEST_FPS") != null;
 
     /**
+     * {@code VULKANMOD_AUTOTEST_RTTOGGLE=1}: in the world, flips the video-settings "RTX" option
+     * on through the same GameSettings path a click takes (chunks reload, BLASes build),
+     * captures, flips it off again, captures, quits. Checks the runtime toggle.
+     */
+    private static final boolean RT_TOGGLE_MODE = System.getenv("VULKANMOD_AUTOTEST_RTTOGGLE") != null;
+    private static int rtToggleTicks;
+
+    private static void rtToggleStage(Minecraft mc) {
+        int t = ++rtToggleTicks;
+        net.minecraft.client.settings.GameSettings.Options rtx = net.vulkanmod.config.gui.VulkanVideoOptions.rtx();
+        if (t == 20) {
+            capture(mc, "rtBefore");
+        } else if (t == 30) {
+            mc.gameSettings.setOptionValue(rtx, 1);
+            Initializer.LOGGER.info("[autotest] RTX toggled -> {}", mc.gameSettings.getKeyBinding(rtx));
+        } else if (t == 160) {
+            capture(mc, "rtOn");
+        } else if (t == 170) {
+            mc.gameSettings.setOptionValue(rtx, 1);
+            Initializer.LOGGER.info("[autotest] RTX toggled -> {}", mc.gameSettings.getKeyBinding(rtx));
+        } else if (t == 200) {
+            capture(mc, "rtOff");
+        } else if (t >= 210) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
+    /**
      * Render-state boundary probe: with {@code VULKANMOD_AUTOTEST_STATE=1} the run captures
      * the cases the default scene cannot reach - terrain with clouds off, terrain above the
      * cloud plane, the survival HUD (hearts/hunger with absorption + poison tints), the
@@ -333,6 +362,11 @@ public class AutoTest {
 
                 if (FPS_MODE) {
                     fpsStage(mc);
+                    return;
+                }
+
+                if (RT_TOGGLE_MODE) {
+                    rtToggleStage(mc);
                     return;
                 }
 
@@ -1322,13 +1356,19 @@ public class AutoTest {
             // The "Upscaling..." button added by GuiVideoSettingsM, then its screen.
             if (++guiTicks == 36) {
                 capture(mc, "videoSettings");
-            } else if (guiTicks == 40) {
+            } else if (guiTicks == 37) {
+                // Scroll to the end of the option list, where VulkanMod's rows are.
+                ((net.vulkanmod.mixin.render.GuiVideoSettingsAccessor) mc.currentScreen)
+                        .vulkanmod$getOptionsRowList().scrollBy(1000);
+            } else if (guiTicks == 39) {
+                capture(mc, "videoSettingsEnd");
+            } else if (guiTicks == 44) {
                 mc.displayGuiScreen(new net.vulkanmod.config.gui.UpscalingSettingsScreen(mc.currentScreen));
             }
         } else if (mc.currentScreen instanceof net.vulkanmod.config.gui.UpscalingSettingsScreen) {
-            if (++guiTicks == 46) {
+            if (++guiTicks == 50) {
                 capture(mc, "upscaling");
-            } else if (guiTicks >= 52 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+            } else if (guiTicks >= 56 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                 Initializer.LOGGER.info("[autotest] done, shutting down");
                 mc.shutdown();
             }

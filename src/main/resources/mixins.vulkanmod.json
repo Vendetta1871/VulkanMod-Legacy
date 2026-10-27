@@ -34,6 +34,7 @@
     "render.GuiScreenAccessor",
     "render.GuiMainMenuM",
     "render.GuiVideoSettingsM",
+    "render.GuiVideoSettingsAccessor",
     "render.ChunkRenderDispatcherM",
     "render.RenderChunkM",
     "render.FontRendererM",
