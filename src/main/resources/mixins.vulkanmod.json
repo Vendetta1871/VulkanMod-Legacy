@@ -31,6 +31,7 @@
     "render.EntityRendererAccessor",
     "render.GuiScreenM",
     "render.GuiMainMenuM",
+    "render.FontRendererM",
     "render.LoadingScreenRendererM",
     "render.GlStateManagerAlphaM",
     "render.GlStateManagerBlendM",

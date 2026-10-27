@@ -13,6 +13,7 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
 import java.util.HashMap;
 
 /**
@@ -107,6 +108,15 @@ public class GuiRenderer {
     private static Pipeline.LogicOpState glyphLogicOp = Pipeline.DEFAULT_LOGICOP_STATE;
     private static final org.joml.Matrix4f glyphModelView = new org.joml.Matrix4f();
     private static final org.joml.Matrix4f glyphProjection = new org.joml.Matrix4f();
+    // R7: the modelview the batch was opened under, compared against the live GL matrix
+    // before a BufferBuilder quad joins it. The version counter cannot see raw GL11
+    // translate/push/pop (common in 1.12 mod GUIs), the GL matrix can.
+    private static final float[] glyphMv = new float[16];
+    private static final FloatBuffer mvProbe = MemoryUtil.memAllocFloat(16);
+
+    // R7: true between FontRenderer.renderString HEAD and RETURN (FontRendererM). A glyph
+    // batch is closed at both ends, so it never spans unrelated calls.
+    private static boolean inFontString;
     // Capped at 65536 vertices so the batch stays in the shared UINT16 index range (N25).
     private static final int GLYPH_BATCH_MAX = 65536;
 
@@ -131,6 +141,7 @@ public class GuiRenderer {
     private static int savedDepthFun, savedColorMask;
 
     public static void setGuiPass(boolean value) {
+        inFontString = false; // a renderString that threw never reached its RETURN hook
         boolean wasGui = guiPass;
         if (value && !wasGui) {
             savedDepthTest = VRenderSystem.depthTest;
@@ -292,7 +303,8 @@ public class GuiRenderer {
                         || VRenderSystem.blendDstAlpha != glyphBlendDstA
                         || VRenderSystem.getAlphaFunc() != (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
                         || VRenderSystem.getAlphaRef() != glyphAlphaRef
-                        || !Drawer.currentLogicOpState.equals(glyphLogicOp))) {
+                        || !Drawer.currentLogicOpState.equals(glyphLogicOp)
+                        || !liveModelViewMatchesBatch())) {
                     flushGlyphBatch();
                 }
                 if (glyphBatchVerts + vertexCount > GLYPH_BATCH_MAX) {
@@ -390,8 +402,32 @@ public class GuiRenderer {
         glyphLogicOp = Drawer.currentLogicOpState;
         VRenderSystem.updateProjectionMatrix();
         VRenderSystem.updateModelViewMatrix();
-        glyphModelView.set(VRenderSystem.getModelViewMatrix4f());
+        VRenderSystem.getModelViewMatrix4f().get(glyphMv);
+        glyphModelView.set(glyphMv);
         glyphProjection.set(VRenderSystem.getProjectionMatrix4f());
+    }
+
+    /** One glGet per BufferBuilder quad: exact against raw GL11 matrix calls (R7). */
+    private static boolean liveModelViewMatchesBatch() {
+        GL11.glGetFloatv(GL11.GL_MODELVIEW_MATRIX, mvProbe.clear());
+        for (int i = 0; i < 16; i++) {
+            if (mvProbe.get(i) != glyphMv[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** FontRendererM, renderString HEAD: nothing drawn before the string joins its batch. */
+    public static void beginFontString() {
+        flushGlyphBatch();
+        inFontString = true;
+    }
+
+    /** FontRendererM, renderString RETURN: the string's glyph run ends here. */
+    public static void endFontString() {
+        inFontString = false;
+        flushGlyphBatch();
     }
 
     /** Copies one glyph's four textured vertices into the batch (positions are raw). */
