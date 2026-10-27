@@ -16,6 +16,7 @@
     "render.RenderManagerM",
     "render.TileEntityRendererDispatcherM",
     "render.TileEntityEndPortalRendererM",
+    "render.RenderDragonM",
     "render.ModelRendererM",
     "render.WorldVertexBufferUploaderM",
     "render.VertexBufferM",

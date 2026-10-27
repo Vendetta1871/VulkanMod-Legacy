@@ -258,6 +258,20 @@ public class GuiRenderer {
         int vertexCount = buffer.getVertexCount();
         int drawMode = buffer.getDrawMode();
         VertexFormat format = buffer.getVertexFormat();
+        if (drawMode == GL11.GL_LINES || drawMode == GL11.GL_LINE_STRIP) {
+            // R17: GUI-pass lines (the F3 axis gizmo, OpenGlHelper.renderDirections) replay
+            // here under the GUI state and in paint order, not in DebugLinesRenderer.
+            if (format != POSITION_COLOR || vertexCount < 2 || !ensureRenderPass()) {
+                return false;
+            }
+            try {
+                drawGuiLines(buffer, drawMode, vertexCount);
+                return true;
+            } catch (Throwable t) {
+                TerrainRenderer.reportOnce("gui lines", t);
+                return false;
+            }
+        }
         if (vertexCount <= 0 || (drawMode != 7 && drawMode != 6 && drawMode != 5)) {
             return false;
         }
@@ -386,6 +400,24 @@ public class GuiRenderer {
                 && VRenderSystem.getAlphaFunc() == (glyphAlphaTest ? glyphAlphaFunc : 0.0f)
                 && VRenderSystem.getAlphaRef() == glyphAlphaRef
                 && Drawer.currentLogicOpState.equals(glyphLogicOp);
+    }
+
+    /** GUI-pass POSITION_COLOR lines through the debug-line pipeline (fog off via applyGuiState). */
+    private static void drawGuiLines(BufferBuilder buffer, int drawMode, int vertexCount) {
+        flushGlyphBatch();
+        applyGuiState(DebugLinesRenderer.getLinePipeline(), null);
+        VRenderSystem.setTopology(drawMode == GL11.GL_LINE_STRIP
+                ? org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
+                : org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
+        ByteBuffer data = buffer.getByteBuffer();
+        int prev = data.position();
+        try {
+            data.position(0);
+            Drawer.getInstance().drawLines(data, POSITION_COLOR, vertexCount);
+        } finally {
+            data.position(prev);
+            VRenderSystem.setTopology(org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        }
     }
 
     /** Opens a glyph batch: captures the state the accumulated quads belong to (M11/N18). */

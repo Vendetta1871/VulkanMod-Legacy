@@ -56,6 +56,21 @@ public class DebugLinesRenderer {
         linePipeline = new Pipeline(POSITION_COLOR, "debug_lines");
     }
 
+    /** The POSITION_COLOR line pipeline, reused for GUI-pass lines (R17). */
+    public static Pipeline getLinePipeline() {
+        return linePipeline;
+    }
+
+    /**
+     * True while {@code RenderDragon.renderCrystalBeams} runs (RenderDragonM): the dragon's
+     * healing beams and the End crystal beams. Only there is a textured strip ours (R17).
+     */
+    private static boolean beamWindow;
+
+    public static void setBeamWindow(boolean value) {
+        beamWindow = value;
+    }
+
     /**
      * True when this buffer is debug/selection line geometry the port can replay. Called
      * from the {@code WorldVertexBufferUploader} hook before {@link #render}; the entity
@@ -64,16 +79,18 @@ public class DebugLinesRenderer {
      */
     public static boolean accepts(BufferBuilder buffer) {
         VertexFormat format = buffer.getVertexFormat();
-        if (linePipeline == null || format == null) {
+        // R17: GUI-pass lines (F3 renderDirections) are GuiRenderer's: replayed here they
+        // would lose their translation, test against world depth and skip the glyph flush.
+        if (linePipeline == null || format == null || GuiRenderer.isGuiPass()) {
             return false;
         }
         int mode = buffer.getDrawMode();
         if (format == POSITION_TEX_COLOR) {
             // The dragon's healing beams are a GL_TRIANGLE_STRIP ribbon (begin(5) is
-            // GL_TRIANGLE_STRIP, not a line mode) - the only textured strip that reaches
-            // this hook; entity quads (mode 7) are captured upstream first.
+            // GL_TRIANGLE_STRIP, not a line mode); any other textured strip (a mod's) is
+            // not known to carry entity-local vertices, so it stays on the GL path.
             return mode == GL11.GL_LINES || mode == GL11.GL_LINE_STRIP
-                    || mode == GL11.GL_TRIANGLE_STRIP;
+                    || (mode == GL11.GL_TRIANGLE_STRIP && beamWindow);
         }
         return mode == GL11.GL_LINES || mode == GL11.GL_LINE_STRIP;
     }
