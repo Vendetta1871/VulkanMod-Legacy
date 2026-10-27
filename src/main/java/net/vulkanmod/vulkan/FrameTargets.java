@@ -37,12 +37,16 @@ public final class FrameTargets {
     private static boolean depthHasStencil;
     private static float renderScale = readRenderScale();
     private static Phase phase = Phase.NONE;
+    private static int generation;
+    private static final boolean BLIT_ONLY = "blit".equalsIgnoreCase(System.getenv("VULKANMOD_UPSCALER"));
 
     private FrameTargets() {}
 
     public static int depthFormat() { return depthFormat; }
     public static Phase phase() { return phase; }
     public static float renderScale() { return renderScale; }
+    /** Bumped whenever the targets are recreated; descriptor users compare it. */
+    public static int generation() { return generation; }
 
     /** Extent of the target currently rendered to (display extent outside a frame). */
     public static int currentWidth() { return phase == Phase.SCENE ? scene.width() : display.width(); }
@@ -70,12 +74,16 @@ public final class FrameTargets {
         int sh = Math.max(1, Math.round(displayH * renderScale));
         scene.create(sw, sh, COLOR_FORMAT,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, depthFormat);
+        // STORAGE: the upscalers write the display color from compute.
         display.create(displayW, displayH, COLOR_FORMAT,
-                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                        | VK_IMAGE_USAGE_STORAGE_BIT,
                 depthFormat);
+        generation++;
     }
 
     static void destroy() {
+        Fsr1Upscaler.destroy();
         scene.destroy();
         display.destroy();
     }
@@ -87,10 +95,10 @@ public final class FrameTargets {
     /** Starts the SCENE phase: clears and begins rendering into the scene target. */
     static void beginFrame(VkCommandBuffer cmd, float[] clearColor, MemoryStack stack) {
         // Contents of the previous frame are discarded (UNDEFINED). The source stages
-        // cover the previous frame's upscale read and depth writes.
+        // cover the previous frame's upscale read (blit or FSR compute) and depth writes.
         VkImageMemoryBarrier2.Buffer barriers = VkImageMemoryBarrier2.calloc(2, stack);
         imageBarrier(barriers.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
-                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -110,6 +118,21 @@ public final class FrameTargets {
         if (phase != Phase.SCENE) return;
         vkCmdEndRendering(cmd);
 
+        if (!BLIT_ONLY && (scene.width() != display.width() || scene.height() != display.height())) {
+            // F0: FSR 1 upscale; leaves the display color ready as an attachment.
+            Fsr1Upscaler.record(cmd, stack);
+            VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
+            depthToAttachment(depth.get(0), display);
+            pipelineBarrier(cmd, depth, stack);
+        } else {
+            blitUpscale(cmd, stack);
+        }
+
+        beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, stack);
+        phase = Phase.DISPLAY;
+    }
+
+    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack) {
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
         imageBarrier(pre.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -133,9 +156,6 @@ public final class FrameTargets {
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         depthToAttachment(post.get(1), display);
         pipelineBarrier(cmd, post, stack);
-
-        beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, stack);
-        phase = Phase.DISPLAY;
     }
 
     /**

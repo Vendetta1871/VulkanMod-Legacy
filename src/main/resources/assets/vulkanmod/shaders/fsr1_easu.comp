@@ -1,0 +1,33 @@
+#version 450
+// FSR 1 EASU: scene (render res) -> intermediate (display res). Uses AMD's ffx_fsr1.h.
+#extension GL_GOOGLE_include_directive : require
+#define FFX_GPU 1
+#define FFX_GLSL 1
+#define FFX_FSR_EASU_FLOAT 1
+#include "ffx/ffx_core.h"
+
+layout(set = 0, binding = 0) uniform sampler2D inputColor;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform Constants {
+    uvec4 con0;
+    uvec4 con1;
+    uvec4 con2;
+    uvec4 con3;
+} pc;
+
+FfxFloat32x4 FsrEasuRF(FfxFloat32x2 p) { return textureGather(inputColor, p, 0); }
+FfxFloat32x4 FsrEasuGF(FfxFloat32x2 p) { return textureGather(inputColor, p, 1); }
+FfxFloat32x4 FsrEasuBF(FfxFloat32x2 p) { return textureGather(inputColor, p, 2); }
+
+#include "ffx/fsr1/ffx_fsr1.h"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    uvec2 ip = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(ip, uvec2(imageSize(outputImage))))) return;
+    vec3 color;
+    ffxFsrEasuFloat(color, ip, pc.con0, pc.con1, pc.con2, pc.con3);
+    imageStore(outputImage, ivec2(ip), vec4(color, 1.0));
+}
