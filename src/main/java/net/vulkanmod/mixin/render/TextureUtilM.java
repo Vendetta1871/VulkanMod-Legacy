@@ -11,7 +11,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import net.minecraft.client.renderer.texture.TextureUtil;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.render.TextureBridge;
-import net.vulkanmod.vulkan.VRenderSystem;
 
 /**
  * The AbstractTexture/DynamicTexture/ThreadDownloadImageData hooks cover the vanilla
@@ -33,10 +32,15 @@ public class TextureUtilM {
         invalidate(textureId);
     }
 
-    /** Uploads into the currently bound texture; the tracked unit-0 bind is the target. */
+    /**
+     * Uploads into the texture bound on the active unit. Inside TextureMap.updateAnimations
+     * that is the animating atlas, whose tile is mirrored instead (R21).
+     */
     @Inject(method = "uploadTextureMipmap", at = @At("HEAD"))
     private static void vulkanmod$uploadTextureMipmap(CallbackInfo ci) {
-        invalidate(VRenderSystem.trackedBoundTexture);
+        if (Initializer.isVulkanActive()) {
+            TextureBridge.onSpriteUpload();
+        }
     }
 
     @Inject(method = "uploadTextureImage", at = @At("HEAD"))
@@ -65,9 +69,6 @@ public class TextureUtilM {
     }
 
     private static void invalidate(int texId) {
-        if (!Initializer.isVulkanActive() || texId == TextureBridge.getAtlasGlId()) {
-            return;
-        }
-        TextureBridge.invalidateGlTexture(texId);
+        TextureBridge.invalidateForUpload(texId);
     }
 }

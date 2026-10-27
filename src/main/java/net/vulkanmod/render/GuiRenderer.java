@@ -815,6 +815,11 @@ public class GuiRenderer {
         return image;
     }
 
+    /** The cached mirror of a GL texture, or null (R21 tile mirroring of mod atlases). */
+    public static VulkanImage cachedMirror(int texId) {
+        return textureCache.get(texId);
+    }
+
     /** Forgets the Vulkan image mirrored from a GL texture that is being deleted. */
     public static void onTextureDeleted(int texId) {
         VulkanImage image = textureCache.remove(texId);

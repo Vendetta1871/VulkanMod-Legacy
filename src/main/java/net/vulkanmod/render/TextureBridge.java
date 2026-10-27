@@ -53,6 +53,15 @@ public class TextureBridge {
      */
     private static boolean mirrorTarget;
 
+    /** GL id of the TextureMap whose updateAnimations is running; -1 outside it (R21). */
+    private static int animatingAtlasId = -1;
+
+    /**
+     * uploadTextureMipmap calls of the running tick that no uploadSpriteTile followed - a
+     * mod sprite with its own upload path. The mod atlas is then re-downloaded once.
+     */
+    private static int unmirroredTileUploads;
+
     /** Number of mip levels the mirrored atlas image was created with (vanilla uploads 4). */
     private static int atlasMipLevels = 1;
 
@@ -61,7 +70,9 @@ public class TextureBridge {
      * (TextureMapM brackets {@code TextureMap.updateAnimations} with these), so a tick with a
      * dozen animated sprites costs one queue submit instead of a dozen.
      */
-    public static void beginTileBatch(boolean blockAtlas) {
+    public static void beginTileBatch(boolean blockAtlas, int atlasId) {
+        animatingAtlasId = atlasId;
+        unmirroredTileUploads = 0;
         mirrorTarget = blockAtlas && !NO_TILEMIRROR && Initializer.isVulkanActive();
         if (NO_TILEMIRROR || tileBatchOpen || !Initializer.isVulkanActive()) {
             return;
@@ -71,6 +82,16 @@ public class TextureBridge {
     }
 
     public static void endTileBatch() {
+        int animated = animatingAtlasId;
+        animatingAtlasId = -1;
+        if (unmirroredTileUploads > 0) {
+            unmirroredTileUploads = 0;
+            // The block atlas keeps its tile-mirror-only behaviour; a mod atlas falls back
+            // to one full re-download.
+            if (animated != atlasGlId) {
+                invalidateGlTexture(animated);
+            }
+        }
         mirrorTarget = false;
         // Close the atlas layout batch opened by the first mirrored tile of the tick
         // before the shared command buffer is submitted (N11).
@@ -95,6 +116,42 @@ public class TextureBridge {
     /** Called after the atlas is (re)stitched, see TextureMapM. */
     public static void markAtlasDirty() {
         atlasDirty = true;
+    }
+
+    /**
+     * TextureUtil.uploadTextureMipmap HEAD (TextureUtilM): the target is the bound texture.
+     * Inside TextureMap.updateAnimations that is the map's own atlas, whose tile the
+     * sprite redirect mirrors right after (uploadSpriteTile), so nothing is dropped (R21).
+     */
+    public static void onSpriteUpload() {
+        if (animatingAtlasId > 0 && !NO_TILEMIRROR) {
+            unmirroredTileUploads++;
+            return;
+        }
+        onRawUpload();
+    }
+
+    /**
+     * Upload into whatever is bound on the active unit (GlStateManager.glTexImage2D /
+     * glTexSubImage2D, H6; TextureUtil.uploadTextureMipmap outside the animation tick).
+     * The GL query sees every unit and raw GL11 binds; uploads are rare outside the tick.
+     */
+    public static void onRawUpload() {
+        if (animatingAtlasId > 0 && !NO_TILEMIRROR) {
+            return; // the sprite path above accounts for the tick's uploads
+        }
+        invalidateForUpload(GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D));
+    }
+
+    /**
+     * Upload/delete of a known id. The block atlas is excluded: its mirror is maintained
+     * tile-by-tile, and invalidating it would re-download the whole atlas.
+     */
+    public static void invalidateForUpload(int texId) {
+        if (!Initializer.isVulkanActive() || texId == atlasGlId) {
+            return;
+        }
+        invalidateGlTexture(texId);
     }
 
     /**
@@ -124,13 +181,18 @@ public class TextureBridge {
      * (x &gt;&gt; i, y &gt;&gt; i) exactly like vanilla's stitched atlas mips.</p>
      */
     public static void uploadSpriteTile(int[][] frames, int width, int height, int x, int y) {
+        if (unmirroredTileUploads > 0) {
+            unmirroredTileUploads--;
+        }
         try {
             if (NO_TILEMIRROR) {
                 atlasDirty = true;
                 return;
             }
-            // Sprite of another atlas (book pages, paintings): GL upload happened, nothing to mirror.
+            // Sprite of another atlas (mod TextureMaps): mirror it into that atlas' GUI /
+            // entity mirrors instead of re-downloading the atlas every tick (R21).
             if (!mirrorTarget) {
+                mirrorForeignTile(frames, width, height, x, y);
                 return;
             }
             // Atlas not created yet: fall back to the full download.
@@ -153,22 +215,7 @@ public class TextureBridge {
                     atlasDirty = true;
                     return;
                 }
-                int size = lw * lh * 4;
-                if (tileBuffer == null || tileBuffer.capacity() < width * height * 4) {
-                    if (tileBuffer != null) {
-                        MemoryUtil.memFree(tileBuffer);
-                    }
-                    tileBuffer = MemoryUtil.memAlloc(width * height * 4);
-                }
-                tileBuffer.clear();
-                for (int pixel : argb) {
-                    tileBuffer.put((byte) (pixel >> 16));
-                    tileBuffer.put((byte) (pixel >> 8));
-                    tileBuffer.put((byte) pixel);
-                    tileBuffer.put((byte) (pixel >>> 24));
-                }
-                tileBuffer.position(0);
-                tileBuffer.limit(size);
+                fillTileBuffer(argb, lw * lh * 4);
 
                 atlasImage.uploadSubTextureAsync(lvl, lw, lh, x >> lvl, y >> lvl, 4, 0, 0, lw, tileBuffer);
             }
@@ -176,6 +223,59 @@ public class TextureBridge {
             Initializer.LOGGER.error("Failed to mirror sprite tile, falling back to atlas download", e);
             atlasDirty = true;
         }
+    }
+
+    /**
+     * R21: writes one animated tile of a mod atlas into the single-level mirrors the GUI
+     * and entity paths hold for it. No mirror: nothing to do, the next draw downloads
+     * the current pixels. Any mismatch falls back to dropping the mirrors.
+     */
+    private static void mirrorForeignTile(int[][] frames, int width, int height, int x, int y) {
+        int id = animatingAtlasId;
+        if (id <= 0) {
+            return;
+        }
+        VulkanImage gui = GuiRenderer.cachedMirror(id);
+        VulkanImage entity = net.vulkanmod.render.EntityRenderer.cachedMirror(id);
+        if (gui == null && entity == null) {
+            return;
+        }
+        int[] argb = frames.length > 0 ? frames[0] : null;
+        if (argb == null || argb.length != width * height
+                || !tileFits(gui, width, height, x, y) || !tileFits(entity, width, height, x, y)) {
+            invalidateGlTexture(id);
+            return;
+        }
+        fillTileBuffer(argb, width * height * 4);
+        if (gui != null) {
+            gui.uploadSubTextureAsync(0, width, height, x, y, 4, 0, 0, width, tileBuffer.position(0));
+        }
+        if (entity != null && entity != gui) {
+            entity.uploadSubTextureAsync(0, width, height, x, y, 4, 0, 0, width, tileBuffer.position(0));
+        }
+    }
+
+    private static boolean tileFits(VulkanImage image, int width, int height, int x, int y) {
+        return image == null || (x + width <= image.getWidth() && y + height <= image.getHeight());
+    }
+
+    /** ARGB ints -> RGBA bytes in the shared tile buffer, positioned 0, limit {@code size}. */
+    private static void fillTileBuffer(int[] argb, int size) {
+        if (tileBuffer == null || tileBuffer.capacity() < size) {
+            if (tileBuffer != null) {
+                MemoryUtil.memFree(tileBuffer);
+            }
+            tileBuffer = MemoryUtil.memAlloc(size);
+        }
+        tileBuffer.clear();
+        for (int pixel : argb) {
+            tileBuffer.put((byte) (pixel >> 16));
+            tileBuffer.put((byte) (pixel >> 8));
+            tileBuffer.put((byte) pixel);
+            tileBuffer.put((byte) (pixel >>> 24));
+        }
+        tileBuffer.position(0);
+        tileBuffer.limit(size);
     }
 
     /** Called at the start of every render frame (see {@link Initializer#beginFrame()}). */

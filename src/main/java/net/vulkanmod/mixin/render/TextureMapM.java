@@ -29,7 +29,8 @@ public class TextureMapM {
     // all belong together: record them into one transfer command buffer and submit once.
     @Inject(method = "updateAnimations", at = @At("HEAD"))
     private void vulkanmod$beginTileBatch(CallbackInfo ci) {
-        TextureBridge.beginTileBatch((Object) this == Minecraft.getMinecraft().getTextureMapBlocks());
+        TextureBridge.beginTileBatch((Object) this == Minecraft.getMinecraft().getTextureMapBlocks(),
+                ((TextureMap) (Object) this).getGlTextureId());
     }
 
     @Inject(method = "updateAnimations", at = @At("TAIL"))
