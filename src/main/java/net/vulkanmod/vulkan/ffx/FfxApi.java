@@ -27,6 +27,12 @@ public final class FfxApi {
     public static final long DISPATCH_DESC_TYPE_UPSCALE = 0x00010001L;
     public static final long QUERY_DESC_TYPE_UPSCALE_GETJITTERPHASECOUNT = 0x00010004L;
     public static final long QUERY_DESC_TYPE_UPSCALE_GETJITTEROFFSET = 0x00010005L;
+    public static final long DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK = 0x00010006L;
+
+    // --- FfxApiDispatchUpscaleAutoreactiveFlags ---
+    public static final int AUTOREACTIVE_APPLY_TONEMAP = 1;
+    public static final int AUTOREACTIVE_APPLY_THRESHOLD = 1 << 2;
+    public static final int AUTOREACTIVE_USE_COMPONENTS_MAX = 1 << 3;
 
     // --- ffxCreateContextDescUpscale.flags ---
     public static final int UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE = 1;
@@ -74,6 +80,8 @@ public final class FfxApi {
     public static final int QUERY_JPC_SIZE = 32, QJPC_RENDER_W = 16, QJPC_DISPLAY_W = 20, QJPC_OUT = 24;
     public static final int QUERY_JO_SIZE = 40, QJO_INDEX = 16, QJO_PHASES = 20, QJO_OUT_X = 24, QJO_OUT_Y = 32;
     public static final int QUERY_VERSION_SIZE = 32, QV_ID = 16, QV_NAME = 24;
+    public static final int DISPATCH_REACTIVE_SIZE = 192, DR_CMD = 16, DR_OPAQUE = 24, DR_COLOR = 72, DR_OUT = 120,
+            DR_RENDER_SIZE = 168, DR_SCALE = 176, DR_CUTOFF = 180, DR_BINARY = 184, DR_FLAGS = 188;
 
     private static SharedLibrary library;
     private static long fnCreateContext, fnDestroyContext, fnConfigure, fnQuery, fnDispatch;

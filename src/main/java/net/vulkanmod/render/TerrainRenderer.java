@@ -345,6 +345,10 @@ public class TerrainRenderer {
 
     /** Called at the start of every chunk layer pass (see VboRenderListM). */
     public static void onChunkLayerStart(BlockRenderLayer layer) {
+        if (layer == BlockRenderLayer.TRANSLUCENT) {
+            // F2: no-op when the particle pass already took the copy this frame.
+            net.vulkanmod.vulkan.Drawer.snapshotOpaque();
+        }
         currentLayer = layer;
         logStats();
         beginLayer(layer);

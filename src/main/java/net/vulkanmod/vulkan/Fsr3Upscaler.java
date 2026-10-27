@@ -29,6 +29,11 @@ final class Fsr3Upscaler {
     private static long lastDispatchNanos;
 
     private static ByteBuffer dispatchDesc;
+    private static ByteBuffer reactiveDesc;
+
+    /** F2: auto-generated reactive mask (render resolution). */
+    private static final StorageImage reactive = new StorageImage(VK_FORMAT_R8_UNORM,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
     private Fsr3Upscaler() {}
 
@@ -82,6 +87,8 @@ final class Fsr3Upscaler {
         contextGeneration = FrameTargets.generation();
         resetNext = true;
         if (dispatchDesc == null) dispatchDesc = memCalloc(DISPATCH_UPSCALE_SIZE);
+        if (reactiveDesc == null) reactiveDesc = memCalloc(DISPATCH_REACTIVE_SIZE);
+        reactive.ensure(FrameTargets.scene.width(), FrameTargets.scene.height());
         Initializer.LOGGER.info("[fsr3] context {}x{} -> {}x{} ({})",
                 FrameTargets.scene.width(), FrameTargets.scene.height(),
                 FrameTargets.display.width(), FrameTargets.display.height(), providerVersion(pContext));
@@ -111,6 +118,8 @@ final class Fsr3Upscaler {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         FrameTargets.pipelineBarrier(cmd, pre, stack);
 
+        boolean useReactive = FrameTargets.opaqueTaken() && generateReactive(cmd, scene, stack);
+
         long now = System.nanoTime();
         float frameMs = lastDispatchNanos == 0 ? 16.6f
                 : Math.max(0.1f, Math.min(200.0f, (now - lastDispatchNanos) / 1.0e6f));
@@ -127,7 +136,12 @@ final class Fsr3Upscaler {
         resource(d, DU_MV, mv.image, mv.width, mv.height,
                 FORMAT_R16G16_FLOAT, USAGE_READ_ONLY, STATE_COMPUTE_READ);
         noResource(d, DU_EXPOSURE);
-        noResource(d, DU_REACTIVE);
+        if (useReactive) {
+            resource(d, DU_REACTIVE, reactive.image, reactive.width, reactive.height,
+                    FORMAT_R8_UNORM, USAGE_READ_ONLY, STATE_COMPUTE_READ);
+        } else {
+            noResource(d, DU_REACTIVE);
+        }
         noResource(d, DU_TC);
         resource(d, DU_OUTPUT, display.colorImage(), display.width(), display.height(),
                 FORMAT_R8G8B8A8_UNORM, USAGE_UAV | USAGE_RENDERTARGET, STATE_UNORDERED_ACCESS);
@@ -172,6 +186,55 @@ final class Fsr3Upscaler {
         return true;
     }
 
+    /**
+     * F2: FSR's auto-reactive pass marks pixels that changed between the opaque-only copy
+     * and the final scene color (particles, water, weather). AMD's sample settings.
+     * Expects the scene color already in SHADER_READ_ONLY_OPTIMAL.
+     */
+    private static boolean generateReactive(VkCommandBuffer cmd, RenderTarget scene, MemoryStack stack) {
+        VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(1, stack);
+        // The previous frame's upscale read the mask.
+        FrameTargets.imageBarrier(pre.get(0), reactive.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        FrameTargets.pipelineBarrier(cmd, pre, stack);
+
+        ByteBuffer r = reactiveDesc;
+        for (int i = 0; i < DISPATCH_REACTIVE_SIZE; i += 4) r.putInt(i, 0);
+        header(r, 0, DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK, NULL);
+        r.putLong(DR_CMD, cmd.address());
+        StorageImage opaque = FrameTargets.opaqueColor;
+        resource(r, DR_OPAQUE, opaque.image, opaque.width, opaque.height,
+                FORMAT_R8G8B8A8_UNORM, USAGE_READ_ONLY, STATE_COMPUTE_READ);
+        resource(r, DR_COLOR, scene.colorImage(), scene.width(), scene.height(),
+                FORMAT_R8G8B8A8_UNORM, USAGE_RENDERTARGET, STATE_COMPUTE_READ);
+        resource(r, DR_OUT, reactive.image, reactive.width, reactive.height,
+                FORMAT_R8_UNORM, USAGE_UAV, STATE_UNORDERED_ACCESS);
+        r.putInt(DR_RENDER_SIZE, scene.width());
+        r.putInt(DR_RENDER_SIZE + 4, scene.height());
+        r.putFloat(DR_SCALE, 1.0f);
+        r.putFloat(DR_CUTOFF, 0.2f);
+        r.putFloat(DR_BINARY, 0.9f);
+        r.putInt(DR_FLAGS, AUTOREACTIVE_APPLY_TONEMAP | AUTOREACTIVE_APPLY_THRESHOLD
+                | AUTOREACTIVE_USE_COMPONENTS_MAX);
+
+        int rc = FfxApi.dispatch(pContext, memAddress(r));
+        if (rc != RETURN_OK) {
+            Initializer.LOGGER.warn("[fsr3] reactive mask dispatch failed: {}", rc);
+            return false;
+        }
+
+        VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(1, stack);
+        FrameTargets.imageBarrier(post.get(0), reactive.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        FrameTargets.pipelineBarrier(cmd, post, stack);
+        return true;
+    }
+
     private static void releaseContext() {
         if (contextValid) {
             int rc = destroyContext(pContext);
@@ -184,6 +247,8 @@ final class Fsr3Upscaler {
         releaseContext();
         if (pContext != NULL) { nmemFree(pContext); pContext = NULL; }
         if (dispatchDesc != null) { memFree(dispatchDesc); dispatchDesc = null; }
+        if (reactiveDesc != null) { memFree(reactiveDesc); reactiveDesc = null; }
+        reactive.destroy();
         contextGeneration = -1;
     }
 }

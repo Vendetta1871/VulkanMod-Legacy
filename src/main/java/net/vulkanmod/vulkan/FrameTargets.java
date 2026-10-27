@@ -98,6 +98,7 @@ public final class FrameTargets {
         Fsr3Upscaler.destroy();
         Fsr1Upscaler.destroy();
         MotionVectorPass.destroy();
+        opaqueColor.destroy();
         ComputeSets.destroySamplers();
         scene.destroy();
         display.destroy();
@@ -105,6 +106,55 @@ public final class FrameTargets {
 
     private static int depthAspect() {
         return depthHasStencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+
+    /** Scene color before particles and translucent geometry (F2, auto-reactive input). */
+    static final StorageImage opaqueColor = new StorageImage(COLOR_FORMAT,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    private static boolean opaqueTaken;
+
+    /** True when this frame's opaque-only copy exists. */
+    static boolean opaqueTaken() { return opaqueTaken; }
+
+    /**
+     * Copies the scene color before the first particle or translucent draw (F2). FSR's
+     * auto-reactive pass compares it with the final scene color. Only for the temporal
+     * upscaler; once per frame. Rendering resumes with color and depth loaded.
+     */
+    public static void snapshotOpaque(VkCommandBuffer cmd, MemoryStack stack) {
+        if (phase != Phase.SCENE || !temporal || opaqueTaken) return;
+        vkCmdEndRendering(cmd);
+        opaqueColor.ensure(scene.width(), scene.height());
+
+        VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
+        imageBarrier(pre.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        // The previous frame's reactive pass read the copy.
+        imageBarrier(pre.get(1), opaqueColor.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        pipelineBarrier(cmd, pre, stack);
+
+        copyOrBlit(cmd, scene.colorImage(), scene.width(), scene.height(), COLOR_FORMAT,
+                opaqueColor.image, opaqueColor.width, opaqueColor.height, COLOR_FORMAT, stack);
+
+        VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(2, stack);
+        imageBarrier(post.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        imageBarrier(post.get(1), opaqueColor.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        pipelineBarrier(cmd, post, stack);
+
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+        opaqueTaken = true;
     }
 
     private static boolean scaled() {
@@ -156,7 +206,8 @@ public final class FrameTargets {
         depthToAttachment(barriers.get(1), scene);
         pipelineBarrier(cmd, barriers, stack);
 
-        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, stack);
+        opaqueTaken = false;
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.SCENE;
     }
 
@@ -195,7 +246,7 @@ public final class FrameTargets {
                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, stack);
         }
 
-        beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, stack);
+        beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.DISPLAY;
     }
 
@@ -262,7 +313,7 @@ public final class FrameTargets {
     }
 
     private static void beginRendering(VkCommandBuffer cmd, RenderTarget target, int colorLoadOp,
-                                       float[] clearColor, MemoryStack stack) {
+                                       float[] clearColor, int depthLoadOp, MemoryStack stack) {
         VkRenderingAttachmentInfo.Buffer color = VkRenderingAttachmentInfo.calloc(1, stack);
         color.get(0).sType$Default()
                 .imageView(target.colorView())
@@ -277,7 +328,7 @@ public final class FrameTargets {
         VkRenderingAttachmentInfo depth = VkRenderingAttachmentInfo.calloc(stack).sType$Default()
                 .imageView(target.depthView())
                 .imageLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+                .loadOp(depthLoadOp)
                 .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
         depth.clearValue().depthStencil().set(1.0f, 0);
 

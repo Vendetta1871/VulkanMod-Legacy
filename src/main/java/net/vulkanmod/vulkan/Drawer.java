@@ -567,6 +567,14 @@ public class Drawer {
 
     public static Drawer getInstance() { return INSTANCE; }
 
+    /** Takes the opaque-only scene copy for FSR's reactive mask (F2); once per frame. */
+    public static void snapshotOpaque() {
+        if(!isActive() || FrameTargets.phase() != FrameTargets.Phase.SCENE) return;
+        try(MemoryStack stack = stackPush()) {
+            FrameTargets.snapshotOpaque(commandBuffers.get(currentFrame), stack);
+        }
+    }
+
     /**
      * Switches the frame from the scene target to the display target (B3). Called where
      * vanilla starts the hand and the GUI; a no-op once switched or outside a frame.

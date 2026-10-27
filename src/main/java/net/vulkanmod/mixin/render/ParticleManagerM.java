@@ -21,6 +21,8 @@ public class ParticleManagerM {
     @Inject(method = "renderParticles(Lnet/minecraft/entity/Entity;F)V", at = @At("HEAD"))
     private void vulkanmod$beginParticles(Entity entity, float partialTicks, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            // F2: particles and translucent geometry are what the reactive mask marks.
+            net.vulkanmod.vulkan.Drawer.snapshotOpaque();
             EntityRenderer.setParticlePass(true);
         }
     }
