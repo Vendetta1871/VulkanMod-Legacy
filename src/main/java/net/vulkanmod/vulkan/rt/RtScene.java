@@ -398,6 +398,23 @@ public final class RtScene {
         }
     }
 
+    private static ByteBuffer cpuInstances, cpuInstanceData;
+
+    private static ByteBuffer ensureCpu(ByteBuffer b, long bytes) {
+        if (b != null && b.capacity() >= bytes) return b;
+        if (b != null) org.lwjgl.system.MemoryUtil.memFree(b);
+        return org.lwjgl.system.MemoryUtil.memAlloc((int) Math.max(bytes * 2, 4096L * INSTANCE_BYTES));
+    }
+
+    /** vkCmdUpdateBuffer in 64 KiB pieces (its per-call limit). */
+    private static void updateBuffer(VkCommandBuffer cmd, long buffer, ByteBuffer src, int bytes) {
+        for (int off = 0; off < bytes; off += 65536) {
+            int len = Math.min(65536, bytes - off);
+            ByteBuffer slice = org.lwjgl.system.MemoryUtil.memSlice(src, off, len);
+            vkCmdUpdateBuffer(cmd, buffer, off, slice);
+        }
+    }
+
     private static void ensureScratch(long bytes) {
         if (scratch != null && scratch.size >= bytes) return;
         if (scratch != null) {
@@ -423,7 +440,8 @@ public final class RtScene {
                     RtBuffer.defer(old::destroyNow);
                 }
                 instances = RtBuffer.create(Math.max(needed, 4096L * INSTANCE_BYTES) * 2,
-                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true);
+                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
                 instanceBuffers[instanceRingIndex] = instances;
             }
 
@@ -434,13 +452,16 @@ public final class RtScene {
                     RtBuffer.defer(old::destroyNow);
                 }
                 data = RtBuffer.create(Math.max((long) count * 8, 4096L * 8) * 2,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
                 instanceDataBuffers[instanceRingIndex] = data;
             }
             long arenaAddress = RtBuffer.addressOf(ChunkBatcher.arena().bufferId());
 
             double cx = CameraHistory.camX(), cy = CameraHistory.camY(), cz = CameraHistory.camZ();
-            ByteBuffer m = instances.mapped;
+            // Device-local buffers filled through the command buffer: the GPU never reads
+            // these from system memory over the (narrow, eGPU) PCIe link.
+            ByteBuffer m = cpuInstances = ensureCpu(cpuInstances, needed);
+            ByteBuffer dataCpu = cpuInstanceData = ensureCpu(cpuInstanceData, (long) Math.max(1, count) * 8);
             int n = 0;
             for (Section s : sections) {
                 if (s.blas == 0L || !s.placed || s.mask == 0) continue;
@@ -453,10 +474,17 @@ public final class RtScene {
                 // SBT offset 0; the geometry is flagged opaque already.
                 m.putInt(o + 52, 0);
                 m.putLong(o + 56, s.blasAddress);
-                data.mapped.putLong(n * 8, arenaAddress + s.arenaOffset);
+                dataCpu.putLong(n * 8, arenaAddress + s.arenaOffset);
                 n++;
             }
             tlasInstanceCount = n;
+            if (n > 0) {
+                updateBuffer(cmd, instances.buffer, m, n * INSTANCE_BYTES);
+                updateBuffer(cmd, data.buffer, dataCpu, n * 8);
+                memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            }
 
             VkAccelerationStructureGeometryKHR.Buffer geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack);
             geometry.get(0).sType$Default().geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR);
