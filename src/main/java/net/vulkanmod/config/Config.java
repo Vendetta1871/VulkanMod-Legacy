@@ -20,8 +20,6 @@ public class Config {
 
     /** Number of swapchain images / frames in flight. */
     public int frameQueueSize = 2;
-    /** Synchronize presentation with the display refresh rate. */
-    public boolean vsync = false;
     /** Batch GUI draws through the Vulkan GUI renderer. */
     public boolean guiOptimizations = true;
 

@@ -1,5 +1,6 @@
 package net.vulkanmod.vulkan;
 
+import net.minecraft.client.Minecraft;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.vulkan.memory.MemoryManager;
 import net.vulkanmod.vulkan.memory.MemoryTypes;
@@ -184,11 +185,14 @@ public class Vulkan {
 
     private static long allocator;
 
-    private static boolean vsync = Initializer.CONFIG.vsync;
+    // M8: vanilla's enableVsync (options.txt) is the single source of truth;
+    // initVulkan applies it before the swapchain picks its present mode.
+    private static boolean vsync;
 
     private static StagingBuffer[] stagingBuffers;
 
     public static void initVulkan(long window) {
+        vsync = Minecraft.getMinecraft().gameSettings.enableVsync;
         createInstance();
         setupDebugMessenger();
         createSurface(window);
