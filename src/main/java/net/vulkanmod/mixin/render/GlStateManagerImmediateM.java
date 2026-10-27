@@ -4,9 +4,11 @@ import net.minecraft.client.renderer.GlStateManager;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.render.GuiRenderer;
 import net.vulkanmod.vulkan.VRenderSystem;
+import org.lwjgl.opengl.GL11;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
@@ -20,29 +22,38 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(GlStateManager.class)
 public class GlStateManagerImmediateM {
 
-    @Inject(method = "glBegin(I)V", at = @At("HEAD"))
-    private static void vulkanmod$begin(int mode, CallbackInfo ci) {
+    // N28: redirects of the GL11 call inside each method - no CallbackInfo per glyph vertex.
+    @Redirect(method = "glBegin(I)V",
+            at = @At(value = "INVOKE", target = "Lorg/lwjgl/opengl/GL11;glBegin(I)V", remap = false))
+    private static void vulkanmod$begin(int mode) {
         if (Initializer.isVulkanActive()) {
             GuiRenderer.immediateBegin(mode);
         }
+        GL11.glBegin(mode);
     }
 
-    @Inject(method = "glTexCoord2f(FF)V", at = @At("HEAD"))
-    private static void vulkanmod$texCoord(float u, float v, CallbackInfo ci) {
+    @Redirect(method = "glTexCoord2f(FF)V",
+            at = @At(value = "INVOKE", target = "Lorg/lwjgl/opengl/GL11;glTexCoord2f(FF)V", remap = false))
+    private static void vulkanmod$texCoord(float u, float v) {
         if (Initializer.isVulkanActive()) {
             GuiRenderer.immediateTexCoord(u, v);
         }
+        GL11.glTexCoord2f(u, v);
     }
 
-    @Inject(method = "glVertex3f(FFF)V", at = @At("HEAD"))
-    private static void vulkanmod$vertex(float x, float y, float z, CallbackInfo ci) {
+    @Redirect(method = "glVertex3f(FFF)V",
+            at = @At(value = "INVOKE", target = "Lorg/lwjgl/opengl/GL11;glVertex3f(FFF)V", remap = false))
+    private static void vulkanmod$vertex(float x, float y, float z) {
         if (Initializer.isVulkanActive()) {
             GuiRenderer.immediateVertex(x, y, z);
         }
+        GL11.glVertex3f(x, y, z);
     }
 
-    @Inject(method = "glEnd()V", at = @At("TAIL"))
-    private static void vulkanmod$end(CallbackInfo ci) {
+    @Redirect(method = "glEnd()V",
+            at = @At(value = "INVOKE", target = "Lorg/lwjgl/opengl/GL11;glEnd()V", remap = false))
+    private static void vulkanmod$end() {
+        GL11.glEnd(); // the old hook ran at TAIL, i.e. after the GL call
         if (Initializer.isVulkanActive()) {
             GuiRenderer.immediateEnd();
         }
