@@ -106,6 +106,9 @@ public class CloudRenderer {
         boolean depthMask = VRenderSystem.depthMask;
         int depthFun = VRenderSystem.depthFun;
         boolean cull = VRenderSystem.cull;
+        // The fancy prepass sets colorMask(0); a throw before the colour pass would leave
+        // it there and EntityRenderer.capture would drop every entity draw (R19).
+        int colorMask = VRenderSystem.colorMask;
         try {
             drawn = renderClouds(mc, world, partialTicks, pass, cloudTickCounter, eyeX, eyeY, eyeZ);
         } catch (Throwable t) {
@@ -118,6 +121,7 @@ public class CloudRenderer {
             VRenderSystem.depthMask = depthMask;
             VRenderSystem.depthFun = depthFun;
             VRenderSystem.cull = cull;
+            VRenderSystem.colorMask = colorMask;
             TextureBridge.restoreAtlasBinding();
         }
         return drawn;

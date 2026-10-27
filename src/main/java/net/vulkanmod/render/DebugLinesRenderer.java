@@ -117,6 +117,13 @@ public class DebugLinesRenderer {
         VertexFormat format = buffer.getVertexFormat();
         boolean textured = format == POSITION_TEX_COLOR;
 
+        // The replay overrides depth, fog and the finally used to force depthMask(true)/
+        // enableCull(); hand the frame's values back instead (R19).
+        boolean savedDepthTest = VRenderSystem.depthTest;
+        boolean savedDepthMask = VRenderSystem.depthMask;
+        int savedDepthFun = VRenderSystem.depthFun;
+        boolean savedCull = VRenderSystem.cull;
+        int savedFog = VRenderSystem.getFogState();
         try {
             VRenderSystem.updateProjectionMatrix();
             VRenderSystem.updateModelViewMatrix();
@@ -184,8 +191,11 @@ public class DebugLinesRenderer {
             VRenderSystem.setTopology(TRIANGLE_LIST);
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;
             VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-            VRenderSystem.depthMask(true);
-            VRenderSystem.enableCull();
+            VRenderSystem.depthTest = savedDepthTest;
+            VRenderSystem.depthMask = savedDepthMask;
+            VRenderSystem.depthFun = savedDepthFun;
+            VRenderSystem.cull = savedCull;
+            VRenderSystem.setFogState(savedFog);
             TextureBridge.restoreAtlasBinding();
         }
     }
