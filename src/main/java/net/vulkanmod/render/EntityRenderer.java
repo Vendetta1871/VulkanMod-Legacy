@@ -233,6 +233,9 @@ public class EntityRenderer {
         // A throw inside compileDisplayList would leave the compile flag set and silently
         // drop every entity capture for the rest of the session (M13).
         compiling = false;
+        // A throw inside a part's box rebuild would leave the per-part window open and
+        // swallow every later MODEL_FORMAT capture into the staging buffer.
+        accumulating = false;
         // The TESR dispatcher catches exceptions, so the portal window's RETURN injection
         // can be skipped by a throwing render; never let the flag leak into the next frame.
         EndPortalRenderer.setActive(false);
@@ -341,8 +344,10 @@ public class EntityRenderer {
         int off = stagingVerts * stride;
         int need = off + bytes;
         if (staging.capacity() < need) {
-            MemoryUtil.memFree(staging);
-            staging = MemoryUtil.memAlloc(Math.max(need * 2, 1 << 14));
+            // memRealloc keeps [0, off): a free+alloc threw away the quads this part had
+            // already accumulated, and the corrupt part was then cached forever (R2).
+            staging = MemoryUtil.memRealloc(staging, Math.max(need * 2, 1 << 14));
+            staging.limit(staging.capacity());
         }
         ByteBuffer src = buffer.getByteBuffer().duplicate();
         src.position(0);
@@ -374,7 +379,13 @@ public class EntityRenderer {
         lastPartVerts = n;
         staging.position(0);
         staging.limit(n * MODEL_FORMAT.getSize());
-        submit(staging, n, MODEL_FORMAT, entityPipeline);
+        try {
+            submit(staging, n, MODEL_FORMAT, entityPipeline);
+        } catch (Throwable t) {
+            // Called from ModelRendererM outside capture()'s try: a throw here would
+            // reach the TESR dispatcher / renderHand and crash the game (R1).
+            TerrainRenderer.reportOnce("entity", t);
+        }
     }
 
     /** Vertices the last endPart() submitted; 0 when the part produced nothing. */
@@ -386,42 +397,63 @@ public class EntityRenderer {
      * from the cache instead of being rebuilt on the CPU every frame.
      */
     public static class PartCache {
-        public final ByteBuffer data;
-        public final int vertexCount;
-        public final float scale;
-        public final long signature;
-
-        PartCache(ByteBuffer data, int vertexCount, float scale, long signature) {
-            this.data = data;
-            this.vertexCount = vertexCount;
-            this.scale = scale;
-            this.signature = signature;
-        }
+        // GC-managed direct buffer (R3): dies with the ModelRenderer instead of leaking
+        // on every replacement, and is reused in place when the part re-records.
+        public ByteBuffer data;
+        public int vertexCount;
+        public float scale;
+        public long signature;
     }
 
     /**
      * Copies the geometry the last endPart() submitted into a cache entry for the
-     * calling part; null when the part produced nothing (nothing worth caching).
+     * calling part, reusing {@code reuse} (and its buffer) when given; returns
+     * {@code reuse} unchanged when the part produced nothing.
      */
-    public static PartCache recordPart(float scale, long signature) {
+    public static PartCache recordPart(PartCache reuse, float scale, long signature) {
         int n = lastPartVerts;
         if (n <= 0) {
-            return null;
+            return reuse;
         }
         int bytes = n * MODEL_FORMAT.getSize();
-        ByteBuffer data = org.lwjgl.system.MemoryUtil.memAlloc(bytes);
+        PartCache cache = reuse != null ? reuse : new PartCache();
+        ByteBuffer data = cache.data;
+        if (data == null || data.capacity() < bytes) {
+            data = ByteBuffer.allocateDirect(bytes).order(java.nio.ByteOrder.nativeOrder());
+            cache.data = data;
+        }
         staging.position(0);
         staging.limit(bytes);
+        data.clear();
         data.put(staging);
         data.flip();
-        return new PartCache(data, n, scale, signature);
+        cache.vertexCount = n;
+        cache.scale = scale;
+        cache.signature = signature;
+        return cache;
     }
 
-    /** Replays a cached part's geometry under the live part matrix (M13). */
-    public static void submitCachedPart(ByteBuffer data, int vertexCount) {
-        data.position(0);
-        data.limit(vertexCount * MODEL_FORMAT.getSize());
-        submit(data, vertexCount, MODEL_FORMAT, entityPipeline);
+    /** Same gate as capture(): no draw on an inactive cmd buffer / during compile / under colorMask(0) (R1). */
+    public static boolean canReplayPart() {
+        return (isEntityPass() || handPass) && !compiling
+                && Drawer.isActive() && !Drawer.skipRendering
+                && VRenderSystem.colorMask != 0;
+    }
+
+    /** Replays a cached part (M13); false = refused, caller rebuilds the boxes (R1). */
+    public static boolean submitCachedPart(PartCache cache) {
+        if (!canReplayPart()) {
+            return false;
+        }
+        try {
+            ByteBuffer data = cache.data;
+            data.position(0);
+            data.limit(cache.vertexCount * MODEL_FORMAT.getSize());
+            submit(data, cache.vertexCount, MODEL_FORMAT, entityPipeline);
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("entity", t);
+        }
+        return true;
     }
 
     /** Replays {@code data} (position 0, {@code vertexCount} verts of {@code format}) in Vulkan. */

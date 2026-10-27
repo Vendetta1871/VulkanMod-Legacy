@@ -45,6 +45,9 @@ public abstract class ModelRendererM {
     // so a renderer reload (F3+A) drops the cache with the model.
     private EntityRenderer.PartCache vulkanmod$partCache;
 
+    /** Signature meaning "never cache or batch this part" (ModelBox subclass, R8). */
+    private static final long VULKANMOD$NO_CACHE = Long.MIN_VALUE;
+
     @Inject(method = {"render(F)V", "renderWithRotation(F)V"}, at = @At("HEAD"))
     private void vulkanmod$storeScale(float scale, CallbackInfo ci) {
         this.vulkanmod$scale = scale;
@@ -57,11 +60,14 @@ public abstract class ModelRendererM {
             net.vulkanmod.debug.FrameProfiler.entityRebuildBegin();
             float scale = this.vulkanmod$scale;
             long signature = vulkanmod$geometrySignature();
+            boolean cacheable = signature != VULKANMOD$NO_CACHE;
             EntityRenderer.PartCache cache = this.vulkanmod$partCache;
-            if (cache != null && cache.scale == scale && cache.signature == signature) {
+            if (cacheable && cache != null && cache.scale == scale && cache.signature == signature
+                    && EntityRenderer.submitCachedPart(cache)) {
                 // The boxes have not changed since the cache entry: replay the vertices
-                // under this part's live matrix instead of rebuilding them (M13).
-                EntityRenderer.submitCachedPart(cache.data, cache.vertexCount);
+                // under this part's live matrix instead of rebuilding them (M13). A
+                // refused replay (dropped frame, compile, colorMask(0)) falls through
+                // to the normal capture path (R1).
                 net.vulkanmod.debug.FrameProfiler.entityRebuildEnd();
                 return;
             }
@@ -69,8 +75,9 @@ public abstract class ModelRendererM {
             // Accumulate the part's quads (each box.render flushes one quad) and issue them
             // as a single draw - they all share this part's model-view, texture and tint.
             // Without batching the quads go out one draw each and there is no staging to
-            // snapshot, so nothing is cached.
-            boolean batch = EntityRenderer.BATCH_PARTS;
+            // snapshot, so nothing is cached. Non-vanilla boxes go quad by quad and are
+            // never cached (R8).
+            boolean batch = EntityRenderer.BATCH_PARTS && cacheable;
             if (batch) {
                 EntityRenderer.beginPart();
             }
@@ -80,7 +87,7 @@ public abstract class ModelRendererM {
             }
             if (batch) {
                 EntityRenderer.endPart();
-                this.vulkanmod$partCache = EntityRenderer.recordPart(scale, signature);
+                this.vulkanmod$partCache = EntityRenderer.recordPart(cache, scale, signature);
             }
             net.vulkanmod.debug.FrameProfiler.entityRebuildEnd();
         } else if (net.vulkanmod.render.GuiRenderer.isGuiPass()) {
@@ -99,16 +106,21 @@ public abstract class ModelRendererM {
     }
 
     /**
-     * Cheap fingerprint of the part's baked geometry: box count and corner coordinates.
-     * Models that mutate their boxes at render time (books, beds) change the corners and
-     * force a rebuild; texture offsets are baked into the box vertices at construction
-     * and have no setter, so the corners cover every way the geometry can change.
-     * Rotations ride the modelview and never touch the boxes.
+     * Cheap fingerprint of the part's baked geometry: the identity of every box plus its
+     * corner coordinates. The corners are final, so a model that changes shape (books,
+     * beds) replaces the ModelBox objects in cubeList, which the identity hashes catch;
+     * a subclass with a custom render cannot be fingerprinted at all, so such parts are
+     * marked NO_CACHE and always rebuilt. Rotations ride the modelview and never touch
+     * the boxes.
      */
     private long vulkanmod$geometrySignature() {
         List<ModelBox> boxes = this.vulkanmod$getCubeList();
-        long h = 0x9E3779B97F4A7C15L * boxes.size();
+        long h = 0x9E3779B97F4A7C15L * (boxes.size() + 1);
         for (ModelBox box : boxes) {
+            if (box.getClass() != ModelBox.class) {
+                return VULKANMOD$NO_CACHE;
+            }
+            h = h * 31 + System.identityHashCode(box);
             h = h * 31 + Float.floatToIntBits(box.posX1);
             h = h * 31 + Float.floatToIntBits(box.posY1);
             h = h * 31 + Float.floatToIntBits(box.posZ1);
@@ -116,7 +128,7 @@ public abstract class ModelRendererM {
             h = h * 31 + Float.floatToIntBits(box.posY2);
             h = h * 31 + Float.floatToIntBits(box.posZ2);
         }
-        return h;
+        return h == VULKANMOD$NO_CACHE ? h + 1 : h;
     }
 
     @Inject(method = "compileDisplayList(F)V", at = @At("HEAD"))
