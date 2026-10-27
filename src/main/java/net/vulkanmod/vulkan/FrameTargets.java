@@ -107,6 +107,27 @@ public final class FrameTargets {
         return scene.width() != display.width() || scene.height() != display.height();
     }
 
+    /**
+     * Mip LOD bias for textures sampled now (F6): only in the scene phase and only when
+     * the scene renders below display resolution. AMD: log2(render/display), minus one
+     * more for the temporal upscaler, which recovers detail from jittered samples.
+     */
+    public static float textureLodBias() {
+        if (phase != Phase.SCENE || !lodBiasActive) return 0.0f;
+        return lodBias;
+    }
+
+    private static boolean lodBiasActive;
+    private static float lodBias;
+
+    private static void updateLodBias() {
+        float ratio = (float) scene.width() / display.width();
+        float bias = (float) (Math.log(ratio) / Math.log(2.0)) - (temporal ? 1.0f : 0.0f);
+        // Quantized: every distinct value creates a sampler variant.
+        lodBias = Math.round(bias * 8.0f) / 8.0f;
+        lodBiasActive = !BLIT_ONLY && lodBias != 0.0f;
+    }
+
     /** Whether this frame uses the temporal upscaler (decided at frame start: jitter depends on it). */
     private static boolean wantTemporal() {
         boolean requested = UPSCALER.equals("fsr3") || (UPSCALER.equals("auto") && scaled());
@@ -116,6 +137,7 @@ public final class FrameTargets {
     /** Starts the SCENE phase: clears and begins rendering into the scene target. */
     static void beginFrame(VkCommandBuffer cmd, float[] clearColor, MemoryStack stack) {
         temporal = wantTemporal();
+        updateLodBias();
         net.vulkanmod.render.CameraHistory.setJitterEnabled(temporal);
         MotionVectorPass.setEnabled(temporal);
 

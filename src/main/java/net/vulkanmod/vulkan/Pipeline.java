@@ -128,6 +128,8 @@ public class Pipeline {
     private final VulkanImage[] cachedTex1 = new VulkanImage[imagesSize];
     private final VulkanImage[] cachedTex2 = new VulkanImage[imagesSize];
     private final int[] cachedGen = new int[imagesSize];
+    /** Sampler written for texture0: it depends on the frame phase (F6 LOD bias). */
+    private final long[] cachedSampler0 = new long[imagesSize];
     private int descriptorCount = 500;
     // Pools replaced by a mid-frame resize: {long[] handles, Integer framesAged}. Static
     // so one per-frame pass can age every pipeline's pools, including pipelines that stop
@@ -770,9 +772,12 @@ public class Pipeline {
         if (freed(texture1)) texture1 = VTextureSelector.getWhiteTexture();
         if (freed(texture2)) texture2 = VTextureSelector.getWhiteTexture();
 
+        long sampler0 = texture0 != null ? texture0.getTextureSampler(FrameTargets.textureLodBias()) : 0L;
+
         int generation = uniformBuffers.getGeneration();
         long set = cachedSets[frame];
-        if (set != 0 && cachedTex0[frame] == texture0 && cachedTex1[frame] == texture1
+        if (set != 0 && cachedTex0[frame] == texture0 && cachedSampler0[frame] == sampler0
+                && cachedTex1[frame] == texture1
                 && cachedTex2[frame] == texture2 && cachedGen[frame] == generation
                 && !freed(cachedTex0[frame]) && !freed(cachedTex1[frame])
                 && !freed(cachedTex2[frame])) {
@@ -780,9 +785,10 @@ public class Pipeline {
         }
 
         set = allocateDescriptorSet(frame);
-        writeDescriptorSet(set, frame, uniformBuffers, texture0, texture1, texture2);
+        writeDescriptorSet(set, frame, uniformBuffers, texture0, sampler0, texture1, texture2);
 
         cachedSets[frame] = set;
+        cachedSampler0[frame] = sampler0;
         cachedTex0[frame] = texture0;
         cachedTex1[frame] = texture1;
         cachedTex2[frame] = texture2;
@@ -838,7 +844,8 @@ public class Pipeline {
     }
 
     private void writeDescriptorSet(long descriptorSet, int frame, UniformBuffers uniformBuffers,
-                                    VulkanImage texture0, VulkanImage texture1, VulkanImage texture2) {
+                                    VulkanImage texture0, long sampler0,
+                                    VulkanImage texture1, VulkanImage texture2) {
         try(MemoryStack stack = stackPush()) {
 
             VkWriteDescriptorSet.Buffer descriptorWrites = VkWriteDescriptorSet.calloc(UBOs.size() + samplers.size() + ssbos.size(), stack);
@@ -879,7 +886,7 @@ public class Pipeline {
                 VkDescriptorImageInfo.Buffer imageInfo = VkDescriptorImageInfo.calloc(1, stack);
                 imageInfo.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 imageInfo.imageView(texture.getTextureImageView());
-                imageInfo.sampler(texture.getTextureSampler());
+                imageInfo.sampler(s == 0 ? sampler0 : texture.getTextureSampler());
 
                 VkWriteDescriptorSet samplerDescriptorWrite = descriptorWrites.get(writes);
                 samplerDescriptorWrite.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);

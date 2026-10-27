@@ -35,7 +35,9 @@ public class VulkanImage {
      * (blur, clamp, mipmap). Key includes clamp: two images differing only in addressing
      * must not share a sampler.
      */
-    private static final HashMap<Byte, Long> SHARED_SAMPLERS = new HashMap<>();
+    /** Key: filter/address/mip bits in the low byte, the LOD bias float bits above. */
+    private static final HashMap<Long, Long> SHARED_SAMPLERS = new HashMap<>();
+    private boolean samplerBlur, samplerClamp, samplerMipmap;
 
     private int mipLevels;
     private int width;
@@ -69,7 +71,7 @@ public class VulkanImage {
 
         createTextureImage(mipLevels, width, height);
         createTextureImageView(mipLevels);
-        textureSampler = getOrCreateSampler(blur, clamp, mipLevels > 1);
+        updateTextureSampler(blur, clamp, mipLevels > 1);
     }
 
     public VulkanImage(int miplevel, int width, int height) {
@@ -507,16 +509,18 @@ public class VulkanImage {
         LIVE_VIEWS.clear();
     }
 
-    private static long getOrCreateSampler(boolean blur, boolean clamp, boolean mipmap) {        byte key = (byte) ((blur ? 1 : 0) | (clamp ? 2 : 0) | (mipmap ? 4 : 0));
+    private static long getOrCreateSampler(boolean blur, boolean clamp, boolean mipmap, float lodBias) {
+        long key = ((blur ? 1 : 0) | (clamp ? 2 : 0) | (mipmap ? 4 : 0))
+                | ((long) Float.floatToIntBits(lodBias) << 8);
         Long sampler = SHARED_SAMPLERS.get(key);
         if (sampler != null) return sampler;
 
-        long created = createSampler(blur, clamp, mipmap);
+        long created = createSampler(blur, clamp, mipmap, lodBias);
         SHARED_SAMPLERS.put(key, created);
         return created;
     }
 
-    private static long createSampler(boolean blur, boolean clamp, boolean mipmap) {
+    private static long createSampler(boolean blur, boolean clamp, boolean mipmap, float lodBias) {
 
         try(MemoryStack stack = stackPush()) {
 
@@ -558,6 +562,8 @@ public class VulkanImage {
             // sampled image's own level count, so one sampler fits every mipmapped image.
             samplerInfo.maxLod(mipmap ? VK_LOD_CLAMP_NONE : 0.0F);
             samplerInfo.minLod(0.0F);
+            // F6: negative bias for world textures rendered below display resolution.
+            samplerInfo.mipLodBias(lodBias);
 
             LongBuffer pTextureSampler = stack.mallocLong(1);
 
@@ -570,7 +576,10 @@ public class VulkanImage {
     }
 
     public void updateTextureSampler(boolean blur, boolean clamp, boolean mipmap) {
-        this.textureSampler = getOrCreateSampler(blur, clamp, mipmap);
+        this.samplerBlur = blur;
+        this.samplerClamp = clamp;
+        this.samplerMipmap = mipmap;
+        this.textureSampler = getOrCreateSampler(blur, clamp, mipmap, 0.0f);
     }
 
     private void copyBufferToImage(long buffer, long image, int mipLevel, int width, int height) {
@@ -756,4 +765,13 @@ public class VulkanImage {
     public boolean isFreed() { return id == 0; }
     public long getTextureImageView() { return textureImageView; }
     public long getTextureSampler() { return textureSampler; }
+
+    /**
+     * The sampler with a mip LOD bias (F6). Only mipmapped textures get a biased variant;
+     * the others ignore the bias.
+     */
+    public long getTextureSampler(float lodBias) {
+        if (lodBias == 0.0f || !samplerMipmap) return textureSampler;
+        return getOrCreateSampler(samplerBlur, samplerClamp, samplerMipmap, lodBias);
+    }
 }
