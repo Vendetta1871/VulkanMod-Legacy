@@ -31,6 +31,7 @@ run/*/options.txt
 # Agent/audit notes (local only)
 AGENTS.md
 AUDIT.md
+AUDIT-drafts/
 
 run/client/.mixin.out/
 run/*/*.png
