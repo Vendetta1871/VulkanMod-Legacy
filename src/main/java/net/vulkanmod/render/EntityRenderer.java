@@ -158,7 +158,7 @@ public class EntityRenderer {
         shadowPipeline = new Pipeline(SHADOW_FORMAT, "entity_shadow");
         flatPipeline = new Pipeline(FLAT_FORMAT, "entity_flat");
         particlePipeline = new Pipeline(PARTICLE_FORMAT, "entity_particle");
-        blockPipeline = new Pipeline(BLOCK_FORMAT, "terrain");
+        blockPipeline = new Pipeline(BLOCK_FORMAT, "terrain", "terrain#entity");
     }
 
     public static void setEntityPass(boolean value) {

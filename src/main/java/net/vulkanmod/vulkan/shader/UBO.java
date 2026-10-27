@@ -19,6 +19,7 @@ public class UBO extends AlignedStruct {
         this.binding = binding;
         this.flags = type;
         this.buffer = MemoryUtil.memAlloc(1024);
+        this.lastData = ByteBuffer.allocateDirect(this.buffer.capacity());
     }
 
     public void addField(Field field) {
@@ -42,33 +43,21 @@ public class UBO extends AlignedStruct {
     private long lastWindow = -1;
     private int lastGeneration = -1;
     private int lastOffset;
-    private byte[] lastBytes = new byte[0];
+    // R13: a direct mirror of the last uploaded bytes, compared with ByteBuffer.mismatch
+    // instead of a byte-by-byte Java loop. Assigned in the ctor (needs buffer.capacity()).
+    private final ByteBuffer lastData;
 
     /** After update(): true when this draw must go into a fresh ring slot. */
     public boolean needsUpload(long window, int generation) {
-        int len = buffer.limit();
-        if (window == lastWindow && generation == lastGeneration && len == lastBytes.length) {
-            boolean same = true;
-            for (int i = 0; i < len; ++i) {
-                if (buffer.get(i) != lastBytes[i]) {
-                    same = false;
-                    break;
-                }
-            }
-            if (same) {
-                return false;
-            }
-        }
-        return true;
+        return window != lastWindow || generation != lastGeneration
+                || buffer.limit() != lastData.limit() || buffer.mismatch(lastData) != -1;
     }
 
     /** Remembers the bytes behind the ring offset just handed out. */
     public void recordUpload(long window, int generation, int offset) {
         int len = buffer.limit();
-        if (lastBytes.length != len) {
-            lastBytes = new byte[len];
-        }
-        buffer.get(0, lastBytes, 0, len);
+        lastData.limit(len);
+        MemoryUtil.memCopy(MemoryUtil.memAddress0(buffer), MemoryUtil.memAddress0(lastData), len);
         lastWindow = window;
         lastGeneration = generation;
         lastOffset = offset;

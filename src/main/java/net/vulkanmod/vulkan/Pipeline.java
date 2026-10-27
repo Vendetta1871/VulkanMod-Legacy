@@ -56,10 +56,20 @@ public class Pipeline {
             java.nio.file.Paths.get("config", "vulkanmod", "pipeline-cache.vkc");
 
     // Warm-up sidecar (H11): the state keys every pipeline reached, so the next launch
-    // pre-creates those variants during loading instead of at draw time.
+    // pre-creates those variants during loading instead of at draw time. R11/R12: the
+    // file carries a version header, keys age out when a session does not reach them,
+    // each pipeline keeps at most MAX_VARIANTS_PER_PIPELINE entries, and every key is
+    // range-checked before it reaches vkCreateGraphicsPipelines.
     private static final java.nio.file.Path VARIANTS_FILE =
             java.nio.file.Paths.get("config", "vulkanmod", "pipeline-variants.txt");
-    private static final Map<String, long[]> RECORDED_VARIANTS = loadRecordedVariants();
+    private static final String VARIANTS_HEADER = "# vulkanmod pipeline-variants v2";
+    private static final int MAX_VARIANT_AGE = 8;
+    private static final int MAX_VARIANTS_PER_PIPELINE = 128;
+    // Exact text of the loaded file; the save skips the write while it still matches.
+    private static String loadedVariantsText;
+    // recordId -> (state key -> age in sessions). Declared after loadedVariantsText:
+    // loadRecordedVariants assigns it.
+    private static final Map<String, Map<Long, Integer>> RECORDED_VARIANTS = loadRecordedVariants();
 
     /**
      * Trailer appended to the cache file: "VMPC" + blob length, little-endian (N13). The
@@ -75,6 +85,11 @@ public class Pipeline {
      */
     private static boolean cacheDirty;
 
+    // R12: false when the driver cache started empty. Then every created variant grows
+    // the blob (so the save must run even without a draw-time miss), and pre-warm only
+    // replays the keys reached in the last session instead of the whole aged union.
+    private static boolean pipelineCacheWarm;
+
     private static final long pipelineCache = createPipelineCache();
     private static final int imagesSize = getSwapChainImages().size();
 
@@ -83,6 +98,13 @@ public class Pipeline {
             Vulkan.vertexBufferFormatSupported(VK_FORMAT_R8G8B8_SNORM);
 
     private String path;
+    // R12: id under which this pipeline records its reached keys. Two pipelines that
+    // share a shader path ("clouds", "terrain") get distinct ids so their recordings do
+    // not pre-warm each other's union.
+    private final String recordId;
+    // R12: state keys reached at draw time this session; saved back with age 0.
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet reachedKeys =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
     private long descriptorSetLayout;
     private long pipelineLayout;
     // Graphics pipeline variants keyed by the packed state long (see packStateKey):
@@ -108,6 +130,8 @@ public class Pipeline {
     private static final java.util.ArrayList<Object[]> pendingPoolDestruction = new java.util.ArrayList<>();
 
     private final List<UBO> UBOs = new ArrayList<>();
+    // R13: per-draw needsUpload results, reused by the upload loop.
+    private boolean[] uboUpload = new boolean[0];
     private final List<String> samplers = new ArrayList<>();
     private final List<String> ssbos = new ArrayList<>();
     private final PushConstant pushConstant = new PushConstant();
@@ -132,7 +156,13 @@ public class Pipeline {
     }
 
     public Pipeline(VertexFormat vertexFormat, String path) {
+        this(vertexFormat, path, path);
+    }
+
+    /** @param recordId key of the warm-up recording; distinct for pipelines sharing a shader. */
+    public Pipeline(VertexFormat vertexFormat, String path, String recordId) {
         this.path = path;
+        this.recordId = recordId;
 
         this.vertexFormat = vertexFormat;
 
@@ -146,25 +176,41 @@ public class Pipeline {
         lastStateHandle = graphicsPipelines.get(defaultKey);
 
         // Warm-up (H11): the variants this pipeline reached at draw time in the previous
-        // session are created here, during loading, instead of mid-frame. A recorded key
-        // that is stale (state combination this build no longer uses) just fails and is
-        // skipped; the variant would then be created on demand like before.
-        long[] recorded = RECORDED_VARIANTS.get(path);
+        // sessions are created here, during loading, instead of mid-frame. R11: a stored
+        // key is range-checked before it reaches vkCreateGraphicsPipelines - a corrupted
+        // or hand-edited file must not cause invalid usage. R12: after a cold driver
+        // cache only the keys reached in the last session (age 0) are replayed, so a
+        // driver update does not compile the whole aged union on the main thread.
+        Map<Long, Integer> recorded = RECORDED_VARIANTS.get(recordId);
         if (recorded != null) {
             int prewarmed = 0;
-            for (long key : recorded) {
+            for (java.util.Iterator<Map.Entry<Long, Integer>> it = recorded.entrySet().iterator(); it.hasNext(); ) {
+                Map.Entry<Long, Integer> entry = it.next();
+                long key = entry.getKey();
                 if (graphicsPipelines.containsKey(key)) {
+                    continue;
+                }
+                if (!pipelineCacheWarm && entry.getValue() > 0) {
+                    continue;
+                }
+                if (!isValidStateKey(key)) {
+                    it.remove();
+                    discardVariantsFile();
+                    net.vulkanmod.Initializer.LOGGER.warn("[pipeline] {} dropped invalid variant key {}", recordId, key);
                     continue;
                 }
                 try {
                     graphicsPipelines.put(key, createGraphicsPipeline(vertexFormat, unpackStateKey(key)));
                     ++prewarmed;
                 } catch (RuntimeException e) {
-                    // Stale recording; nothing to undo, the map entry was never added.
+                    // The recording is unusable for this build/driver: drop it now and
+                    // rewrite the file without it (R11), the variant is created on demand.
+                    it.remove();
+                    discardVariantsFile();
                 }
             }
             if (prewarmed > 0) {
-                net.vulkanmod.Initializer.LOGGER.info("[pipeline] {} pre-warmed {} variant(s)", path, prewarmed);
+                net.vulkanmod.Initializer.LOGGER.info("[pipeline] {} pre-warmed {} variant(s)", recordId, prewarmed);
             }
         }
 
@@ -216,6 +262,9 @@ public class Pipeline {
 
     /** Handle of the pipeline variant for a packed state key, creating it on first use. */
     public long getHandle(long stateKey) {
+        // R12: every key reached at draw time is saved back with age 0, so a variant
+        // that keeps being used never ages out of the recording.
+        reachedKeys.add(stateKey);
         if (stateKey == lastStateKey) {
             return lastStateHandle;
         }
@@ -391,8 +440,12 @@ public class Pipeline {
                 throw new RuntimeException("Failed to create graphics pipeline");
             }
 
-            // The driver cache grew; savePipelineCache at shutdown persists it (N13).
-            cacheDirty = true;
+            // R12: on a warm driver cache a pre-warm creation hits the blob and grows
+            // nothing (a draw-time miss marks dirty in getHandle); only when the cache
+            // started cold does every creation add to the blob that must be saved.
+            if (!pipelineCacheWarm) {
+                cacheDirty = true;
+            }
             return pGraphicsPipeline.get(0);
         }
     }
@@ -621,12 +674,19 @@ public class Pipeline {
             // dynamic offset would read uninitialized memory in the new buffer (N6).
             long window = uniformBuffers.getResetCount();
             int generation = uniformBuffers.getGeneration();
+            // R13: needsUpload is a memcmp; evaluate it once per UBO per draw instead of
+            // once per loop, and hand the result to the upload loop.
+            if (uboUpload.length < UBOs.size()) {
+                uboUpload = new boolean[UBOs.size()];
+            }
             int total = 0;
-            for(UBO ubo : UBOs) {
+            for (int i = 0; i < UBOs.size(); ++i) {
+                UBO ubo = UBOs.get(i);
                 ubo.update();
                 // H10: an UBO whose data is byte-identical to the upload it already made
                 // in this frame window reuses that ring offset - no new slot, no memcpy.
-                if (ubo.needsUpload(window, generation)) {
+                uboUpload[i] = ubo.needsUpload(window, generation);
+                if (uboUpload[i]) {
                     total += uniformBuffers.alignedSize(ubo.getBuffer().remaining());
                 }
             }
@@ -641,11 +701,13 @@ public class Pipeline {
                 }
                 uniformBuffers.ensureCapacity(total);
                 generation = uniformBuffers.getGeneration();
+                java.util.Arrays.fill(uboUpload, true);
             }
 
-            for(UBO ubo : UBOs) {
+            for (int i = 0; i < UBOs.size(); ++i) {
+                UBO ubo = UBOs.get(i);
                 int offset;
-                if (ubo.needsUpload(window, generation)) {
+                if (uboUpload[i]) {
                     offset = uniformBuffers.uploadUBO(ubo.getBuffer(), frame);
                     ubo.recordUpload(window, generation, offset);
                 } else {
@@ -1019,6 +1081,7 @@ public class Pipeline {
         // The persisted blob can be megabytes, so it goes into a dedicated off-heap
         // buffer rather than the 64 KB MemoryStack. vkCreatePipelineCache copies it.
         byte[] initial = loadPipelineCacheData();
+        pipelineCacheWarm = initial != null;
         net.vulkanmod.Initializer.LOGGER.info("[pipeline-cache] {}",
                 initial != null ? "loaded " + initial.length + " bytes" : "cold start");
         ByteBuffer initialData = null;
@@ -1110,6 +1173,10 @@ public class Pipeline {
      * created since the last save (N13).
      */
     public static void savePipelineCache() {
+        // R12: the variants file has its own change detection (it is rewritten only when
+        // its text changed), so it must run even when the driver blob stayed the same.
+        saveRecordedVariants();
+
         if (!cacheDirty) {
             return;
         }
@@ -1144,8 +1211,6 @@ public class Pipeline {
                 org.lwjgl.system.MemoryUtil.memFree(pData);
             }
         }
-
-        saveRecordedVariants();
     }
 
     /**
@@ -1163,46 +1228,136 @@ public class Pipeline {
         }
     }
 
-    /** One "<shader-path> <state-key>" line per variant reached this session (H11). */
+    /**
+     * Range-check of a packed state key before it reaches vkCreateGraphicsPipelines
+     * (R11): a corrupted, hand-edited or old-layout recording must not cause invalid
+     * usage. Field layout: see {@link #packStateKey}.
+     */
+    static boolean isValidStateKey(long key) {
+        // Everything above the 3 used topology bits must be zero.
+        if ((key >>> 37) != 0) {
+            return false;
+        }
+        // The four blend factors: the port only mirrors values up to
+        // VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA (9), plus VK_BLEND_FACTOR_SRC_ALPHA_SATURATE
+        // (10) is accepted; anything above (SRC1/DEST1 factors without the matching
+        // features, or garbage) invalidates the record.
+        for (int shift = 1; shift <= 13; shift += 4) {
+            int factor = (int) (key >>> shift) & 0xF;
+            if (factor > VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA && factor != VK_BLEND_FACTOR_SRC_ALPHA_SATURATE) {
+                return false;
+            }
+        }
+        if (((int) (key >>> 19) & 0xF) > VK_COMPARE_OP_ALWAYS) {
+            return false;
+        }
+        boolean logicOpEnabled = (key & (1L << 24)) != 0;
+        if (((int) (key >>> 25) & 0x1F) > VK_LOGIC_OP_SET
+                || (logicOpEnabled && !Vulkan.logicOpSupported)) {
+            return false;
+        }
+        // Color mask (4 bits) is free-form; the topology must be one of the line/triangle
+        // list modes the port packs (0..5).
+        int topology = (int) (key >>> 34) & 0x7;
+        return topology >= VK_PRIMITIVE_TOPOLOGY_LINE_LIST && topology <= VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    }
+
+    /** Drops the in-memory recording and the file, so a bad entry cannot repeat (R11). */
+    private static void discardVariantsFile() {
+        loadedVariantsText = null;
+        try {
+            java.nio.file.Files.deleteIfExists(VARIANTS_FILE);
+        } catch (java.io.IOException ignored) {
+        }
+    }
+
+    /**
+     * One "<recordId> <state-key> <age>" line per recorded variant (H11, R12): keys
+     * reached this session get age 0, the others age by one; entries older than
+     * MAX_VARIANT_AGE sessions are dropped and each pipeline keeps at most
+     * MAX_VARIANTS_PER_PIPELINE (youngest first). The file is rewritten only when its
+     * text changed, so a shutdown without new variants leaves it (and its mtime) alone.
+     */
     private static void saveRecordedVariants() {
         try {
-            StringBuilder sb = new StringBuilder();
-            for (Pipeline pipeline : INSTANCES) {
-                for (Long key : pipeline.graphicsPipelines.keySet()) {
-                    sb.append(pipeline.path).append(' ').append(key).append('\n');
+            Map<String, Map<Long, Integer>> out = new java.util.TreeMap<>();
+            RECORDED_VARIANTS.forEach((id, keys) -> {
+                Map<Long, Integer> aged = out.computeIfAbsent(id, k -> new java.util.HashMap<>());
+                keys.forEach((key, age) -> {
+                    if (age < MAX_VARIANT_AGE) {
+                        aged.merge(key, age + 1, Math::min);
+                    }
+                });
+            });
+            for (Pipeline p : INSTANCES) {
+                Map<Long, Integer> aged = out.computeIfAbsent(p.recordId, k -> new java.util.HashMap<>());
+                for (long key : p.reachedKeys) {
+                    aged.put(key, 0);
                 }
             }
-            writeAtomic(VARIANTS_FILE, sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+            StringBuilder sb = new StringBuilder(VARIANTS_HEADER).append('\n');
+            out.forEach((id, keys) -> keys.entrySet().stream()
+                    .sorted(Map.Entry.<Long, Integer>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
+                    .limit(MAX_VARIANTS_PER_PIPELINE)
+                    .forEach(e -> sb.append(id).append(' ').append(e.getKey()).append(' ')
+                            .append(e.getValue()).append('\n')));
+            String text = sb.toString();
+            if (text.equals(loadedVariantsText)) {
+                return;
+            }
+            writeAtomic(VARIANTS_FILE, text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            loadedVariantsText = text;
         } catch (Exception e) {
             // Best-effort warm-up data; losing it only costs the next launch's pre-warm.
         }
     }
 
-    private static Map<String, long[]> loadRecordedVariants() {
-        Map<String, long[]> map = new HashMap<>();
+    /**
+     * Reads the versioned sidecar (R11): a file with any other first line is deleted
+     * unread, a damaged line marks the text as not-reusable so the save rewrites it,
+     * and duplicate keys keep the smallest age.
+     */
+    private static Map<String, Map<Long, Integer>> loadRecordedVariants() {
+        Map<String, Map<Long, Integer>> map = new HashMap<>();
+        boolean clean = false;
+        String text = null;
         try {
-            Map<String, ArrayList<Long>> collected = new HashMap<>();
-            for (String line : java.nio.file.Files.readAllLines(VARIANTS_FILE)) {
-                int space = line.indexOf(' ');
-                if (space <= 0) {
-                    continue;
-                }
-                try {
-                    long key = Long.parseLong(line.substring(space + 1).trim());
-                    collected.computeIfAbsent(line.substring(0, space), k -> new ArrayList<>()).add(key);
-                } catch (NumberFormatException ignored) {
+            List<String> lines = java.nio.file.Files.readAllLines(VARIANTS_FILE);
+            clean = !lines.isEmpty() && VARIANTS_HEADER.equals(lines.get(0));
+            if (clean) {
+                for (String line : lines.subList(1, lines.size())) {
+                    String[] parts = line.split(" ");
+                    if (parts.length != 3) {
+                        clean = false;
+                        continue;
+                    }
+                    try {
+                        long key = Long.parseLong(parts[1]);
+                        int age = Integer.parseInt(parts[2]);
+                        if (age < 0 || age > MAX_VARIANT_AGE) {
+                            clean = false;
+                            continue;
+                        }
+                        map.computeIfAbsent(parts[0], k -> new java.util.HashMap<>())
+                           .merge(key, age, Math::min);
+                    } catch (NumberFormatException ignored) {
+                        clean = false;
+                    }
                 }
             }
-            collected.forEach((path, keys) -> {
-                long[] array = new long[keys.size()];
-                for (int i = 0; i < array.length; ++i) {
-                    array[i] = keys.get(i);
-                }
-                map.put(path, array);
-            });
+            if (clean) {
+                text = String.join("\n", lines) + "\n";
+            }
         } catch (Exception e) {
             // No usable recording; variants will be created at draw time like before.
         }
+        if (!clean && java.nio.file.Files.exists(VARIANTS_FILE)) {
+            // Old format or damaged lines: start the recording over (R11).
+            discardVariantsFile();
+            map.clear();
+        }
+        loadedVariantsText = text;
         return map;
     }
 

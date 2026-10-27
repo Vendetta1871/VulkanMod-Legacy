@@ -61,7 +61,7 @@ public class WorldBorderRenderer {
     private static final FloatBuffer float1 = MemoryUtil.memAllocFloat(1);
 
     public static void init() {
-        borderPipeline = new Pipeline(POSITION_TEX_COLOR, "clouds");
+        borderPipeline = new Pipeline(POSITION_TEX_COLOR, "clouds", "clouds#border");
         borderBuffer = MemoryUtil.memAlloc(BORDER_VERTS_MAX * POSITION_TEX_COLOR.getSize());
     }
 
