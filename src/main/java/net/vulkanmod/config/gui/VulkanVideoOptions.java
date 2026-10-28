@@ -3,12 +3,13 @@ package net.vulkanmod.config.gui;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraftforge.client.EnumHelperClient;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.config.Config;
 import net.vulkanmod.vulkan.rt.RtScene;
 
 import java.util.Arrays;
 
 /**
- * The two VulkanMod entries of the vanilla video settings list ("RTX" toggle and
+ * The two VulkanMod entries of the vanilla video settings list ("RTX" distance slider and
  * "FSR resolution" slider).
  *
  * <p>They are not part of {@link GameSettings.Options} at compile time: Forge's
@@ -19,7 +20,7 @@ import java.util.Arrays;
 public final class VulkanVideoOptions {
 
     // Only used by vanilla's I18n path, which we replace in GameSettings#getKeyBinding.
-    private static final String RTX_TRANSLATION = "options.vulkanmod.rtx";
+    private static final String RTX_TRANSLATION = "options.vulkanmod.rtxDistance";
     private static final String FSR_RESOLUTION_TRANSLATION = "options.vulkanmod.fsrResolution";
 
     /** Render scale bounds and step the slider snaps to. */
@@ -30,10 +31,11 @@ public final class VulkanVideoOptions {
     private static GameSettings.Options rtx;
     private static GameSettings.Options fsrResolution;
 
-    /** Boolean "RTX: ON/OFF" toggle. */
+    /** "RTX" distance slider in chunks, 0 = off. */
     public static GameSettings.Options rtx() {
         if (rtx == null) {
-            rtx = EnumHelperClient.addOptions("VULKANMOD_RTX", RTX_TRANSLATION, false, true);
+            rtx = EnumHelperClient.addOptions("VULKANMOD_RTX_DISTANCE", RTX_TRANSLATION, true, false,
+                    0.0F, Config.RT_DISTANCE_MAX, 1.0F);
         }
         return rtx;
     }
@@ -69,12 +71,22 @@ public final class VulkanVideoOptions {
         return extended;
     }
 
-    /** Button label; "N/A" when the device cannot run the ray-tracing pipeline. */
+    /** Slider label; "N/A" when the device cannot run the ray-tracing pipeline. */
     public static String rtxLabel() {
         if (!RtScene.supported()) {
             return "RTX: N/A";
         }
-        return Initializer.CONFIG.rayTracing ? "RTX: ON" : "RTX: OFF";
+        int d = Initializer.CONFIG.rtDistance;
+        return d <= 0 ? "RTX: OFF" : "RTX: " + d + (d == 1 ? " chunk" : " chunks");
+    }
+
+    /** Sets the RT distance from the slider (ignored without RT support). */
+    public static void setRtDistance(float value) {
+        int d = RtScene.supported() ? Math.round(Math.max(0.0F, Math.min(Config.RT_DISTANCE_MAX, value))) : 0;
+        if (d == Initializer.CONFIG.rtDistance) return;
+        Initializer.CONFIG.rtDistance = d;
+        net.vulkanmod.vulkan.FrameTargets.applySettings();
+        Initializer.saveConfig();
     }
 
     /** Slider label in whole percent. */

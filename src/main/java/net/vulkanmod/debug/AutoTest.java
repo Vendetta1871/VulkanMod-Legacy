@@ -159,9 +159,9 @@ public class AutoTest {
     private static final boolean FPS_MODE = System.getenv("VULKANMOD_AUTOTEST_FPS") != null;
 
     /**
-     * {@code VULKANMOD_AUTOTEST_RTTOGGLE=1}: in the world, flips the video-settings "RTX" option
-     * on through the same GameSettings path a click takes (chunks reload, BLASes build),
-     * captures, flips it off again, captures, quits. Checks the runtime toggle.
+     * {@code VULKANMOD_AUTOTEST_RTTOGGLE=1}: in the world, moves the video-settings "RTX"
+     * distance slider through the same GameSettings path a drag takes: 4 chunks (chunks
+     * reload, BLASes build), 12 chunks, off; captures after each step, then quits.
      */
     private static final boolean RT_TOGGLE_MODE = System.getenv("VULKANMOD_AUTOTEST_RTTOGGLE") != null;
     private static int rtToggleTicks;
@@ -171,17 +171,16 @@ public class AutoTest {
         net.minecraft.client.settings.GameSettings.Options rtx = net.vulkanmod.config.gui.VulkanVideoOptions.rtx();
         if (t == 20) {
             capture(mc, "rtBefore");
-        } else if (t == 30) {
-            mc.gameSettings.setOptionValue(rtx, 1);
-            Initializer.LOGGER.info("[autotest] RTX toggled -> {}", mc.gameSettings.getKeyBinding(rtx));
+        } else if (t == 30 || t == 170 || t == 240) {
+            mc.gameSettings.setOptionFloatValue(rtx, t == 30 ? 4.0f : t == 170 ? 12.0f : 0.0f);
+            Initializer.LOGGER.info("[autotest] RTX -> {}", mc.gameSettings.getKeyBinding(rtx));
         } else if (t == 160) {
-            capture(mc, "rtOn");
-        } else if (t == 170) {
-            mc.gameSettings.setOptionValue(rtx, 1);
-            Initializer.LOGGER.info("[autotest] RTX toggled -> {}", mc.gameSettings.getKeyBinding(rtx));
-        } else if (t == 200) {
+            capture(mc, "rtNear");
+        } else if (t == 230) {
+            capture(mc, "rtFar");
+        } else if (t == 270) {
             capture(mc, "rtOff");
-        } else if (t >= 210) {
+        } else if (t >= 280) {
             Initializer.LOGGER.info("[autotest] done, shutting down");
             mc.shutdown();
         }

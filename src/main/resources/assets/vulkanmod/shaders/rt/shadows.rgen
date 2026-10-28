@@ -13,7 +13,7 @@ layout(set = 0, binding = 5, rgba8) uniform image2D opaqueColor;
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
     vec4 light;         // xyz: towards the light, w: shadow strength 0..1
-    vec4 flags;         // x > 0: also darken the opaque-only copy
+    vec4 flags;         // x > 0: also darken the opaque-only copy; y: RT range in blocks
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -56,6 +56,10 @@ void main() {
     // without RT cores can spin on it).
     float len2 = dot(c, c);
     if (!(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) return;
+    // Past the RT range the raster image stays as is; the last chunk fades out.
+    float fade = clamp((pc.flags.y - max(abs(pos.x), abs(pos.z))) / 16.0, 0.0, 1.0);
+    if (fade <= 0.0) return;
+
     vec3 n = c * inversesqrt(len2);
     vec3 eye = unproject(p, 0.0, vec2(size));
     vec3 view = pos - eye;
@@ -90,7 +94,7 @@ void main() {
         lit = mix(1.0, visible, sunShare);
     }
 
-    float factor = 1.0 - pc.light.w * (1.0 - lit);
+    float factor = 1.0 - pc.light.w * fade * (1.0 - lit);
     vec4 color = imageLoad(sceneColor, p);
     imageStore(sceneColor, p, vec4(color.rgb * factor, color.a));
     if (pc.flags.x > 0.0) {

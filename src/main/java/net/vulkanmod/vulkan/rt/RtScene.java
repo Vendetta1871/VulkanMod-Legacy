@@ -82,6 +82,20 @@ public final class RtScene {
         return enabled;
     }
 
+    /** Sections farther than this (chunks, horizontal) stay raster-only; the debug view traces all. */
+    public static int distanceChunks() {
+        int d = Initializer.CONFIG.effectiveRtDistance();
+        return DEBUG_VIEW ? Math.max(d, 64) : d;
+    }
+
+    // Camera chunk and range for this frame's range tests (set in record).
+    private static int camChunkX, camChunkZ, rangeChunks;
+
+    /** Chebyshev chunk distance from the camera chunk, like vanilla's render distance. */
+    private static int chunkDistance(Section s) {
+        return Math.max(Math.abs((s.originX >> 4) - camChunkX), Math.abs((s.originZ >> 4) - camChunkZ));
+    }
+
     /** The device has the ray-tracing pipeline and the batched chunk path is on. */
     public static boolean supported() {
         DeviceFeatures f = Vulkan.getDeviceInfo() != null ? Vulkan.getDeviceInfo().features : null;
@@ -89,7 +103,7 @@ public final class RtScene {
     }
 
     /**
-     * Applies Config.rayTracing (VULKANMOD_RT overrides). Turning it on recreates the frame
+     * Applies Config.rtDistance (VULKANMOD_RT / VULKANMOD_RT_DISTANCE override). Turning it on recreates the frame
      * targets (the scene color needs STORAGE) and reloads the chunks so every section gets
      * its BLAS; turning it off waits for the GPU and releases the RT resources.
      * Client thread only.
@@ -218,6 +232,10 @@ public final class RtScene {
      */
     public static void record(VkCommandBuffer cmd, MemoryStack stack) {
         RtBuffer.tick();
+        camChunkX = (int) Math.floor(CameraHistory.camX()) >> 4;
+        camChunkZ = (int) Math.floor(CameraHistory.camZ()) >> 4;
+        rangeChunks = distanceChunks();
+        updateRange();
         breadcrumb(cmd, stack, 1);
 
         VkMemoryBarrier2.Buffer pre = VkMemoryBarrier2.calloc(1, stack);
@@ -300,21 +318,35 @@ public final class RtScene {
     }
 
     /** Builds up to MAX_BUILDS_PER_FRAME queued, placed BLASes in one call. */
+    /**
+     * A full batch needs ~350 bytes of structs per section, more than the thread's 64 KiB
+     * stack (LWJGL reports overflow as OutOfMemoryError, which vanilla handles by unloading
+     * the world mid-frame).
+     */
+    private static final MemoryStack BUILD_STACK = MemoryStack.create(512 * 1024);
+
     private static boolean buildBlases(VkCommandBuffer cmd) {
         if (buildQueue.isEmpty()) return false;
         DeviceFeatures f = Vulkan.getDeviceInfo().features;
         long arenaAddress = RtBuffer.addressOf(ChunkBatcher.arena().bufferId());
 
-        try (MemoryStack stack = stackPush()) {
+        try (MemoryStack stack = BUILD_STACK.push()) {
             int count = 0;
             ArrayList<Section> batch = new ArrayList<>();
+            boolean dropped = false;
             for (int i = 0; i < buildQueue.size() && count < MAX_BUILDS_PER_FRAME; i++) {
                 Section s = buildQueue.get(i);
-                if (s.placed) {
-                    batch.add(s);
-                    count++;
+                if (!s.placed) continue;
+                if (chunkDistance(s) > rangeChunks) {
+                    // Re-queued by updateRange once it comes back in range.
+                    s.dirty = false;
+                    dropped = true;
+                    continue;
                 }
+                batch.add(s);
+                count++;
             }
+            if (dropped) buildQueue.removeIf(s -> !s.dirty);
             if (batch.isEmpty()) return false;
 
             VkAccelerationStructureBuildGeometryInfoKHR.Buffer infos =
@@ -398,6 +430,28 @@ public final class RtScene {
         }
     }
 
+    /**
+     * Queues in-range sections without a BLAS and releases BLASes two chunks past the
+     * range (the margin keeps a camera moving along the edge from rebuilding them).
+     */
+    private static void updateRange() {
+        for (Section s : sections) {
+            int d = chunkDistance(s);
+            if (d <= rangeChunks) {
+                if (s.blas == 0L && !s.dirty && s.placed && s.vertexCount > 0) {
+                    s.dirty = true;
+                    buildQueue.add(s);
+                }
+            } else if (d > rangeChunks + 2 && s.blas != 0L) {
+                releaseBlas(s);
+            }
+        }
+    }
+
+    private static boolean inTlas(Section s) {
+        return s.blas != 0L && s.placed && s.mask != 0 && chunkDistance(s) <= rangeChunks;
+    }
+
     private static ByteBuffer cpuInstances, cpuInstanceData;
 
     private static ByteBuffer ensureCpu(ByteBuffer b, long bytes) {
@@ -429,7 +483,7 @@ public final class RtScene {
         try (MemoryStack stack = stackPush()) {
             // Instances: every placed section with a BLAS, translated to camera-relative space.
             int count = 0;
-            for (Section s : sections) if (s.blas != 0L && s.placed && s.mask != 0) count++;
+            for (Section s : sections) if (inTlas(s)) count++;
 
             instanceRingIndex = (instanceRingIndex + 1) % INSTANCE_RING;
             RtBuffer instances = instanceBuffers[instanceRingIndex];
@@ -464,7 +518,7 @@ public final class RtScene {
             ByteBuffer dataCpu = cpuInstanceData = ensureCpu(cpuInstanceData, (long) Math.max(1, count) * 8);
             int n = 0;
             for (Section s : sections) {
-                if (s.blas == 0L || !s.placed || s.mask == 0) continue;
+                if (!inTlas(s)) continue;
                 int o = n * INSTANCE_BYTES;
                 // 3x4 row-major transform: identity rotation, translation origin - camera.
                 m.putFloat(o, 1f).putFloat(o + 4, 0f).putFloat(o + 8, 0f).putFloat(o + 12, (float) (s.originX - cx));

@@ -33,17 +33,33 @@ public class Config {
     /** FSR 3 sharpening strength 0..1: 0 = off. */
     public float fsr3Sharpness = 0.3f;
 
-    /** Ray-traced effects (shadows for now); needs ray-tracing pipeline support. */
-    public boolean rayTracing = false;
+    /**
+     * Ray-traced effects (shadows for now) within this many chunks of the camera; farther
+     * sections keep plain raster lighting. 0 = off. Needs ray-tracing pipeline support.
+     */
+    public int rtDistance = 0;
+    /** Pre-rtDistance on/off switch, read once and migrated (true becomes {@link #RT_DISTANCE_DEFAULT}). */
+    public Boolean rayTracing;
+
+    public static final int RT_DISTANCE_MAX = 16, RT_DISTANCE_DEFAULT = 8;
     /** How much ray-traced shadows darken, 0..1. */
     public float rtShadowStrength = 0.45f;
 
     // Environment overrides (tests and autotest runs) take precedence over the file.
 
     public boolean effectiveRayTracing() {
+        return effectiveRtDistance() > 0;
+    }
+
+    /** VULKANMOD_RT=0 turns RT off; VULKANMOD_RT=1 turns it on at the configured or default distance. */
+    public int effectiveRtDistance() {
+        int d = (int) envFloat("VULKANMOD_RT_DISTANCE", rtDistance);
         String env = System.getenv("VULKANMOD_RT");
-        if (env != null) return env.isEmpty() || env.charAt(0) != '0';
-        return rayTracing;
+        if (env != null) {
+            if (!env.isEmpty() && env.charAt(0) == '0') return 0;
+            if (d <= 0) d = RT_DISTANCE_DEFAULT;
+        }
+        return Math.max(0, Math.min(RT_DISTANCE_MAX, d));
     }
 
     public float effectiveRtShadowStrength() {
@@ -99,7 +115,12 @@ public class Config {
         // defaults. The caller writes a fresh file over the broken one, so keep a copy.
         // JsonParseException covers both JsonSyntaxException and JsonIOException.
         try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-            return GSON.fromJson(reader, Config.class);
+            Config c = GSON.fromJson(reader, Config.class);
+            if (c != null && c.rayTracing != null) {
+                if (c.rayTracing && c.rtDistance <= 0) c.rtDistance = RT_DISTANCE_DEFAULT;
+                c.rayTracing = null;
+            }
+            return c;
         } catch (JsonParseException | IOException e) {
             net.vulkanmod.Initializer.LOGGER.error("Failed to load VulkanMod config, using defaults: {}", path, e);
             backup(path);

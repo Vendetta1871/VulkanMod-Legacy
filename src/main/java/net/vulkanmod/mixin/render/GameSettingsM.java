@@ -25,7 +25,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  *
  * <p>The second part answers the option callbacks for the two custom
  * {@link GameSettings.Options} created by {@link VulkanVideoOptions}: label,
- * toggle and slider value. Every other option falls through to vanilla.</p>
+ * and slider values. Every other option falls through to vanilla.</p>
  */
 @Mixin(GameSettings.class)
 public abstract class GameSettingsM {
@@ -48,40 +48,24 @@ public abstract class GameSettingsM {
         }
     }
 
-    @Inject(method = "setOptionValue(Lnet/minecraft/client/settings/GameSettings$Options;I)V",
-            at = @At("HEAD"), cancellable = true)
-    private void vulkanmod$toggleCustomOption(GameSettings.Options option, int value, CallbackInfo ci) {
-        if (!VulkanVideoOptions.isRtx(option)) {
-            return;
-        }
-        // Nothing to toggle on a device without the RT pipeline; the button reads "N/A".
-        if (RtScene.supported()) {
-            Initializer.CONFIG.rayTracing = !Initializer.CONFIG.rayTracing;
-            FrameTargets.applySettings();
-            Initializer.saveConfig();
-        }
-        ci.cancel();
-    }
-
-    @Inject(method = "getOptionOrdinalValue(Lnet/minecraft/client/settings/GameSettings$Options;)Z",
-            at = @At("HEAD"), cancellable = true)
-    private void vulkanmod$customOptionState(GameSettings.Options option, CallbackInfoReturnable<Boolean> cir) {
-        if (VulkanVideoOptions.isRtx(option)) {
-            cir.setReturnValue(Initializer.CONFIG.rayTracing);
-        }
-    }
-
     @Inject(method = "getOptionFloatValue(Lnet/minecraft/client/settings/GameSettings$Options;)F",
             at = @At("HEAD"), cancellable = true)
     private void vulkanmod$customOptionFloat(GameSettings.Options option, CallbackInfoReturnable<Float> cir) {
         if (VulkanVideoOptions.isFsrResolution(option)) {
             cir.setReturnValue(VulkanVideoOptions.fsrResolutionValue());
+        } else if (VulkanVideoOptions.isRtx(option)) {
+            cir.setReturnValue((float) Initializer.CONFIG.rtDistance);
         }
     }
 
     @Inject(method = "setOptionFloatValue(Lnet/minecraft/client/settings/GameSettings$Options;F)V",
             at = @At("HEAD"), cancellable = true)
     private void vulkanmod$setCustomOptionFloat(GameSettings.Options option, float value, CallbackInfo ci) {
+        if (VulkanVideoOptions.isRtx(option)) {
+            VulkanVideoOptions.setRtDistance(value);
+            ci.cancel();
+            return;
+        }
         if (!VulkanVideoOptions.isFsrResolution(option)) {
             return;
         }

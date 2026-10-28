@@ -78,7 +78,7 @@ final class RtShadowPass {
         invJittered.get(0, constants);
         float s = day ? 1.0f : -1.0f;
         constants.putFloat(64, sun[0] * s).putFloat(68, sun[1] * s).putFloat(72, sun[2] * s).putFloat(76, strength);
-        constants.putFloat(80, opaque ? 1.0f : 0.0f);
+        constants.putFloat(80, opaque ? 1.0f : 0.0f).putFloat(84, RtScene.distanceChunks() * 16.0f);
 
         pipeline.trace(cmd, set, constants, scene.width(), scene.height());
 
