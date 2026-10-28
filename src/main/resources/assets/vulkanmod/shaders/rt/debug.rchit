@@ -55,6 +55,8 @@ void main() {
     payload.normal = n;
     payload.skyLight = clamp(sky, 0.0, 1.0);
     payload.blockLight = clamp(block, 0.0, 1.0);
-    payload.tinted = tint.r + tint.g + tint.b < 2.95 ? 1.0 : 0.0;
+    // Vertex colors carry face shading and smooth-lighting occlusion (grey) besides biome
+    // tints (water, grass, leaves): only a hue counts as tinted.
+    payload.tinted = max(max(tint.r, tint.g), tint.b) - min(min(tint.r, tint.g), tint.b) > 0.08 ? 1.0 : 0.0;
     payload.material = textureLod(materialAtlas, uv, 0.0);
 }

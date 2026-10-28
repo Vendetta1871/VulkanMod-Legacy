@@ -41,7 +41,7 @@ struct Payload {
     vec3 normal;
     float skyLight;   // 0..1
     float blockLight; // 0..1
-    float tinted;     // 1: vertex-tinted (water, grass, leaves), 0: white
+    float tinted;     // 1: vertex color has a hue (biome tint: water, grass, leaves)
     vec4 material;    // LabPBR specular: smoothness, F0 (>= 230/255: metal), porosity, emission
 };
 

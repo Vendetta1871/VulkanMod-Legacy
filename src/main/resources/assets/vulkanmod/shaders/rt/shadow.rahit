@@ -20,15 +20,16 @@ void main() {
     }
     if ((gl_InstanceCustomIndexEXT & INSTANCE_TRANSLUCENT) != 0) {
         vec4 tint = unpackUnorm4x8(a.color) * w.x + unpackUnorm4x8(b.color) * w.y + unpackUnorm4x8(c.color) * w.z;
-        if (tint.r + tint.g + tint.b < 2.95) {
-            ignoreIntersectionEXT;   // water
+        // Water (a biome hue; face shading and occlusion in vertex colors are grey).
+        if (max(max(tint.r, tint.g), tint.b) - min(min(tint.r, tint.g), tint.b) > 0.08) {
+            ignoreIntersectionEXT;
         }
         // Light through colored glass takes its hue (normalized: glass colors light more than
         // it dims it), saturated a little so a single pane reads clearly.
-        vec3 color = tex.rgb * tint.rgb;
+        vec3 color = tex.rgb;   // the vertex color is shading only here
         color /= max(max(color.r, color.g), max(color.b, 1e-3));
         color = pow(color, vec3(1.5));
-        shadow.rgb *= mix(vec3(1.0), color, min(tex.a * 1.3, 1.0));
+        shadow.rgb *= mix(vec3(1.0), color, min(tex.a * 2.0, 1.0));
         ignoreIntersectionEXT;
     }
 }
