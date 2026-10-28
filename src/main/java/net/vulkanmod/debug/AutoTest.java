@@ -210,6 +210,47 @@ public class AutoTest {
         }
     }
 
+    /**
+     * {@code VULKANMOD_AUTOTEST_MOBSHADOW=1}: a stone platform high in the air under a low
+     * morning sun with a zombie and a cow (no AI) on it; captures "mobShadow". Checks the
+     * ray-traced entity shadows (and the round drop shadows they replace).
+     */
+    private static final boolean MOBSHADOW_MODE = System.getenv("VULKANMOD_AUTOTEST_MOBSHADOW") != null;
+    private static int mobShadowTicks;
+
+    private static void mobShadowStage(Minecraft mc) {
+        int t = ++mobShadowTicks;
+        int bx = 260, by = 150, bz = 200;
+        if (t == 1) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server == null) return;
+            server.addScheduledTask(() -> {
+                net.minecraft.world.World world = server.getWorld(0);
+                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                for (int dx = 0; dx <= 16; dx++)
+                    for (int dz = 0; dz <= 16; dz++)
+                        world.setBlockState(c.setPos(bx + dx, by, bz + dz), Blocks.STONE.getDefaultState());
+                net.minecraft.entity.monster.EntityZombie zombie = new net.minecraft.entity.monster.EntityZombie(world);
+                zombie.setLocationAndAngles(bx + 8.5, by + 1, bz + 7.5, 90.0f, 0.0f);
+                zombie.setNoAI(true);
+                world.spawnEntity(zombie);
+                net.minecraft.entity.passive.EntityCow cow = new net.minecraft.entity.passive.EntityCow(world);
+                cow.setLocationAndAngles(bx + 5.5, by + 1, bz + 9.5, 0.0f, 0.0f);
+                cow.setNoAI(true);
+                world.spawnEntity(cow);
+            });
+            serverCommand(mc, "time set 1500");
+            serverCommand(mc, "weather clear 100000");
+        } else if (t == 5) {
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 35", mc.player.getName(), bx + 8.5, by + 1.0, bz + 15.5));
+        } else if (t == 120) {
+            capture(mc, "mobShadow");
+        } else if (t >= 130) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
         net.minecraft.client.settings.GameSettings.Options rtx = net.vulkanmod.config.gui.VulkanVideoOptions.rtx();
@@ -415,6 +456,11 @@ public class AutoTest {
 
                 if (TORCH_MODE) {
                     torchStage(mc);
+                    return;
+                }
+
+                if (MOBSHADOW_MODE) {
+                    mobShadowStage(mc);
                     return;
                 }
 

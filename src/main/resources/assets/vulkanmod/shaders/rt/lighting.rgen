@@ -180,12 +180,13 @@ void main() {
     rngState = uint(p.x) * 1973u + uint(p.y) * 9277u + uint(pc.params.y) * 26699u;
     pcg();
 
-    // Primary ray around the depth sample: exact normal and the surface's lightmap.
+    // Primary ray around the depth sample (terrain masks only; entity hits carry no
+    // chunk vertices): exact normal and the surface's lightmap.
     // No hit (entities, clouds - not in the TLAS): depth normal, sun shadows only.
     payload.t = -1.0;
     vec3 dir = view / dist;
     float slack = 0.05 + 0.01 * dist;
-    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
     bool hit = payload.t >= 0.0;
     if (hit) {
         n = payload.normal;

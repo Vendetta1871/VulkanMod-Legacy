@@ -32,7 +32,7 @@ import static org.lwjgl.vulkan.KHRSynchronization2.*;
 public final class RtScene {
 
     /** Ray mask bits per render layer. */
-    public static final int MASK_OPAQUE = 0x01, MASK_CUTOUT = 0x02;
+    public static final int MASK_OPAQUE = 0x01, MASK_CUTOUT = 0x02, MASK_ENTITY = 0x04;
 
     private static final int MAX_BUILDS_PER_FRAME = 256;
     private static final int INSTANCE_BYTES = 64;
@@ -256,6 +256,8 @@ public final class RtScene {
         vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre));
 
         boolean built = buildBlases(cmd);
+        RtEntities.build(cmd, stack);
+        built |= RtEntities.ready();
         if (built) breadcrumb(cmd, stack, 2);
         if (built) {
             // The TLAS build reads the new BLASes and reuses the scratch buffer.
@@ -504,6 +506,8 @@ public final class RtScene {
             // Instances: every placed section with a BLAS, translated to camera-relative space.
             int count = 0;
             for (Section s : sections) if (inTlas(s)) count++;
+            boolean entities = RtEntities.ready();
+            if (entities) count++;
 
             instanceRingIndex = (instanceRingIndex + 1) % INSTANCE_RING;
             RtBuffer instances = instanceBuffers[instanceRingIndex];
@@ -549,6 +553,19 @@ public final class RtScene {
                 m.putInt(o + 52, 0);
                 m.putLong(o + 56, s.blasAddress);
                 dataCpu.putLong(n * 8, arenaAddress + s.arenaOffset);
+                n++;
+            }
+            if (entities) {
+                // Entity vertices are camera-relative already; identity transform. Primary rays
+                // skip this mask (their hit shaders read chunk vertices only).
+                int o = n * INSTANCE_BYTES;
+                m.putFloat(o, 1f).putFloat(o + 4, 0f).putFloat(o + 8, 0f).putFloat(o + 12, 0f);
+                m.putFloat(o + 16, 0f).putFloat(o + 20, 1f).putFloat(o + 24, 0f).putFloat(o + 28, 0f);
+                m.putFloat(o + 32, 0f).putFloat(o + 36, 0f).putFloat(o + 40, 1f).putFloat(o + 44, 0f);
+                m.putInt(o + 48, MASK_ENTITY << 24);
+                m.putInt(o + 52, VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24);
+                m.putLong(o + 56, RtEntities.blasAddress());
+                dataCpu.putLong(n * 8, 0L);
                 n++;
             }
             tlasInstanceCount = n;
@@ -650,6 +667,7 @@ public final class RtScene {
             if (instanceDataBuffers[i] != null) { instanceDataBuffers[i].destroyNow(); instanceDataBuffers[i] = null; }
         }
         RtLights.destroy();
+        RtEntities.destroy();
         synchronized (CRUMB_LOCK) {
             if (crumbs != null) { crumbs.destroyNow(); crumbs = null; }
         }

@@ -292,6 +292,7 @@ public final class FrameTargets {
         pipelineBarrier(cmd, barriers, stack);
 
         opaqueTaken = opaqueDone = rtRecorded = false;
+        net.vulkanmod.vulkan.rt.RtEntities.beginFrame();
         depthReadable = false;
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 0);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);

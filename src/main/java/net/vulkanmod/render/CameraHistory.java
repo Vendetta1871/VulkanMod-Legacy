@@ -20,6 +20,8 @@ public final class CameraHistory {
 
     private static final Matrix4f viewProj = new Matrix4f();
     private static final Matrix4f prevViewProj = new Matrix4f();
+    /** Inverse of the main camera's model-view: view space -> camera-relative world axes. */
+    private static final Matrix4f viewInverse = new Matrix4f();
     private static double camX, camY, camZ;
     private static double prevCamX, prevCamY, prevCamZ;
     private static boolean valid, prevValid;
@@ -61,6 +63,7 @@ public final class CameraHistory {
     public static void captureMain(Matrix4f modelView, Matrix4f projRemapped, Matrix4f glProjection) {
         if (valid) return;
         projRemapped.mul(modelView, viewProj);
+        modelView.invert(viewInverse);
         // GL perspective: m22 = -(f+n)/(f-n), m32 = -2fn/(f-n), m11 = cot(fovY/2).
         near = glProjection.m32() / (glProjection.m22() - 1.0f);
         far = glProjection.m32() / (glProjection.m22() + 1.0f);
@@ -100,6 +103,9 @@ public final class CameraHistory {
     public static float fovY() { return fovY; }
     public static Matrix4f viewProj() { return viewProj; }
     public static Matrix4f prevViewProj() { return prevViewProj; }
+    public static Matrix4f viewInverse() { return viewInverse; }
+    /** The main camera of this frame was captured (see captureMain). */
+    public static boolean valid() { return valid; }
     public static double camX() { return camX; }
     public static double camY() { return camY; }
     public static double camZ() { return camZ; }

@@ -480,6 +480,19 @@ public class EntityRenderer {
         VRenderSystem.updateModelViewMatrix();
         VRenderSystem.calculateMVP();
 
+        // T5: world-pass entity models also go into the RT scene; with RT on, the round drop
+        // shadows within the RT range give way to traced ones.
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled() && !handPass && !GuiRenderer.isGuiPass()
+                && net.vulkanmod.vulkan.FrameTargets.phase() == net.vulkanmod.vulkan.FrameTargets.Phase.SCENE) {
+            if (pipeline == shadowPipeline && inRtRange(data, format)) {
+                net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
+                return;
+            }
+            if (pipeline == entityPipeline || pipeline == itemPipeline || pipeline == blockPipeline) {
+                net.vulkanmod.vulkan.rt.RtEntities.add(data, vertexCount, format.getSize(), VRenderSystem.getModelViewMatrix4f());
+            }
+        }
+
         // Depth, cull and colour come straight from the GlStateManager tracking mixins
         // (GlStateManagerDepthM, GlStateManagerBlendM) into VRenderSystem, where the
         // pipeline bind already reads them: every 1.12.2 render path drives this state
@@ -548,6 +561,16 @@ public class EntityRenderer {
             Initializer.LOGGER.info("[entity] first model draw: {} verts, tex {}", vertexCount, texture);
         }
         net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
+    }
+
+    private static final org.joml.Vector3f rtOrigin = new org.joml.Vector3f();
+
+    /** Whether the batch's first vertex lies within the RT range (horizontal, camera-relative). */
+    private static boolean inRtRange(ByteBuffer data, VertexFormat format) {
+        org.joml.Vector3f o = net.vulkanmod.vulkan.rt.RtEntities.origin(VRenderSystem.getModelViewMatrix4f(), rtOrigin);
+        float x = o.x + data.getFloat(0), z = o.z + data.getFloat(8);
+        float range = net.vulkanmod.vulkan.rt.RtScene.distanceChunks() * 16.0f - 8.0f;
+        return Math.max(Math.abs(x), Math.abs(z)) < range;
     }
 
     /**
