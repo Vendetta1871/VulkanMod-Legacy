@@ -3,9 +3,7 @@ package net.vulkanmod.mixin.render;
 import net.minecraft.client.settings.GameSettings;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.config.gui.VulkanVideoOptions;
-import net.vulkanmod.vulkan.FrameTargets;
 import net.vulkanmod.vulkan.Vulkan;
-import net.vulkanmod.vulkan.rt.RtScene;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -41,29 +39,17 @@ public abstract class GameSettingsM {
     @Inject(method = "getKeyBinding(Lnet/minecraft/client/settings/GameSettings$Options;)Ljava/lang/String;",
             at = @At("HEAD"), cancellable = true)
     private void vulkanmod$customOptionLabel(GameSettings.Options option, CallbackInfoReturnable<String> cir) {
-        if (VulkanVideoOptions.isFsrResolution(option)) {
-            cir.setReturnValue(VulkanVideoOptions.fsrResolutionLabel());
+        String label = VulkanVideoOptions.label(option);
+        if (label != null) {
+            cir.setReturnValue(label);
         }
     }
 
-    @Inject(method = "getOptionFloatValue(Lnet/minecraft/client/settings/GameSettings$Options;)F",
+    @Inject(method = "setOptionValue(Lnet/minecraft/client/settings/GameSettings$Options;I)V",
             at = @At("HEAD"), cancellable = true)
-    private void vulkanmod$customOptionFloat(GameSettings.Options option, CallbackInfoReturnable<Float> cir) {
-        if (VulkanVideoOptions.isFsrResolution(option)) {
-            cir.setReturnValue(VulkanVideoOptions.fsrResolutionValue());
+    private void vulkanmod$customOptionClick(GameSettings.Options option, int value, CallbackInfo ci) {
+        if (VulkanVideoOptions.click(option)) {
+            ci.cancel();
         }
-    }
-
-    @Inject(method = "setOptionFloatValue(Lnet/minecraft/client/settings/GameSettings$Options;F)V",
-            at = @At("HEAD"), cancellable = true)
-    private void vulkanmod$setCustomOptionFloat(GameSettings.Options option, float value, CallbackInfo ci) {
-        if (!VulkanVideoOptions.isFsrResolution(option)) {
-            return;
-        }
-        Initializer.CONFIG.renderScale = Math.max(VulkanVideoOptions.FSR_MIN,
-                Math.min(VulkanVideoOptions.FSR_MAX, value));
-        FrameTargets.applySettings();
-        Initializer.saveConfig();
-        ci.cancel();
     }
 }

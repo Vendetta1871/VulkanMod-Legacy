@@ -278,8 +278,9 @@ void main() {
     vec3 pos = unproject(p, d, vec2(size));
     // Past an effect's range the raster image stays as is; the last chunk fades out.
     float horizontal = max(abs(pos.x), abs(pos.z));
-    float fade = clamp((pc.params.x - horizontal) / 16.0, 0.0, 1.0);
-    float giFade = clamp((pc.sky.w - horizontal) / 16.0, 0.0, 1.0);
+    // Over the last 1.5 chunks, eased: no visible line where RT ends.
+    float fade = smoothstep(0.0, 1.0, (pc.params.x - horizontal) / 24.0);
+    float giFade = smoothstep(0.0, 1.0, (pc.sky.w - horizontal) / 24.0);
     vec3 c = cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size));
     // Degenerate or non-finite geometry: never trace a NaN ray (software traversal on GPUs
     // without RT cores can spin on it).
@@ -326,7 +327,11 @@ void main() {
     float sky = hit ? payload.skyLight : 1.0;
     if (fade > 0.0 && pc.light.w > 0.0 && ndl > 0.0 && sky > 0.01) {
         vec3 lit = traceShadow(pos + n * (0.02 + 0.002 * dist), pc.light.xyz, 512.0);
-        sunFactor = 1.0 - pc.light.w * fade * (1.0 - lit);
+        // Occlusion darkens by the shadow strength; the hue of stained glass the light passed
+        // through applies in full (scaled by the strength it would be a faint tint).
+        float through = max(max(lit.r, lit.g), lit.b);
+        vec3 hue = through > 1e-3 ? lit / through : vec3(1.0);
+        sunFactor = (1.0 - pc.light.w * fade * (1.0 - through)) * mix(vec3(1.0), hue, fade);
     }
     imageStore(normals, p, vec4(n * 0.5 + 0.5, 1.0));
     float distance = length(pos);

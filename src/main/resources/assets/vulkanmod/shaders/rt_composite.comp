@@ -122,6 +122,6 @@ void main() {
     // relit, light around corners - so dark pixels are lit from their albedo instead.
     vec3 relit = color.rgb * clamp(ratio, vec3(0.0), vec3(2.0));
     vec3 fromAlbedo = imageLoad(albedo, p).rgb * clamp(lightNew, vec3(0.0), vec3(1.0));
-    float dark = 1.0 - smoothstep(0.08, 0.3, lightOld);
+    float dark = (1.0 - smoothstep(0.08, 0.3, lightOld)) * fade;
     imageStore(sceneColor, p, vec4(mix(relit, max(relit, fromAlbedo), dark), color.a));
 }
