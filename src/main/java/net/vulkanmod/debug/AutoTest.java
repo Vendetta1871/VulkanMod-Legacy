@@ -251,6 +251,49 @@ public class AutoTest {
         }
     }
 
+    /**
+     * {@code VULKANMOD_AUTOTEST_RTWATER=1}: a water pool on a platform high in the air with stone
+     * pillars and glass behind it, morning sun; captures "water" from a low viewing angle.
+     * Checks RT reflections, the sun glint and refraction.
+     */
+    private static final boolean RT_WATER_MODE = System.getenv("VULKANMOD_AUTOTEST_RTWATER") != null;
+    private static int waterTicks;
+
+    private static void rtWaterStage(Minecraft mc) {
+        int t = ++waterTicks;
+        int bx = 320, by = 150, bz = 200;
+        if (t == 1) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server == null) return;
+            server.addScheduledTask(() -> {
+                net.minecraft.world.World world = server.getWorld(0);
+                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                for (int dx = 0; dx <= 20; dx++)
+                    for (int dz = 0; dz <= 24; dz++) {
+                        world.setBlockState(c.setPos(bx + dx, by - 2, bz + dz), Blocks.SANDSTONE.getDefaultState(), 2);
+                        boolean pool = dx >= 2 && dx <= 18 && dz >= 2 && dz <= 16;
+                        world.setBlockState(c.setPos(bx + dx, by - 1, bz + dz),
+                                pool ? Blocks.WATER.getDefaultState() : Blocks.STONE.getDefaultState(), 2);
+                    }
+                for (int i = 0; i < 4; i++)
+                    for (int dy = 0; dy <= 5 + i; dy++)
+                        world.setBlockState(c.setPos(bx + 3 + i * 5, by + dy, bz + 1), Blocks.STONEBRICK.getDefaultState(), 2);
+                for (int dy = 0; dy <= 2; dy++)
+                    world.setBlockState(c.setPos(bx + 10, by + dy, bz + 1), Blocks.GLASS.getDefaultState(), 2);
+                world.setBlockState(c.setPos(bx + 6, by, bz + 20), Blocks.GLASS.getDefaultState(), 2);
+            });
+            serverCommand(mc, "time set 1000");
+            serverCommand(mc, "weather clear 100000");
+        } else if (t == 5) {
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 12", mc.player.getName(), bx + 10.5, by + 1.0, bz + 21.5));
+        } else if (t == 120) {
+            capture(mc, "rtWater");
+        } else if (t >= 130) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
         net.minecraft.client.settings.GameSettings.Options rtx = net.vulkanmod.config.gui.VulkanVideoOptions.rtx();
@@ -461,6 +504,11 @@ public class AutoTest {
 
                 if (MOBSHADOW_MODE) {
                     mobShadowStage(mc);
+                    return;
+                }
+
+                if (RT_WATER_MODE) {
+                    rtWaterStage(mc);
                     return;
                 }
 
@@ -894,7 +942,7 @@ public class AutoTest {
                     } else if (ticks == 30) {
                         frameWater(mc);
                     } else if (ticks == 80) {
-                        capture(mc, "water");
+                        capture(mc, "rtWater");
                     } else if (ticks == 90 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                         Initializer.LOGGER.info("[autotest] done, shutting down");
                         mc.shutdown();

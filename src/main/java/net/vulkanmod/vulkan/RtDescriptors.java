@@ -22,8 +22,8 @@ import static org.lwjgl.vulkan.VK10.*;
  */
 final class RtDescriptors {
 
-    static final int PASSES = 2, SLOTS = 8;
-    static final int PASS_DEBUG = 0, PASS_LIGHTING = 1;
+    static final int PASSES = 3, SLOTS = 8;
+    static final int PASS_DEBUG = 0, PASS_LIGHTING = 1, PASS_REFLECTIONS = 2;
 
     private static long layout, pool;
     private static final long[][] sets = new long[PASSES][SLOTS];

@@ -32,7 +32,9 @@ import static org.lwjgl.vulkan.KHRSynchronization2.*;
 public final class RtScene {
 
     /** Ray mask bits per render layer. */
-    public static final int MASK_OPAQUE = 0x01, MASK_CUTOUT = 0x02, MASK_ENTITY = 0x04;
+    public static final int MASK_OPAQUE = 0x01, MASK_CUTOUT = 0x02, MASK_ENTITY = 0x04, MASK_TRANSLUCENT = 0x08;
+    /** Rays that cast shadows: everything but translucent (water, glass). */
+    public static final int MASK_SHADOW = MASK_OPAQUE | MASK_CUTOUT | MASK_ENTITY;
 
     private static final int MAX_BUILDS_PER_FRAME = 256;
     private static final int INSTANCE_BYTES = 64;

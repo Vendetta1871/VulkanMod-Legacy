@@ -1,0 +1,114 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// Ray-traced reflections on translucent surfaces (water, glass, ice), after the translucent
+// layer: a primary ray (translucent mask) finds the front surface of each pixel, a mirror
+// ray (terrain) is shaded from its hit's albedo and lightmap and blended in by Fresnel.
+// Water gets procedural waves, a sun glint and a refraction offset of the opaque-only copy.
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba8) uniform image2D sceneColor;
+layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 5, rgba8) uniform readonly image2D opaqueColor;
+
+layout(push_constant) uniform Constants {
+    mat4 invViewProj;   // jittered: the depth was rendered with it
+    vec4 light;         // xyz: towards the sun/moon, w: glint strength
+    vec4 sky;           // rgb: sky color, w: time (seconds)
+    vec4 params;        // x: strength, y: opaque copy bound, z: RT range (blocks), w: sky brightness factor
+    vec4 cam;           // xyz: camera position modulo 1024 (wave phase)
+} pc;
+
+layout(location = 0) rayPayloadEXT Payload payload;
+layout(location = 1) rayPayloadEXT float visible;
+
+float brightness(float l) { return l / (4.0 - 3.0 * l); }
+
+vec3 unproject(ivec2 p, float depth, vec2 size) {
+    vec2 uv = (vec2(p) + 0.5) / size;
+    vec4 h = pc.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    return h.xyz / h.w;
+}
+
+// Slope of a few travelling sine waves at world position xz.
+vec2 waveSlope(vec2 xz, float t) {
+    vec2 s = vec2(0.0);
+    const vec3 waves[4] = vec3[](vec3(0.8, 0.6, 1.3), vec3(-0.5, 0.9, 1.9), vec3(0.95, -0.3, 2.9), vec3(-0.2, -1.0, 4.1));
+    for (int i = 0; i < 4; i++) {
+        vec2 d = normalize(waves[i].xy);
+        float k = waves[i].z;
+        float a = 0.035 / k;
+        s += d * (a * k * cos(dot(d, xz) * k + t * (1.2 + 0.4 * float(i))));
+    }
+    return s;
+}
+
+// Vanilla-like shading of a reflected surface: lightmap plus the fixed face shading.
+vec3 shade(vec3 albedo, vec3 n, float skyLight, float blockLight) {
+    float face = abs(n.y) > 0.5 ? (n.y > 0.0 ? 1.0 : 0.5) : (abs(n.z) > 0.5 ? 0.8 : 0.6);
+    float light = max(brightness(skyLight) * pc.params.w, brightness(blockLight)) * 0.95 + 0.05;
+    return albedo * light * face;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    float d = texelFetch(sceneDepth, p, 0).r;
+    if (d >= 0.99999) return;
+    vec3 pos = unproject(p, d, vec2(size));
+    if (any(isnan(pos)) || max(abs(pos.x), abs(pos.z)) > pc.params.z) return;
+    vec3 eye = unproject(p, 0.0, vec2(size));
+    vec3 view = pos - eye;
+    float dist = length(view);
+    vec3 dir = view / dist;
+
+    // The nearest translucent surface in front of the depth sample (translucent geometry
+    // may or may not have written depth).
+    payload.t = -1.0;
+    float slack = 0.05 + 0.01 * dist;
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, dist + slack, 0);
+    if (payload.t < 0.0) return;   // no translucent surface in front
+
+    vec3 hitPos = eye + dir * payload.t;
+    vec3 n0 = payload.normal;
+    bool water = payload.tinted > 0.5 && n0.y > 0.9;
+    vec3 n = n0;
+    if (water) {
+        vec2 slope = waveSlope(hitPos.xz + pc.cam.xz, pc.sky.w);
+        n = normalize(vec3(-slope.x, 1.0, -slope.y));
+    }
+
+    float cosV = clamp(dot(-dir, n), 0.0, 1.0);
+    float f0 = water ? 0.02 : 0.04;
+    float fresnel = (f0 + (1.0 - f0) * pow(1.0 - cosV, 5.0)) * pc.params.x;
+
+    vec3 r = reflect(dir, n);
+    if (dot(r, n0) < 0.02) r = normalize(r + n0 * (0.02 - dot(r, n0)));
+    vec3 origin = hitPos + n0 * (0.02 + 0.001 * dist);
+    payload.t = -1.0;
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, 0.0, r, 512.0, 0);
+    vec3 reflected = payload.t < 0.0 ? pc.sky.rgb
+            : shade(payload.albedo, payload.normal, payload.skyLight, payload.blockLight);
+
+    vec4 color = imageLoad(sceneColor, p);
+    vec3 c = color.rgb;
+    if (water && pc.params.y > 0.0) {
+        // Refraction: shift the opaque scene seen through the surface by the wave slope.
+        vec2 shift = n.xz * (40.0 / (1.0 + 0.15 * dist));
+        ivec2 q = clamp(p + ivec2(shift), ivec2(0), size - 1);
+        c += 0.5 * (imageLoad(opaqueColor, q).rgb - imageLoad(opaqueColor, p).rgb);
+    }
+    c = mix(c, reflected, fresnel);
+
+    if (water && pc.light.w > 0.0) {
+        float spec = pow(max(dot(r, pc.light.xyz), 0.0), 600.0) * pc.light.w;
+        if (spec > 0.01) {
+            visible = 0.0;
+            traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                        0x07, 0, 0, 1, origin, 0.0, pc.light.xyz, 512.0, 1);
+            c += spec * visible * vec3(1.0, 0.92, 0.8);
+        }
+    }
+    imageStore(sceneColor, p, vec4(clamp(c, 0.0, 1.0), color.a));
+}

@@ -29,6 +29,7 @@ struct Payload {
     vec3 normal;
     float skyLight;   // 0..1
     float blockLight; // 0..1
+    float tinted;     // 1: vertex-tinted (water, grass, leaves), 0: white
 };
 
 #ifdef RT_HIT

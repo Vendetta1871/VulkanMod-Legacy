@@ -70,7 +70,7 @@ vec3 tangent(ivec2 p, ivec2 axis, float d, vec3 pos, ivec2 size) {
 bool traceShadow(vec3 origin, vec3 dir, float tMax) {
     visible = 0.0;
     traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                0xFF, 0, 0, 1, origin, 0.0, dir, tMax, 1);
+                0x07, 0, 0, 1, origin, 0.0, dir, tMax, 1);   // not translucent
     return visible > 0.5;
 }
 

@@ -46,6 +46,8 @@ public class Config {
     public float rtShadowStrength = 0.45f;
     /** How much ray-traced block light (torches, glowstone...) replaces vanilla's, 0..1. */
     public float rtBlockLight = 1.0f;
+    /** Ray-traced reflections on water, glass and ice, 0..1 (0 = off). */
+    public float rtReflections = 1.0f;
 
     // Environment overrides (tests and autotest runs) take precedence over the file.
 
@@ -62,6 +64,10 @@ public class Config {
             if (d <= 0) d = RT_DISTANCE_DEFAULT;
         }
         return Math.max(0, Math.min(RT_DISTANCE_MAX, d));
+    }
+
+    public float effectiveRtReflections() {
+        return clamp(envFloat("VULKANMOD_RT_REFLECTIONS", rtReflections), 0.0f, 1.0f);
     }
 
     public float effectiveRtBlockLight() {

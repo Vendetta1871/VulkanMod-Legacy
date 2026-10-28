@@ -54,7 +54,7 @@ public class VBO {
     }
 
     private static int rtMask(net.minecraft.util.BlockRenderLayer layer) {
-        return layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT ? 0
+        return layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT ? net.vulkanmod.vulkan.rt.RtScene.MASK_TRANSLUCENT
                 : layer == net.minecraft.util.BlockRenderLayer.CUTOUT
                 ? net.vulkanmod.vulkan.rt.RtScene.MASK_CUTOUT : net.vulkanmod.vulkan.rt.RtScene.MASK_OPAQUE;
     }

@@ -97,8 +97,12 @@ public final class RtLights {
 
         // Light list, nearest sections first when over the cap.
         ArrayList<int[]> sorted = new ArrayList<>();
+        // A section has one RtScene.Section per render layer, each scanned: keep one.
+        java.util.HashSet<Long> seen = new java.util.HashSet<>();
         for (RtScene.Section s : sections) {
             if (s.lights == null || !s.placed) continue;
+            if (!seen.add(((long) (s.originX >> 4) & 0x3FFFFF) << 42 | ((long) (s.originY >> 4) & 0xFFFFF) << 22
+                    | ((long) (s.originZ >> 4) & 0x3FFFFF))) continue;
             long dx = s.originX + 8 - (long) camX, dy = s.originY + 8 - (long) camY, dz = s.originZ + 8 - (long) camZ;
             sorted.add(new int[]{(int) Math.min(Integer.MAX_VALUE, dx * dx + dy * dy + dz * dz), s.index});
         }

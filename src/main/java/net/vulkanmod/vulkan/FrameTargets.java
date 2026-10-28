@@ -88,6 +88,7 @@ public final class FrameTargets {
     public static void releaseRtPasses() {
         RtDebugView.destroy();
         RtLightingPass.destroy();
+        RtReflectionPass.destroy();
         RtDescriptors.destroy();
     }
 
@@ -153,7 +154,8 @@ public final class FrameTargets {
             recordRtShadows(cmd, stack);
             depthBackToAttachment(cmd, stack);
         }
-        if (temporal) copyOpaque(cmd, stack);
+        // The opaque-only copy feeds FSR's reactive mask and the RT water refraction.
+        copyOpaque(cmd, stack);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
     }
 
@@ -316,6 +318,8 @@ public final class FrameTargets {
             // Frames without particles or translucent geometry get the shadows here.
             if (rtShadowsWanted() && !opaqueDone) recordRtShadows(cmd, stack);
             else recordRtScene(cmd, stack);
+            // Reflections see the translucent layer, so they run after it.
+            if (rtShadowsWanted()) RtReflectionPass.record(cmd, stack);
             net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 4);
         }
 
