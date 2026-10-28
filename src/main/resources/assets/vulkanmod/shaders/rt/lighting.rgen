@@ -72,6 +72,11 @@ void storeGiRaw(ivec2 p, vec4 v) {
     if (giCell(p)) imageStore(giRaw, ivec2(p.x >> 1, p.y), v);
 }
 
+// LabPBR emission (material alpha 1..254; 255 means none).
+float emissionOf(vec4 material) {
+    return material.a < 254.5 / 255.0 ? material.a * (255.0 / 254.0) : 0.0;
+}
+
 // Vanilla's lightmap curve for a 0..1 light level.
 float brightness(float l) { return l / (4.0 - 3.0 * l); }
 
@@ -237,6 +242,13 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
     bool dynamic = r.light >= DYNAMIC;
     float tMax = dynamic ? len - 0.35 : blockEntry(origin, dir, center) - 0.01;
     vec3 vis = tMax > 0.05 ? traceShadow(origin, dir, tMax, dynamic ? 0x0Bu : 0x0Fu) : vec3(1.0);
+    if (tMax > 0.05 && max(vis.r, max(vis.g, vis.b)) <= 0.0) {
+        // Blocked: when the nearest blocker glows itself (the lava next to the chosen lava
+        // block, a lava shelf above it), it lights this point as brightly.
+        payload.t = -1.0;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, 0.0, dir, tMax, 0);
+        if (payload.t >= 0.0 && emissionOf(payload.material) > 0.5) vis = vec3(1.0);
+    }
     lightDistance = len;
     return vis * lightColor(r.light) * (r.target * W);
 }
@@ -377,7 +389,10 @@ void main() {
     }
     float skyLight = payload.skyLight, blockLevel = payload.blockLight;
     imageStore(albedoOut, p, vec4(payload.albedo, 1.0));
-    float emitter = blockLevel > 0.8 && emitterSurface(pos, n) ? 1.0 : 0.0;
+    // Emissive material (LabPBR alpha 1..254; 255 means none), or the face of a listed
+    // light's own block. The list lookup misses blocks in crowded cells (a lava sea fills
+    // every cell past MAX_PER_CELL), the material does not.
+    float emitter = emissionOf(payload.material) > 0.5 || (blockLevel > 0.8 && emitterSurface(pos, n)) ? 1.0 : 0.0;
 
     // The previous frame's pixel of this surface (nearest, distance-validated) for ReSTIR reuse.
     ivec2 prevPixel = p;

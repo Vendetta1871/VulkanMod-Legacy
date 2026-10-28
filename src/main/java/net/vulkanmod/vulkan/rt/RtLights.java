@@ -109,6 +109,7 @@ public final class RtLights {
                     String path = id == null ? "" : id.getPath();
                     if (level <= 0) level = EXTRA_EMITTERS.getOrDefault(path, 0);
                     if (level <= 0) continue;
+                    if (enclosed(world, s.originX + x, s.originY + y, s.originZ + z)) continue;
                     if (out == null) out = new int[16];
                     else if (n == out.length) out = java.util.Arrays.copyOf(out, n * 2);
                     out[n++] = x | y << 4 | z << 8 | Math.min(level, 15) << 12 | Math.min(colorOf(path), 0x7FFF) << 16;
@@ -116,6 +117,24 @@ public final class RtLights {
             }
         }
         return out == null ? null : java.util.Arrays.copyOf(out, n);
+    }
+
+    private static final BlockPos.MutableBlockPos neighbour = new BlockPos.MutableBlockPos();
+    private static final int[][] SIDES = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+
+    /**
+     * An emitter whose six neighbours all emit too or are opaque cubes (the inside of a
+     * lava sea or a glowstone cluster) lights nothing a ray could reach first: skipped,
+     * so the light list and grid hold the surfaces.
+     */
+    private static boolean enclosed(World world, int x, int y, int z) {
+        for (int[] d : SIDES) {
+            IBlockState n = world.getBlockState(neighbour.setPos(x + d[0], y + d[1], z + d[2]));
+            if (n.isOpaqueCube()) continue;
+            if (n.getLightValue(world, neighbour) > 0) continue;
+            return false;
+        }
+        return true;
     }
 
     static void markDirty() { dirty = true; }
@@ -254,14 +273,36 @@ public final class RtLights {
                         if (qx * qx + qy * qy + qz * qz > r * r) continue;
                         int[] list = cells.computeIfAbsent(key(cx, cy, cz), k -> new int[9]);
                         int c = list[0];
-                        if (c == MAX_PER_CELL) continue;
                         if (c + 1 == list.length) {
-                            list = java.util.Arrays.copyOf(list, Math.min(list.length * 2, MAX_PER_CELL + 1));
+                            list = java.util.Arrays.copyOf(list, list.length * 2);
                             cells.put(key(cx, cy, cz), list);
                         }
                         list[c + 1] = i;
                         list[0] = c + 1;
                     }
+        }
+        // Crowded cells (a lava sea reaches each with hundreds of blocks) keep the lights
+        // nearest to them: those dominate, and the first come were often far away.
+        for (var e : cells.entrySet()) {
+            int[] list = e.getValue();
+            int c = list[0];
+            if (c <= MAX_PER_CELL) continue;
+            long k = e.getKey();
+            float mx = ((int) (k >> 42) + 0.5f) * CELL, my = ((int) (k << 22 >> 43) + 0.5f) * CELL,
+                    mz = ((int) (k << 43 >> 43) + 0.5f) * CELL;
+            long[] byDistance = new long[c];
+            for (int j = 0; j < c; j++) {
+                int li = list[j + 1];
+                float dx = lx[li * 8] - mx, dy = lx[li * 8 + 1] - my, dz = lx[li * 8 + 2] - mz;
+                // Brighter lights count as nearer by their level (a lower falloff at the cell).
+                float score = (float) Math.sqrt(dx * dx + dy * dy + dz * dz) - lx[li * 8 + 3];
+                byDistance[j] = (long) Float.floatToIntBits(score + 64.0f) << 32 | li;
+            }
+            java.util.Arrays.sort(byDistance);
+            int[] kept = new int[MAX_PER_CELL + 1];
+            kept[0] = MAX_PER_CELL;
+            for (int j = 0; j < MAX_PER_CELL; j++) kept[j + 1] = (int) byDistance[j];
+            e.setValue(kept);
         }
 
         int tableSize = 64;

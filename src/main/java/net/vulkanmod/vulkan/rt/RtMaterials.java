@@ -19,7 +19,7 @@ import java.util.Map;
 /**
  * Material atlas for the RT passes: the block atlas layout with LabPBR specular data per
  * texel (R: perceptual smoothness, G: F0 reflectance, 230..255 = metal, B: porosity/SSS,
- * A: emission). A resource pack's {@code <texture>_s.png} wins; otherwise the built-in
+ * A: emission 0..254, 255 = none). A resource pack's {@code <texture>_s.png} wins; otherwise the built-in
  * defaults below give whole sprites a constant material (metal blocks, polished stone,
  * glass, ice...). Rebuilt after every atlas stitch.
  */
@@ -62,10 +62,25 @@ public final class RtMaterials {
         def("end_bricks", 70, 10);
         def("stone_slab_top", 70, 10);
         def("stonebrick", 40, 10);
+        // Blocks that glow as a whole (LabPBR emission in alpha, 254 = full): their surfaces
+        // stay lit in the RT composite however many emitters surround them (a lava sea).
+        emissive("lava_still", 60, 10);
+        emissive("lava_flow", 60, 10);
+        emissive("glowstone", 30, 10);
+        emissive("magma", 50, 10);
+        emissive("sea_lantern", 160, 10);
+        emissive("redstone_lamp_on", 60, 10);
+        emissive("fire_layer_*", 0, 0);
+    }
+
+    private static void emissive(String name, int smoothness, int f0) {
+        def(name, smoothness, f0);
+        int[] v = name.endsWith("*") ? PREFIXES.get(name.substring(0, name.length() - 1)) : DEFAULTS.get(name);
+        v[2] = 254;
     }
 
     private static void def(String name, int smoothness, int f0) {
-        int[] v = {smoothness, f0};
+        int[] v = {smoothness, f0, 0};
         if (name.endsWith("*")) PREFIXES.put(name.substring(0, name.length() - 1), v);
         else DEFAULTS.put(name, v);
     }
@@ -172,7 +187,7 @@ public final class RtMaterials {
         for (int y = 0; y < sh; y++) {
             for (int x = 0; x < sw; x++) {
                 int o = ((y0 + y) * stride + x0 + x) * 4;
-                out.put(o, (byte) v[0]).put(o + 1, (byte) v[1]);
+                out.put(o, (byte) v[0]).put(o + 1, (byte) v[1]).put(o + 3, (byte) v[2]);
             }
         }
         return true;
