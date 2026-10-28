@@ -523,7 +523,7 @@ public class VulkanImage {
     private static float anisotropy() {
         net.vulkanmod.vulkan.DeviceInfo info = net.vulkanmod.vulkan.Vulkan.getDeviceInfo();
         if (info == null || info.features == null || !info.features.samplerAnisotropy) return 1.0f;
-        float wanted = 16.0f;
+        float wanted = 1.0f;
         String env = System.getenv("VULKANMOD_ANISO");
         if (env != null) {
             try { wanted = Float.parseFloat(env); } catch (NumberFormatException ignored) {}
@@ -561,7 +561,8 @@ public class VulkanImage {
                 samplerInfo.addressModeW(VK_SAMPLER_ADDRESS_MODE_REPEAT);
             }
 
-            // Mipmapped world textures keep detail at grazing angles (VULKANMOD_ANISO=0 disables).
+            // Opt-in (VULKANMOD_ANISO=<n>): the 1.12 atlas has no sprite padding, so wide
+            // anisotropic footprints pick up neighbouring sprites as grey seams between distant blocks.
             float aniso = mipmap ? anisotropy() : 1.0f;
             samplerInfo.anisotropyEnable(aniso > 1.0f);
             samplerInfo.maxAnisotropy(Math.max(aniso, 1.0f));
