@@ -43,7 +43,8 @@ public final class RtDebugView {
         if (pipeline == null) {
             pipeline = new RtPipeline(RtDescriptors.layout(), PUSH_BYTES, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                     "rt/debug.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
-                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit")});
+                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit"),
+                            new RtPipeline.HitGroup(null, "rt/shadow.rahit")});
             Initializer.LOGGER.info("[rt] debug view ready");
         }
         RenderTarget scene = FrameTargets.scene;

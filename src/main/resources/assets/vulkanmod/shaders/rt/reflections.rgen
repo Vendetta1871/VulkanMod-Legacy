@@ -2,9 +2,11 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
-// Ray-traced reflections on translucent surfaces (water, glass, ice), after the translucent
-// layer: a primary ray (translucent mask) finds the front surface of each pixel, a mirror
-// ray (terrain) is shaded from its hit's albedo and lightmap and blended in by Fresnel.
+// Ray-traced reflections, after the translucent layer: a primary ray finds the front
+// surface of each pixel - translucent (water, glass, ice) or, failing that, opaque with a
+// smooth material (RtMaterials: LabPBR smoothness / F0, metals) - and a reflection ray
+// (terrain), jittered by the roughness, is shaded from its hit's albedo and lightmap and
+// blended in by Fresnel; metals reflect in their own color.
 // Water gets procedural waves, a sun glint and a refraction offset of the opaque-only copy.
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
@@ -17,11 +19,18 @@ layout(push_constant) uniform Constants {
     vec4 light;         // xyz: towards the sun/moon, w: glint strength
     vec4 sky;           // rgb: sky color, w: time (seconds)
     vec4 params;        // x: strength, y: opaque copy bound, z: RT range (blocks), w: sky brightness factor
-    vec4 cam;           // xyz: camera position modulo 1024 (wave phase)
+    vec4 cam;           // xyz: camera position modulo 1024 (wave phase), w: 1 translucent surfaces, 0 opaque
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
-layout(location = 1) rayPayloadEXT float visible;
+layout(location = 1) rayPayloadEXT vec4 shadow;
+
+uint rngState;
+float rand() {
+    rngState = rngState * 747796405u + 2891336453u;
+    uint w = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+    return float(((w >> 22u) ^ w) >> 8) * (1.0 / 16777216.0);
+}
 
 float brightness(float l) { return l / (4.0 - 3.0 * l); }
 
@@ -67,21 +76,41 @@ void main() {
     // may or may not have written depth).
     payload.t = -1.0;
     float slack = 0.05 + 0.01 * dist;
-    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, dist + slack, 0);
-    if (payload.t < 0.0) return;   // no translucent surface in front
+    bool translucent = pc.cam.w > 0.5;
+    if (translucent) {
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, dist + slack, 0);
+        if (payload.t < 0.0) return;
+    } else {
+        // The opaque surface of the depth sample; only smooth materials reflect visibly.
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
+        if (payload.t < 0.0 || payload.material.r < 0.5) return;
+    }
 
     vec3 hitPos = eye + dir * payload.t;
     vec3 n0 = payload.normal;
-    bool water = payload.tinted > 0.5 && n0.y > 0.9;
+    vec3 albedo = payload.albedo;
+    vec4 material = payload.material;
+    bool water = translucent && payload.tinted > 0.5 && n0.y > 0.9;
+    bool metal = !translucent && material.g >= 229.5 / 255.0;
+    float smoothness = translucent ? max(material.r, 0.94) : material.r;
+    float roughness = (1.0 - smoothness) * (1.0 - smoothness);
     vec3 n = n0;
     if (water) {
         vec2 slope = waveSlope(hitPos.xz + pc.cam.xz, pc.sky.w);
         n = normalize(vec3(-slope.x, 1.0, -slope.y));
+    } else if (roughness > 0.001) {
+        // Glossy: a random microfacet normal around the surface normal; FSR's temporal
+        // accumulation averages the jitter.
+        rngState = uint(p.x) * 1973u + uint(p.y) * 9277u + uint(pc.sky.w * 60.0) * 26699u;
+        vec3 jitter = vec3(rand(), rand(), rand()) * 2.0 - 1.0;
+        n = normalize(n0 + jitter * roughness * 0.7);
     }
 
     float cosV = clamp(dot(-dir, n), 0.0, 1.0);
-    float f0 = water ? 0.02 : 0.04;
-    float fresnel = (f0 + (1.0 - f0) * pow(1.0 - cosV, 5.0)) * pc.params.x;
+    vec3 f0 = metal ? albedo : vec3(water ? 0.02 : translucent ? 0.04 : max(material.g, 0.02));
+    vec3 fresnel = (f0 + (1.0 - f0) * pow(1.0 - cosV, 5.0)) * pc.params.x;
+    // Rough dielectrics lose the sharp reflection; metals keep their (blurred) one.
+    if (!metal) fresnel *= smoothness * smoothness;
 
     vec3 r = reflect(dir, n);
     if (dot(r, n0) < 0.02) r = normalize(r + n0 * (0.02 - dot(r, n0)));
@@ -100,15 +129,20 @@ void main() {
         ivec2 q = clamp(p + ivec2(shift), ivec2(0), size - 1);
         c += 0.5 * (imageLoad(opaqueColor, q).rgb - imageLoad(opaqueColor, p).rgb);
     }
-    c = mix(c, reflected, fresnel);
+    if (metal) {
+        // Metals: mostly the (tinted) reflection, keeping some of the lit texture.
+        c = mix(c, reflected * fresnel, 0.75 * smoothness * pc.params.x);
+    } else {
+        c = mix(c, reflected, fresnel);
+    }
 
-    if (water && pc.light.w > 0.0) {
-        float spec = pow(max(dot(r, pc.light.xyz), 0.0), 600.0) * pc.light.w;
+    if ((water || smoothness > 0.8) && pc.light.w > 0.0) {
+        float spec = pow(max(dot(r, pc.light.xyz), 0.0), water ? 600.0 : 200.0 * smoothness) * pc.light.w;
         if (spec > 0.01) {
-            visible = 0.0;
+            shadow = vec4(1.0, 1.0, 1.0, 0.0);
             traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                        0x07, 0, 0, 1, origin, 0.0, pc.light.xyz, 512.0, 1);
-            c += spec * visible * vec3(1.0, 0.92, 0.8);
+                        0x0F, SHADOW_HIT_GROUP, 0, 1, origin, 0.0, pc.light.xyz, 512.0, 1);
+            c += spec * shadow.rgb * shadow.a * (metal ? albedo : vec3(1.0, 0.92, 0.8));
         }
     }
     imageStore(sceneColor, p, vec4(clamp(c, 0.0, 1.0), color.a));

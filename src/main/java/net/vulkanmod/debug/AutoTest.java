@@ -294,6 +294,73 @@ public class AutoTest {
         }
     }
 
+    /**
+     * {@code VULKANMOD_AUTOTEST_MATERIALS=1}: a platform with metal and polished blocks, a
+     * stained-glass canopy and a torch in a stained-glass box; captures "materialsDay" (sun
+     * through the canopy) and "materialsNight" (the torch through its box).
+     */
+    private static final boolean MATERIALS_MODE = System.getenv("VULKANMOD_AUTOTEST_MATERIALS") != null;
+    private static int materialsTicks;
+
+    private static void materialsStage(Minecraft mc) {
+        int t = ++materialsTicks;
+        int bx = 380, by = 150, bz = 200;
+        if (t == 1) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server == null) return;
+            server.addScheduledTask(() -> {
+                net.minecraft.world.World world = server.getWorld(0);
+                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                for (int dx = 0; dx <= 20; dx++)
+                    for (int dz = 0; dz <= 20; dz++)
+                        world.setBlockState(c.setPos(bx + dx, by - 1, bz + dz), Blocks.QUARTZ_BLOCK.getDefaultState(), 2);
+                net.minecraft.block.state.IBlockState[] row = {Blocks.IRON_BLOCK.getDefaultState(),
+                        Blocks.GOLD_BLOCK.getDefaultState(), Blocks.DIAMOND_BLOCK.getDefaultState(),
+                        Blocks.EMERALD_BLOCK.getDefaultState(), Blocks.OBSIDIAN.getDefaultState(),
+                        Blocks.STONE.getDefaultState()};
+                for (int i = 0; i < row.length; i++) {
+                    world.setBlockState(c.setPos(bx + 4 + i * 2, by, bz + 13), row[i], 2);
+                    world.setBlockState(c.setPos(bx + 4 + i * 2, by + 1, bz + 13), row[i], 2);
+                }
+                // Stained-glass canopy (red, green, blue strips) on four pillars.
+                net.minecraft.item.EnumDyeColor[] colors = {net.minecraft.item.EnumDyeColor.RED,
+                        net.minecraft.item.EnumDyeColor.LIME, net.minecraft.item.EnumDyeColor.BLUE};
+                for (int dx = 2; dx <= 10; dx++)
+                    for (int dz = 2; dz <= 8; dz++)
+                        world.setBlockState(c.setPos(bx + dx, by + 4, bz + dz), Blocks.STAINED_GLASS.getDefaultState()
+                                .withProperty(net.minecraft.block.BlockStainedGlass.COLOR, colors[(dx - 2) / 3]), 2);
+                for (int dy = 0; dy <= 3; dy++) {
+                    world.setBlockState(c.setPos(bx + 2, by + dy, bz + 2), Blocks.STONEBRICK.getDefaultState(), 2);
+                    world.setBlockState(c.setPos(bx + 10, by + dy, bz + 2), Blocks.STONEBRICK.getDefaultState(), 2);
+                    world.setBlockState(c.setPos(bx + 2, by + dy, bz + 8), Blocks.STONEBRICK.getDefaultState(), 2);
+                    world.setBlockState(c.setPos(bx + 10, by + dy, bz + 8), Blocks.STONEBRICK.getDefaultState(), 2);
+                }
+                // A torch in a magenta glass box.
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = 0; dy <= 2; dy++)
+                        for (int dz = -1; dz <= 1; dz++)
+                            if (dx != 0 || dz != 0 || dy == 2)
+                                world.setBlockState(c.setPos(bx + 16 + dx, by + dy, bz + 5 + dz), Blocks.STAINED_GLASS.getDefaultState()
+                                        .withProperty(net.minecraft.block.BlockStainedGlass.COLOR, net.minecraft.item.EnumDyeColor.MAGENTA), 2);
+                world.setBlockState(c.setPos(bx + 16, by, bz + 5), Blocks.TORCH.getDefaultState(), 3);
+            });
+            serverCommand(mc, "time set 5000");
+            serverCommand(mc, "weather clear 100000");
+        } else if (t == 5) {
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 165 22", mc.player.getName(), bx + 8.5, by + 1.0, bz + 16.5));
+        } else if (t == 120) {
+            capture(mc, "materialsDay");
+        } else if (t == 125) {
+            serverCommand(mc, "time set 18000");
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 35", mc.player.getName(), bx + 16.5, by + 1.0, bz + 12.5));
+        } else if (t == 220) {
+            capture(mc, "materialsNight");
+        } else if (t >= 230) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
         if (t == 20) {
@@ -510,6 +577,11 @@ public class AutoTest {
 
                 if (RT_WATER_MODE) {
                     rtWaterStage(mc);
+                    return;
+                }
+
+                if (MATERIALS_MODE) {
+                    materialsStage(mc);
                     return;
                 }
 

@@ -43,6 +43,7 @@ final class RtLightingPass {
             new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT)};
     private static final StorageImage aux = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
     private static final StorageImage normals = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
+    private static final StorageImage aux2 = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
     private static final StorageImage[] giHistory = {
             new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT),
             new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT)};
@@ -60,7 +61,7 @@ final class RtLightingPass {
         RenderTarget scene = FrameTargets.scene;
         int w = scene.width(), h = scene.height();
         boolean fresh = false;
-        StorageImage[] all = {history[0], history[1], aux, normals, giHistory[0], giHistory[1]};
+        StorageImage[] all = {history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2};
         for (StorageImage img : all) fresh |= img.ensure(w, h);
         if (fresh) historyValid = false;
         parity ^= 1;
@@ -86,7 +87,7 @@ final class RtLightingPass {
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
         long rtSet = RtDescriptors.write(RtDescriptors.PASS_LIGHTING, 0L, scene.depthView(), 0L,
-                new long[]{prev.view, cur.view, aux.view, normals.view, giPrev.view, giCur.view});
+                new long[]{prev.view, cur.view, aux.view, normals.view, giPrev.view, giCur.view, aux2.view});
 
         // The depth was rendered with the jittered projection.
         invJittered.identity()
@@ -164,7 +165,8 @@ final class RtLightingPass {
         if (rtPipeline == null) {
             rtPipeline = new RtPipeline(RtDescriptors.layout(), RT_PUSH, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                     "rt/lighting.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
-                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit")});
+                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit"),
+                            new RtPipeline.HitGroup(null, "rt/shadow.rahit")});
             Initializer.LOGGER.info("[rt] lighting ready");
         }
         if (composite == null) {
@@ -180,7 +182,7 @@ final class RtLightingPass {
         VkDevice device = Vulkan.getDevice();
         int[] types = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
         try (MemoryStack stack = stackPush()) {
             LongBuffer ptr = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(types.length, stack);
@@ -206,7 +208,7 @@ final class RtLightingPass {
 
     private static void writeCompositeSet(long set, RenderTarget scene, StorageImage cur, StorageImage giCur) {
         try (MemoryStack stack = stackPush()) {
-            long[] views = {scene.depthView(), scene.colorView(), cur.view, aux.view, normals.view, giCur.view};
+            long[] views = {scene.depthView(), scene.colorView(), cur.view, aux.view, normals.view, giCur.view, aux2.view};
             VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(views.length, stack);
             for (int i = 0; i < views.length; i++) {
                 VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
@@ -245,7 +247,7 @@ final class RtLightingPass {
     }
 
     static void destroy() {
-        for (StorageImage img : new StorageImage[]{history[0], history[1], aux, normals, giHistory[0], giHistory[1]}) {
+        for (StorageImage img : new StorageImage[]{history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2}) {
             img.destroy();
         }
         historyValid = false;

@@ -10,7 +10,8 @@ layout(set = 0, binding = 1, rgba8) uniform image2D sceneColor;
 layout(set = 0, binding = 2, rgba16f) uniform readonly image2D history;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D aux;
 layout(set = 0, binding = 4, rgba8) uniform readonly image2D normals;
-layout(set = 0, binding = 5, rgba16f) uniform readonly image2D gi;
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D gi;      // rgb: indirect light, a: distance
+layout(set = 0, binding = 6, rgba8) uniform readonly image2D aux2;     // rgb: sun factor, a: indirect light fade
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered
@@ -35,9 +36,10 @@ void main() {
     vec4 a = imageLoad(aux, p);
     if (a.w < 0.0) return;
     vec4 color = imageLoad(sceneColor, p);
+    vec4 a2 = imageLoad(aux2, p);
     if (a.w == 0.0) {
         // No primary hit (entities): sun shadows only.
-        imageStore(sceneColor, p, vec4(color.rgb * a.x, color.a));
+        imageStore(sceneColor, p, vec4(color.rgb * a2.rgb, color.a));
         return;
     }
 
@@ -45,11 +47,12 @@ void main() {
     vec3 n = imageLoad(normals, p).xyz * 2.0 - 1.0;
     vec3 pos = unproject(p, texelFetch(sceneDepth, p, 0).r, vec2(size));
     float dist = length(pos);
-    int stride = h.y < 6.0 ? 3 : h.y < 16.0 ? 2 : 1;
+    int stride = h.a < 6.0 ? 3 : h.a < 16.0 ? 2 : 1;
 
-    float sum = 0.0, wsum = 0.0;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
     vec3 giSum = vec3(0.0);
-    float giW = 0.0, giFadeSum = 0.0;
+    float giW = 0.0;
     for (int dy = -2; dy <= 2; dy++) {
         for (int dx = -2; dx <= 2; dx++) {
             ivec2 q = p + ivec2(dx, dy) * stride;
@@ -60,8 +63,8 @@ void main() {
             vec3 pq = unproject(q, texelFetch(sceneDepth, q, 0).r, vec2(size));
             float plane = abs(dot(n, pq - pos)) / (0.02 + 0.004 * dist);
             float w = exp(-0.25 * float(dx * dx + dy * dy)) * pow(max(dot(n, nq), 0.0), 32.0) * exp(-plane)
-                    * (0.25 + min(hq.y, 8.0));
-            sum += hq.x * w;
+                    * (0.25 + min(hq.a, 8.0));
+            sum += hq.rgb * w;
             wsum += w;
             // Indirect light is low-frequency: a second, twice as wide footprint.
             ivec2 g = p + ivec2(dx, dy) * stride * 2;
@@ -70,23 +73,20 @@ void main() {
                 vec3 pg = unproject(g, texelFetch(sceneDepth, g, 0).r, vec2(size));
                 float gw = exp(-0.12 * float(dx * dx + dy * dy)) * pow(max(dot(n, ng), 0.0), 8.0)
                         * exp(-abs(dot(n, pg - pos)) / (0.05 + 0.006 * dist));
-                vec4 gq = imageLoad(gi, g);
-                giSum += gq.rgb * gw;
-                giFadeSum += gq.a * gw;
+                giSum += imageLoad(gi, g).rgb * gw;
                 giW += gw;
             }
         }
     }
-    float rt = wsum > 0.0 ? sum / wsum : h.x;
-    vec4 giCenter = imageLoad(gi, p);
-    vec3 indirect = giW > 0.0 ? giSum / giW : giCenter.rgb;
-    float giFade = giW > 0.0 ? giFadeSum / giW : giCenter.a;
+    vec3 rt = wsum > 0.0 ? sum / wsum : h.rgb;
+    vec3 indirect = giW > 0.0 ? giSum / giW : imageLoad(gi, p).rgb;
 
-    float sunFactor = a.x, vanillaBlock = a.y, skyTerm = a.z, fade = a.w;
+    vec3 sunFactor = a2.rgb;
+    float giFade = a2.a, vanillaBlock = a.y, skyTerm = a.z, fade = a.w;
     // Several emitters add up where vanilla takes the brightest: the cap keeps lit areas
-    // near vanilla's level while shadows and falloff come from the rays.
-    float traced = min(1.3 * rt + pc.params.y * vanillaBlock, 1.4 * vanillaBlock + 0.06);
-    float block = mix(vanillaBlock, traced, pc.params.x * fade);
+    // near vanilla's level while shadows, falloff and glass tint come from the rays.
+    vec3 traced = min(1.3 * rt + pc.params.y * vanillaBlock, vec3(1.4 * vanillaBlock + 0.06));
+    vec3 block = mix(vec3(vanillaBlock), traced, pc.params.x * fade);
     // Open ground under the sky gathers about skyTerm: the difference is occlusion or bounce.
     vec3 giDelta = pc.params.w * giFade * (indirect - vec3(skyTerm));
     vec3 ratio = (AMBIENT + skyTerm * sunFactor + block + giDelta) / (AMBIENT + skyTerm + vanillaBlock);
@@ -95,7 +95,7 @@ void main() {
         return;
     }
     if (pc.params.z > 0.0) {
-        imageStore(sceneColor, p, vec4(vec3(rt), color.a));
+        imageStore(sceneColor, p, vec4(rt, color.a));
         return;
     }
     imageStore(sceneColor, p, vec4(color.rgb * clamp(ratio, vec3(0.0), vec3(2.0)), color.a));

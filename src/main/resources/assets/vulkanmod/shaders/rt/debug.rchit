@@ -34,4 +34,5 @@ void main() {
     payload.skyLight = clamp(sky, 0.0, 1.0);
     payload.blockLight = clamp(block, 0.0, 1.0);
     payload.tinted = tint.r + tint.g + tint.b < 2.95 ? 1.0 : 0.0;
+    payload.material = textureLod(materialAtlas, uv, 0.0);
 }

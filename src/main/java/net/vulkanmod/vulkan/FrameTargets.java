@@ -168,6 +168,7 @@ public final class FrameTargets {
     private static void recordRtShadows(VkCommandBuffer cmd, MemoryStack stack) {
         recordRtScene(cmd, stack);
         RtLightingPass.record(cmd, stack);
+        RtReflectionPass.record(cmd, stack, false);
     }
 
     /** Builds this frame's TLAS once, outside rendering. */
@@ -319,7 +320,7 @@ public final class FrameTargets {
             if (rtShadowsWanted() && !opaqueDone) recordRtShadows(cmd, stack);
             else recordRtScene(cmd, stack);
             // Reflections see the translucent layer, so they run after it.
-            if (rtShadowsWanted()) RtReflectionPass.record(cmd, stack);
+            if (rtShadowsWanted()) RtReflectionPass.record(cmd, stack, true);
             net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 4);
         }
 

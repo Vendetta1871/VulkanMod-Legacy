@@ -22,6 +22,9 @@ layout(set = 0, binding = 2, scalar) readonly buffer InstanceData {
 } instanceData;
 
 layout(set = 0, binding = 3) uniform sampler2D blockAtlas;
+#ifdef RT_HIT
+layout(set = 0, binding = 16) uniform sampler2D materialAtlas;
+#endif
 
 struct Payload {
     vec3 albedo;
@@ -30,7 +33,14 @@ struct Payload {
     float skyLight;   // 0..1
     float blockLight; // 0..1
     float tinted;     // 1: vertex-tinted (water, grass, leaves), 0: white
+    vec4 material;    // LabPBR specular: smoothness, F0 (>= 230/255: metal), porosity, emission
 };
+
+// Shadow rays (payload location 1, hit group 1): rgb transmittance through stained glass
+// and ice, a: 1 when the ray reached its end (miss shader).
+#define SHADOW_HIT_GROUP 1
+// Custom index bit of translucent sections (water, glass, ice).
+#define INSTANCE_TRANSLUCENT 0x800000
 
 #ifdef RT_HIT
 // Quads are indexed (0,1,2), (0,2,3): the triangle follows from gl_PrimitiveID alone.

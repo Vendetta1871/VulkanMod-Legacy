@@ -550,7 +550,8 @@ public final class RtScene {
                 m.putFloat(o, 1f).putFloat(o + 4, 0f).putFloat(o + 8, 0f).putFloat(o + 12, (float) (s.originX - cx));
                 m.putFloat(o + 16, 0f).putFloat(o + 20, 1f).putFloat(o + 24, 0f).putFloat(o + 28, (float) (s.originY - cy));
                 m.putFloat(o + 32, 0f).putFloat(o + 36, 0f).putFloat(o + 40, 1f).putFloat(o + 44, (float) (s.originZ - cz));
-                m.putInt(o + 48, (s.index & 0xFFFFFF) | (s.mask << 24));
+                // Custom index: section index, plus the translucent flag the shadow any-hit reads.
+                m.putInt(o + 48, (s.index & 0x7FFFFF) | (s.mask == MASK_TRANSLUCENT ? 0x800000 : 0) | (s.mask << 24));
                 // SBT offset 0; the geometry is flagged opaque already.
                 m.putInt(o + 52, 0);
                 m.putLong(o + 56, s.blasAddress);

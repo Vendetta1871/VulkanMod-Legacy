@@ -16,9 +16,11 @@ import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Ray-traced reflections and water refraction on translucent surfaces (T8), after the
- * scene phase and before the upscaler. See reflections.rgen. Strength:
- * Config.rtReflections (VULKANMOD_RT_REFLECTIONS).
+ * Ray-traced reflections (T8), see reflections.rgen. Recorded twice per frame: on smooth
+ * opaque materials right after the RT lighting (before the opaque-only copy, so FSR does not
+ * mark them reactive and accumulates the glossy jitter), and on water, glass and ice after
+ * the translucent layer (with water refraction). Strength: Config.rtReflections
+ * (VULKANMOD_RT_REFLECTIONS).
  */
 final class RtReflectionPass {
 
@@ -29,14 +31,16 @@ final class RtReflectionPass {
 
     private RtReflectionPass() {}
 
-    static void record(VkCommandBuffer cmd, MemoryStack stack) {
+    /** @param translucent false: opaque materials (scene phase, depth readable); true: after the translucent layer */
+    static void record(VkCommandBuffer cmd, MemoryStack stack, boolean translucent) {
         float strength = Initializer.CONFIG.effectiveRtReflections();
         int range = Initializer.CONFIG.effectiveRtReflectionDistance();
         if (strength <= 0.0f || range <= 0 || !RtScene.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null) return;
         if (pipeline == null) {
             pipeline = new RtPipeline(RtDescriptors.layout(), PUSH, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                     "rt/reflections.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
-                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit")});
+                    new RtPipeline.HitGroup[]{new RtPipeline.HitGroup("rt/debug.rchit", "rt/debug.rahit"),
+                            new RtPipeline.HitGroup(null, "rt/shadow.rahit")});
             Initializer.LOGGER.info("[rt] reflections ready");
         }
         RenderTarget scene = FrameTargets.scene;
@@ -57,7 +61,8 @@ final class RtReflectionPass {
         }
         FrameTargets.pipelineBarrier(cmd, pre, stack);
 
-        long set = RtDescriptors.write(RtDescriptors.PASS_REFLECTIONS, scene.colorView(), scene.depthView(),
+        long set = RtDescriptors.write(translucent ? RtDescriptors.PASS_REFLECTIONS : RtDescriptors.PASS_REFLECTIONS_OPAQUE,
+                scene.colorView(), scene.depthView(),
                 // Binding 5 must be valid even unused: the scene color stands in (same layout).
                 opaque ? FrameTargets.opaqueColor.view : scene.colorView());
 
@@ -81,7 +86,7 @@ final class RtReflectionPass {
         c.putFloat(96, strength).putFloat(100, opaque ? 1.0f : 0.0f).putFloat(104, range * 16.0f)
                 .putFloat(108, sky ? 0.2f + 0.8f * sun[3] : 0.0f);
         c.putFloat(112, (float) (CameraHistory.camX() % 1024.0)).putFloat(116, (float) (CameraHistory.camY() % 1024.0))
-                .putFloat(120, (float) (CameraHistory.camZ() % 1024.0));
+                .putFloat(120, (float) (CameraHistory.camZ() % 1024.0)).putFloat(124, translucent ? 1.0f : 0.0f);
 
         pipeline.trace(cmd, set, c, scene.width(), scene.height());
 

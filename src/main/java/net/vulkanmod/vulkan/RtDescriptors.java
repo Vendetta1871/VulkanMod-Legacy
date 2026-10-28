@@ -17,13 +17,14 @@ import static org.lwjgl.vulkan.VK10.*;
  * 0 TLAS, 1 storage image (output or scene color), 2 per-instance vertex addresses,
  * 3 block atlas, 4 scene depth, 5 storage image (opaque-only scene copy),
  * 6-8 block lights (list, cell grid, cell indices, see RtLights),
- * 9-14 storage images of the lighting pass (history read/write, aux, normals, GI read/write).
+ * 9-15 storage images of the lighting pass (history read/write, aux, normals, GI read/write, aux2),
+ * 16 material atlas (LabPBR specular, see RtMaterials).
  * Bindings a pass does not use stay unwritten.
  */
 final class RtDescriptors {
 
-    static final int PASSES = 3, SLOTS = 8;
-    static final int PASS_DEBUG = 0, PASS_LIGHTING = 1, PASS_REFLECTIONS = 2;
+    static final int PASSES = 4, SLOTS = 8;
+    static final int PASS_DEBUG = 0, PASS_LIGHTING = 1, PASS_REFLECTIONS = 2, PASS_REFLECTIONS_OPAQUE = 3;
 
     private static long layout, pool;
     private static final long[][] sets = new long[PASSES][SLOTS];
@@ -55,6 +56,8 @@ final class RtDescriptors {
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, hits},
         };
         try (MemoryStack stack = stackPush()) {
             LongBuffer p = stack.mallocLong(1);
@@ -88,13 +91,13 @@ final class RtDescriptors {
         return write(pass, storageView, depthView, opaqueView, null);
     }
 
-    /** As {@link #write(int, long, long, long)}, plus the lighting pass's lights and images 9-14. */
+    /** As {@link #write(int, long, long, long)}, plus the lighting pass's lights and images 9-15. */
     static long write(int pass, long storageView, long depthView, long opaqueView, long[] lightingViews) {
         if (layout == 0L) create();
         long set = sets[pass][Drawer.getCurrentFrame() % SLOTS];
         VulkanImage atlas = net.vulkanmod.render.TextureBridge.getAtlasImage();
         try (MemoryStack stack = stackPush()) {
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(15, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(17, stack);
             int n = 0;
 
             VkWriteDescriptorSetAccelerationStructureKHR as = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
@@ -112,6 +115,10 @@ final class RtDescriptors {
             if (atlas != null) {
                 n = image(writes, n, set, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
                         atlas.getTextureImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
+                VulkanImage materials = net.vulkanmod.vulkan.rt.RtMaterials.image();
+                n = image(writes, n, set, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
+                        (materials != null ? materials : atlas).getTextureImageView(),
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
             }
             n = image(writes, n, set, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
                     depthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);

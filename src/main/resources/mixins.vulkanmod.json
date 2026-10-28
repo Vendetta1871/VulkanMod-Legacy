@@ -32,6 +32,7 @@
     "render.EntityRendererAccessor",
     "render.GuiScreenM",
     "render.GuiScreenAccessor",
+    "render.TextureMapAccessor",
     "render.GuiMainMenuM",
     "render.GuiVideoSettingsM",
     "render.GuiVideoSettingsAccessor",

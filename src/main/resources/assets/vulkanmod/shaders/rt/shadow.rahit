@@ -1,0 +1,33 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#define RT_HIT
+#include "common.glsl"
+// Shadow rays: cutout texels below vanilla's alpha threshold let light through; stained
+// glass and ice filter it by their color (each primitive once: NO_DUPLICATE_ANY_HIT), and
+// water is skipped (vanilla already tints what is seen through it). Anything else occludes.
+
+layout(location = 1) rayPayloadInEXT vec4 shadow;
+hitAttributeEXT vec2 bary;
+
+void main() {
+    ChunkVertex a, b, c;
+    fetchTriangle(a, b, c);
+    vec3 w = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    vec4 tex = textureLod(blockAtlas, a.uv * w.x + b.uv * w.y + c.uv * w.z, 0.0);
+    if (tex.a < 0.1) {
+        ignoreIntersectionEXT;
+    }
+    if ((gl_InstanceCustomIndexEXT & INSTANCE_TRANSLUCENT) != 0) {
+        vec4 tint = unpackUnorm4x8(a.color) * w.x + unpackUnorm4x8(b.color) * w.y + unpackUnorm4x8(c.color) * w.z;
+        if (tint.r + tint.g + tint.b < 2.95) {
+            ignoreIntersectionEXT;   // water
+        }
+        // Light through colored glass takes its hue (normalized: glass colors light more than
+        // it dims it); half per face, as a block has an entry and an exit face.
+        vec3 color = tex.rgb * tint.rgb;
+        color /= max(max(color.r, color.g), max(color.b, 1e-3));
+        shadow.rgb *= mix(vec3(1.0), color, tex.a * 0.5);
+        ignoreIntersectionEXT;
+    }
+}

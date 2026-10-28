@@ -29,6 +29,8 @@ public class VulkanModMod {
     public void preInit(FMLPreInitializationEvent event) {
         Initializer.init();
         LOGGER.info("== VulkanMod {} on Cleanroom ==", VERSION);
+        // RT material atlas follows the block atlas across resource reloads.
+        MinecraftForge.EVENT_BUS.register(net.vulkanmod.vulkan.rt.RtMaterials.class);
 
         if (AutoTest.ENABLED) {
             MinecraftForge.EVENT_BUS.register(AutoTest.class);
