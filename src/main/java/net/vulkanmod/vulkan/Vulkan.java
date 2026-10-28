@@ -152,6 +152,11 @@ public class Vulkan {
     public static long window;
 
     private static VkInstance instance;
+    /** Extensions enabled at instance and device creation (NRD's NRI wrapper needs them). */
+    private static java.util.List<String> enabledInstanceExtensions = java.util.List.of(), enabledDeviceExtensions = java.util.List.of();
+
+    public static java.util.List<String> enabledInstanceExtensions() { return enabledInstanceExtensions; }
+    public static java.util.List<String> enabledDeviceExtensions() { return enabledDeviceExtensions; }
     private static long debugMessenger;
     private static long surface;
 
@@ -425,7 +430,12 @@ public class Vulkan {
             createInfo.sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
             createInfo.pApplicationInfo(appInfo);
             // enabledExtensionCount is implicitly set when you call ppEnabledExtensionNames
-            createInfo.ppEnabledExtensionNames(getRequiredExtensions());
+            PointerBuffer instanceExtensions = getRequiredExtensions();
+            enabledInstanceExtensions = new java.util.ArrayList<>();
+            for (int i = instanceExtensions.position(); i < instanceExtensions.limit(); i++) {
+                enabledInstanceExtensions.add(instanceExtensions.getStringUTF8(i));
+            }
+            createInfo.ppEnabledExtensionNames(instanceExtensions);
 
             if(ENABLE_VALIDATION_LAYERS) {
 
@@ -615,6 +625,7 @@ public class Vulkan {
             }
 
             createInfo.ppEnabledExtensionNames(asPointerBuffer(extensions));
+            enabledDeviceExtensions = new java.util.ArrayList<>(extensions);
             // Device layers are deprecated; validation is enabled on the instance.
 
             PointerBuffer pDevice = stack.pointers(VK_NULL_HANDLE);

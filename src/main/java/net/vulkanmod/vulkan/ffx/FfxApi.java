@@ -127,7 +127,7 @@ public final class FfxApi {
     }
 
     /** Copies natives/<resource> out of the jar when present; returns the file path or null. */
-    private static String extractBundled(String resource, String fileName) {
+    public static String extractBundled(String resource, String fileName) {
         if (!"amd64".equals(System.getProperty("os.arch")) && !"x86_64".equals(System.getProperty("os.arch"))) {
             return null;
         }

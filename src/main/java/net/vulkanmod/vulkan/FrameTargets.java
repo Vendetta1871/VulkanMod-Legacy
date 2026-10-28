@@ -126,7 +126,7 @@ public final class FrameTargets {
         display.destroy();
     }
 
-    private static int depthAspect() {
+    static int depthAspect() {
         return depthHasStencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
     }
 

@@ -12,10 +12,13 @@ layout(set = 0, binding = 3, rgba16f) uniform readonly image2D aux;
 layout(set = 0, binding = 4, rgba8) uniform readonly image2D normals;
 layout(set = 0, binding = 5, rgba16f) uniform readonly image2D gi;      // rgb: indirect light, a: distance
 layout(set = 0, binding = 6, rgba8) uniform readonly image2D aux2;     // rgb: sun factor, a: indirect light fade
+layout(set = 0, binding = 7, rgba16f) uniform readonly image2D blockDenoised;   // NRD outputs
+layout(set = 0, binding = 8, rgba16f) uniform readonly image2D giDenoised;
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered
     vec4 params;        // x: block light strength, y: bounce share, z: debug view (1: block, 2: GI), w: GI strength
+    vec4 flags;         // x: NRD outputs replace the own filter
 } pc;
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -48,12 +51,14 @@ void main() {
     vec3 pos = unproject(p, texelFetch(sceneDepth, p, 0).r, vec2(size));
     float dist = length(pos);
     int stride = h.a < 6.0 ? 3 : h.a < 16.0 ? 2 : 1;
+    bool nrd = pc.flags.x > 0.0;
 
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
     vec3 giSum = vec3(0.0);
     float giW = 0.0;
-    for (int dy = -2; dy <= 2; dy++) {
+    // With NRD the own filter is skipped (empty loop).
+    for (int dy = nrd ? 3 : -2; dy <= 2; dy++) {
         for (int dx = -2; dx <= 2; dx++) {
             ivec2 q = p + ivec2(dx, dy) * stride;
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size))) continue;
@@ -80,6 +85,10 @@ void main() {
     }
     vec3 rt = wsum > 0.0 ? sum / wsum : h.rgb;
     vec3 indirect = giW > 0.0 ? giSum / giW : imageLoad(gi, p).rgb;
+    if (nrd) {
+        rt = max(imageLoad(blockDenoised, p).rgb, vec3(0.0));
+        indirect = max(imageLoad(giDenoised, p).rgb, vec3(0.0));
+    }
 
     vec3 sunFactor = a2.rgb;
     float giFade = a2.a, vanillaBlock = a.y, skyTerm = a.z, fade = a.w;

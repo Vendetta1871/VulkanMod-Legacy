@@ -29,6 +29,10 @@ layout(set = 0, binding = 14, rgba16f) uniform writeonly image2D giCur;      // 
 layout(set = 0, binding = 15, rgba8) uniform writeonly image2D aux2;         // rgb: sun factor, a: indirect light fade
 layout(set = 0, binding = 17, rgba32f) uniform readonly image2D reservoirPrev;
 layout(set = 0, binding = 18, rgba32f) uniform writeonly image2D reservoirCur; // x: light index (bits), y: W, z: M
+// NRD inputs (this frame's samples, not accumulated): rgb radiance, a: hit distance.
+layout(set = 0, binding = 19, rgba16f) uniform writeonly image2D blockRaw;
+layout(set = 0, binding = 20, rgba16f) uniform writeonly image2D giRaw;
+layout(set = 0, binding = 21, r32f) uniform writeonly image2D viewZ;
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
@@ -38,7 +42,8 @@ layout(push_constant) uniform Constants {
     vec4 cam;           // xyz: camera - light origin, w: light count
     vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
     vec4 sky;           // rgb: sky radiance (luminance 1), w: indirect light range (blocks, 0: off)
-    vec4 restir;        // x: 1 when the previous reservoirs' light indices are still valid
+    vec4 restir;        // x: 1 when the previous reservoirs' light indices are still valid, y: NRD denoises
+    vec4 viewRowZ;      // camera-relative position -> view-space z (third row of the view matrix)
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -157,7 +162,10 @@ void mergeReservoir(inout Reservoir r, ivec2 q, vec3 pos, vec3 n) {
 
 // Block light at a surface: ReSTIR picks one emitter, a shadow ray to a random point in its
 // block (soft shadows over the accumulated frames, colored through glass) checks it.
+float lightDistance;   // to the chosen emitter (NRD hit distance)
+
 vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
+    lightDistance = 0.0;
     Reservoir r = Reservoir(-1, 0.0, 0.0, 0.0);
     if (pc.cam.w > 0.0) {
         vec3 q = pos + pc.cam.xyz;
@@ -201,12 +209,16 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
     dir /= max(len, 1e-4);
     float tMax = blockEntry(origin, dir, center) - 0.01;
     vec3 vis = tMax > 0.05 ? traceShadow(origin, dir, tMax) : vec3(1.0);
+    lightDistance = len;
     return vis * (r.target * W);
 }
 
 // One cosine-weighted bounce: the hit's albedo times its vanilla light and face shading;
 // a miss sees the sky, scaled by how much sky this pixel's lightmap says it sees.
+float giHitDistance;   // of the last indirect ray (NRD hit distance)
+
 vec3 indirect(vec3 pos, vec3 n, float skyLight) {
+    giHitDistance = 128.0;
     vec3 t1 = normalize(abs(n.y) < 0.9 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
     vec3 t2 = cross(n, t1);
     float phi = 6.2831853 * rand();
@@ -217,6 +229,7 @@ vec3 indirect(vec3 pos, vec3 n, float skyLight) {
     payload.t = -1.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, pos + n * 0.02, 0.0, dir, 128.0, 0);
     if (payload.t < 0.0) return pc.sky.rgb * pc.camDelta.w * brightness(skyLight);
+    giHitDistance = payload.t;
     vec3 hn = payload.normal;
     float face = abs(hn.y) > 0.5 ? (hn.y > 0.0 ? 1.0 : 0.5) : (abs(hn.z) > 0.5 ? 0.8 : 0.6);
     float light = max(brightness(payload.skyLight) * pc.camDelta.w, brightness(payload.blockLight));
@@ -233,6 +246,11 @@ void main() {
         imageStore(historyCur, p, vec4(0.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
+        if (pc.restir.y > 0.0) {
+            imageStore(blockRaw, p, vec4(0.0));
+            imageStore(giRaw, p, vec4(0.0));
+            imageStore(viewZ, p, vec4(-1e6));   // past NRD's denoising range
+        }
         return;
     }
 
@@ -251,6 +269,11 @@ void main() {
         imageStore(historyCur, p, vec4(0.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
+        if (pc.restir.y > 0.0) {
+            imageStore(blockRaw, p, vec4(0.0));
+            imageStore(giRaw, p, vec4(0.0));
+            imageStore(viewZ, p, vec4(-1e6));   // past NRD's denoising range
+        }
         return;
     }
     vec3 n = c * inversesqrt(len2);
@@ -293,6 +316,11 @@ void main() {
         imageStore(historyCur, p, vec4(0.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0, 0.0, 0.0, distance));
+        if (pc.restir.y > 0.0) {
+            imageStore(blockRaw, p, vec4(0.0));
+            imageStore(giRaw, p, vec4(0.0));
+            imageStore(viewZ, p, vec4(-1e6));   // past NRD's denoising range
+        }
         return;
     }
     float skyLight = payload.skyLight, blockLevel = payload.blockLight;
@@ -312,6 +340,7 @@ void main() {
         }
     }
     vec3 rt = vec3(0.0);
+    lightDistance = 0.0;
     if (fade > 0.0) {
         rt = min(blockLight(pos, n, p, prevPixel, reuse), vec3(1.5));
     } else {
@@ -361,10 +390,19 @@ void main() {
 
     // Indirect light on a checkerboard alternating per frame (half the rays); the other
     // pixels keep their reprojected history unless they have none.
+    // With NRD every pixel traces (NRD wants a full-resolution signal).
     vec3 giNew = vec3(0.0);
+    vec3 giSample = vec3(0.0);
+    giHitDistance = 0.0;
     if (giFade > 0.0) {
-        bool trace = frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
-        giNew = trace ? mix(giHist, indirect(pos, n, skyLight), 1.0 / max(frames * 0.5, 1.0)) : giHist;
+        bool trace = pc.restir.y > 0.0 || frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
+        if (trace) giSample = indirect(pos, n, skyLight);
+        giNew = trace ? mix(giHist, giSample, 1.0 / max(frames * 0.5, 1.0)) : giHist;
+    }
+    if (pc.restir.y > 0.0) {
+        imageStore(blockRaw, p, vec4(rt, lightDistance));
+        imageStore(giRaw, p, vec4(giSample, giHitDistance));
+        imageStore(viewZ, p, vec4(dot(pc.viewRowZ.xyz, pos) + pc.viewRowZ.w));
     }
     imageStore(giCur, p, vec4(giNew, distance));
     imageStore(aux2, p, vec4(sunFactor, giFade));

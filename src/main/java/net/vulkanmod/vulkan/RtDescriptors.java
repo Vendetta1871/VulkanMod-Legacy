@@ -18,7 +18,8 @@ import static org.lwjgl.vulkan.VK10.*;
  * 3 block atlas, 4 scene depth, 5 storage image (opaque-only scene copy),
  * 6-8 block lights (list, cell grid, cell indices, see RtLights),
  * 9-15 storage images of the lighting pass (history read/write, aux, normals, GI read/write, aux2),
- * 16 material atlas (LabPBR specular, see RtMaterials), 17-18 ReSTIR reservoirs (read, write).
+ * 16 material atlas (LabPBR specular, see RtMaterials), 17-18 ReSTIR reservoirs (read, write),
+ * 19-21 NRD inputs (block light, indirect light, view z).
  * Bindings a pass does not use stay unwritten.
  */
 final class RtDescriptors {
@@ -60,6 +61,9 @@ final class RtDescriptors {
                 {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, hits},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
         };
         try (MemoryStack stack = stackPush()) {
             LongBuffer p = stack.mallocLong(1);
@@ -99,7 +103,7 @@ final class RtDescriptors {
         long set = sets[pass][Drawer.getCurrentFrame() % SLOTS];
         VulkanImage atlas = net.vulkanmod.render.TextureBridge.getAtlasImage();
         try (MemoryStack stack = stackPush()) {
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(19, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(22, stack);
             int n = 0;
 
             VkWriteDescriptorSetAccelerationStructureKHR as = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)

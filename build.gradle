@@ -113,13 +113,15 @@ processResources {
     filesMatching('mcmod.info') {
         expand version: modVersion
     }
-    // FSR 3 native libraries (F5): -PffxNatives=<dir> with linux-x64/libamd_fidelityfx_vk.so
+    // FSR 3 and NRD native libraries (F5): -PffxNatives=<dir> with linux-x64/libamd_fidelityfx_vk.so
     // and/or windows-x64/amd_fidelityfx_vk.dll. Without it the jar falls back to FSR 1.
     def ffxNatives = project.findProperty('ffxNatives')
     if (ffxNatives) {
         inputs.dir ffxNatives
         from(ffxNatives) {
-            include 'linux-x64/libamd_fidelityfx_vk.so', 'windows-x64/amd_fidelityfx_vk.dll'
+            include 'linux-x64/libamd_fidelityfx_vk.so', 'windows-x64/amd_fidelityfx_vk.dll',
+                    // NRD (native/nrd-linux) and the license it must ship with
+                    'linux-x64/libvulkanmod_nrd.so', 'linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt'
             into 'natives'
         }
     }

@@ -22,6 +22,9 @@ public final class CameraHistory {
     private static final Matrix4f prevViewProj = new Matrix4f();
     /** Inverse of the main camera's model-view: view space -> camera-relative world axes. */
     private static final Matrix4f viewInverse = new Matrix4f();
+    /** The main camera's model-view and unjittered (Vulkan-depth) projection, with last frame's. */
+    private static final Matrix4f view = new Matrix4f(), prevView = new Matrix4f();
+    private static final Matrix4f proj = new Matrix4f(), prevProj = new Matrix4f();
     private static double camX, camY, camZ;
     private static double prevCamX, prevCamY, prevCamZ;
     private static boolean valid, prevValid;
@@ -37,6 +40,8 @@ public final class CameraHistory {
     public static void beginFrame() {
         if (valid) {
             prevViewProj.set(viewProj);
+            prevView.set(view);
+            prevProj.set(proj);
             prevCamX = camX;
             prevCamY = camY;
             prevCamZ = camZ;
@@ -64,6 +69,8 @@ public final class CameraHistory {
         if (valid) return;
         projRemapped.mul(modelView, viewProj);
         modelView.invert(viewInverse);
+        view.set(modelView);
+        proj.set(projRemapped);
         // GL perspective: m22 = -(f+n)/(f-n), m32 = -2fn/(f-n), m11 = cot(fovY/2).
         near = glProjection.m32() / (glProjection.m22() - 1.0f);
         far = glProjection.m32() / (glProjection.m22() + 1.0f);
@@ -104,6 +111,10 @@ public final class CameraHistory {
     public static Matrix4f viewProj() { return viewProj; }
     public static Matrix4f prevViewProj() { return prevViewProj; }
     public static Matrix4f viewInverse() { return viewInverse; }
+    public static Matrix4f view() { return view; }
+    public static Matrix4f prevView() { return prevView; }
+    public static Matrix4f proj() { return proj; }
+    public static Matrix4f prevProj() { return prevProj; }
     /** The main camera of this frame was captured (see captureMain). */
     public static boolean valid() { return valid; }
     public static double camX() { return camX; }
