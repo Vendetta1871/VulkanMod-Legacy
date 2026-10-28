@@ -486,10 +486,15 @@ public final class RtScene {
 
     /** vkCmdUpdateBuffer in 64 KiB pieces (its per-call limit). */
     static void updateBuffer(VkCommandBuffer cmd, long buffer, ByteBuffer src, int bytes) {
+        updateBuffer(cmd, buffer, 0, src, bytes);
+    }
+
+    /** vkCmdUpdateBuffer in 64 KiB pieces, writing {@code bytes} of {@code src} at {@code dstOffset}. */
+    static void updateBuffer(VkCommandBuffer cmd, long buffer, long dstOffset, ByteBuffer src, int bytes) {
         for (int off = 0; off < bytes; off += 65536) {
             int len = Math.min(65536, bytes - off);
             ByteBuffer slice = org.lwjgl.system.MemoryUtil.memSlice(src, off, len);
-            vkCmdUpdateBuffer(cmd, buffer, off, slice);
+            vkCmdUpdateBuffer(cmd, buffer, dstOffset + off, slice);
         }
     }
 
@@ -559,16 +564,17 @@ public final class RtScene {
                 n++;
             }
             if (entities) {
-                // Entity vertices are camera-relative already; identity transform. Primary rays
-                // skip this mask (their hit shaders read chunk vertices only).
+                // Entity vertices are camera-relative already; identity transform.
                 int o = n * INSTANCE_BYTES;
                 m.putFloat(o, 1f).putFloat(o + 4, 0f).putFloat(o + 8, 0f).putFloat(o + 12, 0f);
                 m.putFloat(o + 16, 0f).putFloat(o + 20, 1f).putFloat(o + 24, 0f).putFloat(o + 28, 0f);
                 m.putFloat(o + 32, 0f).putFloat(o + 36, 0f).putFloat(o + 40, 1f).putFloat(o + 44, 0f);
-                m.putInt(o + 48, MASK_ENTITY << 24);
+                // Custom index: entity flag and the quad count (the hit shader finds the
+                // positions after the per-quad data).
+                m.putInt(o + 48, 0x400000 | (RtEntities.quadCount() & 0x3FFFFF) | MASK_ENTITY << 24);
                 m.putInt(o + 52, VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24);
                 m.putLong(o + 56, RtEntities.blasAddress());
-                dataCpu.putLong(n * 8, 0L);
+                dataCpu.putLong(n * 8, RtEntities.dataAddress());
                 n++;
             }
             tlasInstanceCount = n;

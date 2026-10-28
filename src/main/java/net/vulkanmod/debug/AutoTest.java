@@ -219,8 +219,9 @@ public class AutoTest {
 
     /**
      * {@code VULKANMOD_AUTOTEST_MOBSHADOW=1}: a stone platform high in the air under a low
-     * morning sun with a zombie and a cow (no AI) on it; captures "mobShadow". Checks the
-     * ray-traced entity shadows (and the round drop shadows they replace).
+     * morning sun with a zombie and a cow (no AI) on a polished quartz floor; captures
+     * "mobShadow". Checks ray-traced entity shadows (replacing the round drop shadows) and
+     * entity reflections in the floor.
      */
     private static final boolean MOBSHADOW_MODE = System.getenv("VULKANMOD_AUTOTEST_MOBSHADOW") != null;
     private static int mobShadowTicks;
@@ -236,7 +237,8 @@ public class AutoTest {
                 BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
                 for (int dx = 0; dx <= 16; dx++)
                     for (int dz = 0; dz <= 16; dz++)
-                        world.setBlockState(c.setPos(bx + dx, by, bz + dz), Blocks.STONE.getDefaultState());
+                        // Polished floor: mobs reflect in it (RT entity hits) besides casting shadows.
+                        world.setBlockState(c.setPos(bx + dx, by, bz + dz), Blocks.QUARTZ_BLOCK.getDefaultState());
                 net.minecraft.entity.monster.EntityZombie zombie = new net.minecraft.entity.monster.EntityZombie(world);
                 zombie.setLocationAndAngles(bx + 8.5, by + 1, bz + 7.5, 90.0f, 0.0f);
                 zombie.setNoAI(true);
@@ -295,7 +297,12 @@ public class AutoTest {
             serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 12", mc.player.getName(), bx + 10.5, by + 1.0, bz + 21.5));
         } else if (t == 120) {
             capture(mc, "rtWater");
-        } else if (t >= 130) {
+        } else if (t == 125) {
+            // At the pool's edge looking down: the player's reflection and shadow.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 200 55", mc.player.getName(), bx + 10.5, by + 0.0, bz + 17.6));
+        } else if (t == 190) {
+            capture(mc, "rtWaterClose");
+        } else if (t >= 200) {
             Initializer.LOGGER.info("[autotest] done, shutting down");
             mc.shutdown();
         }

@@ -66,6 +66,25 @@ public abstract class RenderGlobalM {
         }
     }
 
+    /**
+     * In first person vanilla never renders the player; with RT its model still goes into the
+     * RT scene (not on screen), so it casts shadows.
+     */
+    private static void renderFirstPersonPlayerForRt(net.minecraft.entity.Entity viewer, float partialTicks) {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
+        if (!net.vulkanmod.vulkan.rt.RtScene.enabled() || mc.gameSettings.thirdPersonView != 0
+                || !(viewer instanceof net.minecraft.entity.player.EntityPlayer player) || player.isPlayerSleeping()
+                || player.isSpectator()) {
+            return;
+        }
+        net.vulkanmod.render.EntityRenderer.setRtOnly(true);
+        try {
+            mc.getRenderManager().renderEntityStatic(player, partialTicks, false);
+        } finally {
+            net.vulkanmod.render.EntityRenderer.setRtOnly(false);
+        }
+    }
+
     @Inject(method = "renderEntities", at = @At("HEAD"))
     private void vulkanmod$renderEntitiesBegin(net.minecraft.entity.Entity renderViewEntity,
                                                net.minecraft.client.renderer.culling.ICamera camera, float partialTicks,
@@ -85,6 +104,7 @@ public abstract class RenderGlobalM {
                                              CallbackInfo ci) {
         FrameProfiler.entitiesEnd();
         if (Initializer.isVulkanActive()) {
+            renderFirstPersonPlayerForRt(renderViewEntity, partialTicks);
             net.vulkanmod.render.EntityRenderer.setEntityPass(false);
         }
     }

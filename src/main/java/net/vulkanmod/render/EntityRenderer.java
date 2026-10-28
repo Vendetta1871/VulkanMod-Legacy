@@ -113,6 +113,9 @@ public class EntityRenderer {
 
     /** GL texture id -> uploaded Vulkan image. */
     private static final HashMap<Integer, VulkanImage> textureCache = new HashMap<>();
+    /** CPU copies of the cached entity textures (RT face colors); dropped with their images. */
+    private static final java.util.Map<VulkanImage, net.vulkanmod.vulkan.rt.RtEntities.Texture> cpuPixels =
+            new java.util.WeakHashMap<>();
 
     /** A/B knob: VULKANMOD_NO_ENTBATCH=1 falls back to the old per-quad entity draw. */
     public static final boolean BATCH_PARTS = System.getenv("VULKANMOD_NO_ENTBATCH") == null;
@@ -159,6 +162,13 @@ public class EntityRenderer {
         flatPipeline = new Pipeline(FLAT_FORMAT, "entity_flat");
         particlePipeline = new Pipeline(PARTICLE_FORMAT, "entity_particle");
         blockPipeline = new Pipeline(BLOCK_FORMAT, "terrain", "terrain#entity");
+    }
+
+    /** True while an entity is rendered for the RT scene only (the first-person player). */
+    private static boolean rtOnly;
+
+    public static void setRtOnly(boolean value) {
+        rtOnly = value;
     }
 
     public static void setEntityPass(boolean value) {
@@ -480,18 +490,6 @@ public class EntityRenderer {
         VRenderSystem.updateModelViewMatrix();
         VRenderSystem.calculateMVP();
 
-        // T5: world-pass entity models also go into the RT scene; with RT on, the round drop
-        // shadows within the RT range give way to traced ones.
-        if (net.vulkanmod.vulkan.rt.RtScene.enabled() && !handPass && !GuiRenderer.isGuiPass()
-                && net.vulkanmod.vulkan.FrameTargets.phase() == net.vulkanmod.vulkan.FrameTargets.Phase.SCENE) {
-            if (pipeline == shadowPipeline && inRtRange(data, format)) {
-                net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
-                return;
-            }
-            if (pipeline == entityPipeline || pipeline == itemPipeline || pipeline == blockPipeline) {
-                net.vulkanmod.vulkan.rt.RtEntities.add(data, vertexCount, format.getSize(), VRenderSystem.getModelViewMatrix4f());
-            }
-        }
 
         // Depth, cull and colour come straight from the GlStateManager tracking mixins
         // (GlStateManagerDepthM, GlStateManagerBlendM) into VRenderSystem, where the
@@ -531,6 +529,27 @@ public class EntityRenderer {
         }
 
         VRenderSystem.setShaderColor(tint[0], tint[1], tint[2], float4.get(3));
+
+        // T5: world-pass entity models also go into the RT scene; with RT on, the round drop
+        // shadows within the RT range give way to traced ones.
+        if (net.vulkanmod.vulkan.rt.RtScene.enabled() && !handPass && !GuiRenderer.isGuiPass()
+                && net.vulkanmod.vulkan.FrameTargets.phase() == net.vulkanmod.vulkan.FrameTargets.Phase.SCENE) {
+            if (pipeline == shadowPipeline && inRtRange(data, format)) {
+                net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
+                return;
+            }
+            if (pipeline == entityPipeline || pipeline == itemPipeline || pipeline == blockPipeline) {
+                // Raw tint (before the lightmap multiply) and the entity's light, for RT shading.
+                int light = packed >= 0 ? packed : packedLight();
+                net.vulkanmod.vulkan.rt.RtEntities.add(data, vertexCount, format.getSize(), VRenderSystem.getModelViewMatrix4f(),
+                        format == MODEL_FORMAT ? 12 : format == ITEM_FORMAT ? 16 : -1, cpuPixels.get(texture),
+                        float4.get(0), float4.get(1), float4.get(2), light / 65536 / 16, light % 65536 / 16);
+            }
+        }
+        if (rtOnly) {
+            net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
+            return;
+        }
 
         // The Cleanroom hurt/death overlay tints the model red (the fixed-function
         // combiner constant RenderLivingBase sets around the model draw); only the
@@ -843,6 +862,10 @@ public class EntityRenderer {
         // of the translation layer, not the target; the user wants the crisp pixels.
         VulkanImage image = new VulkanImage(1, width, height, 4, false, clamp);
         image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
+        // RT: entity hits are shaded with a color per model face, picked from these pixels.
+        byte[] copy = new byte[width * height * 4];
+        pixels.get(0, copy);
+        cpuPixels.put(image, new net.vulkanmod.vulkan.rt.RtEntities.Texture(width, height, copy));
         MemoryUtil.memFree(pixels);
         return image;
     }

@@ -231,7 +231,7 @@ vec3 indirect(vec3 pos, vec3 n, float skyLight) {
     vec3 dir = normalize(t1 * (cos(phi) * sr) + t2 * (sin(phi) * sr) + n * sqrt(1.0 - r2));
     if (any(isnan(dir)) || any(isnan(pos))) return vec3(0.0);
     payload.t = -1.0;
-    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, pos + n * 0.02, 0.0, dir, 128.0, 0);
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, pos + n * 0.02, 0.0, dir, 128.0, 0);
     if (payload.t < 0.0) return pc.sky.rgb * pc.camDelta.w * brightness(skyLight);
     giHitDistance = payload.t;
     vec3 hn = payload.normal;

@@ -16,6 +16,15 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Chu
     ChunkVertex v[];
 };
 
+// Entity instance data (RtEntities): per quad color (RGBA8) and light (sky | block << 8),
+// then the vertex positions.
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer EntityQuads {
+    uvec2 q[];
+};
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer EntityPositions {
+    vec3 p[];
+};
+
 // Indexed by gl_InstanceID: device address of the section's first vertex in the arena.
 layout(set = 0, binding = 2, scalar) readonly buffer InstanceData {
     uint64_t vertexAddress[];
@@ -41,6 +50,8 @@ struct Payload {
 #define SHADOW_HIT_GROUP 1
 // Custom index bit of translucent sections (water, glass, ice).
 #define INSTANCE_TRANSLUCENT 0x800000
+// Custom index bit of the entity instance; its low 22 bits hold the quad count.
+#define INSTANCE_ENTITY 0x400000
 
 #ifdef RT_HIT
 // Quads are indexed (0,1,2), (0,2,3): the triangle follows from gl_PrimitiveID alone.
