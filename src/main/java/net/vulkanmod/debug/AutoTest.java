@@ -211,7 +211,13 @@ public class AutoTest {
             capture(mc, "torchRoomEarly");
         } else if (t == 160) {
             capture(mc, "torchRoom");
-        } else if (t >= 170) {
+            // Break the torch behind the pillar: its light (and the pillar's shadows) must go.
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server != null) server.addScheduledTask(() -> server.getWorld(0).setBlockToAir(
+                    new BlockPos(bx + 7, by + 1, bz + 3)));
+        } else if (t == 220) {
+            capture(mc, "torchRoomBroken");
+        } else if (t >= 230) {
             Initializer.LOGGER.info("[autotest] done, shutting down");
             mc.shutdown();
         }
