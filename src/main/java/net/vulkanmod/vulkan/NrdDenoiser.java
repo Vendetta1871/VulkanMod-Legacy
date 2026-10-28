@@ -33,7 +33,7 @@ final class NrdDenoiser {
     private static SharedLibrary library;
     private static long fnCreate, fnDestroy, fnDenoise;
     private static boolean loadAttempted, failed;
-    private static int width, height, frameIndex;
+    private static int width, height, queued, frameIndex;
 
     private static final Matrix4f tmp = new Matrix4f();
 
@@ -80,7 +80,8 @@ final class NrdDenoiser {
     /** (Re)creates the denoisers for this render size. False when NRD cannot be used. */
     static boolean ensure(int w, int h) {
         if (!available()) return false;
-        if (w == width && h == height) return true;
+        int frames = Drawer.framesInFlight() + 1;
+        if (w == width && h == height && frames == queued) return true;
         destroy();
         VkDevice device = Vulkan.getDevice();
         List<String> inst = Vulkan.enabledInstanceExtensions();
@@ -111,7 +112,7 @@ final class NrdDenoiser {
                     .putInt(48, Vulkan.findQueueFamilies(device.getPhysicalDevice()).graphicsFamily)
                     .putInt(52, w).putInt(56, h)
                     // Frames in flight plus one: NRD's constants must outlive every queued frame.
-                    .putInt(60, 3)
+                    .putInt(60, frames)
                     .putInt(64, 3);
             int rc = JNI.callPI(MemoryUtil.memAddress(desc), fnCreate);
             if (rc != 0) {
@@ -127,8 +128,9 @@ final class NrdDenoiser {
         }
         width = w;
         height = h;
+        queued = frames;
         frameIndex = 0;
-        Initializer.LOGGER.info("[nrd] RELAX_DIFFUSE x2 at {}x{}", w, h);
+        Initializer.LOGGER.info("[nrd] RELAX_DIFFUSE x2 at {}x{}, {} queued frames", w, h, frames);
         return true;
     }
 
@@ -136,7 +138,16 @@ final class NrdDenoiser {
      * Records both denoisers. {@code images[slot] = {VkImage, VkFormat, layout}} with layout
      * 0 = GENERAL, 1 = SHADER_READ_ONLY_OPTIMAL; they are left in the same layouts.
      */
-    static void denoise(VkCommandBuffer cmd, long[][] images, boolean reset, MemoryStack stack) {
+    /**
+     * The frame index NRD gets on the next {@link #denoise}: with the checkerboarded indirect
+     * light, valid cells are those with {@code ((x + y + index) & 1) == 0} (BLACK mode).
+     */
+    static int nextFrameIndex() {
+        return frameIndex;
+    }
+
+    static void denoise(VkCommandBuffer cmd, long[][] images, boolean reset, boolean giCheckerboard,
+                        MemoryStack stack) {
         ByteBuffer f = stack.calloc(FRAME_SIZE);
         f.putLong(0, cmd.address());
         CameraHistory.proj().get(8, f);
@@ -153,7 +164,8 @@ final class NrdDenoiser {
         prevJitterX = CameraHistory.jitterX();
         prevJitterY = CameraHistory.jitterY();
         f.putFloat(280, 1.0f).putFloat(284, 1.0f);
-        f.putInt(288, frameIndex++).putInt(292, reset ? 1 : 0).putFloat(296, 100000.0f);
+        f.putInt(288, frameIndex++).putInt(292, reset ? 1 : 0).putFloat(296, 100000.0f)
+                .putInt(300, giCheckerboard ? 1 : 0);
         for (int i = 0; i < images.length; i++) {
             int o = IMAGES + i * 16;
             f.putLong(o, images[i][0]).putInt(o + 8, (int) images[i][1]).putInt(o + 12, (int) images[i][2]);

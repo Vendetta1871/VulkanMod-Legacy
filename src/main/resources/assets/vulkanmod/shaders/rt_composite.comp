@@ -54,12 +54,13 @@ void main() {
         return;
     }
 
-    vec4 h = imageLoad(history, p);
+    bool nrd = pc.flags.x > 0.0;
+    // With NRD the own history is a 1x1 placeholder (RtLightingPass): not read.
+    vec4 h = nrd ? vec4(0.0, 0.0, 0.0, 1.0) : imageLoad(history, p);
     vec3 n = imageLoad(normals, p).xyz * 2.0 - 1.0;
     vec3 pos = unproject(p, texelFetch(sceneDepth, p, 0).r, vec2(size));
     float dist = length(pos);
     int stride = h.a < 6.0 ? 3 : h.a < 16.0 ? 2 : 1;
-    bool nrd = pc.flags.x > 0.0;
 
     vec3 sum = vec3(0.0);
     float wsum = 0.0;

@@ -24,7 +24,7 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class RtReflectionPass {
 
-    private static final int PUSH = 128;
+    private static final int PUSH = 144;
     private static RtPipeline pipeline;
     private static final Matrix4f invJittered = new Matrix4f();
     private static final long START = System.nanoTime();
@@ -36,6 +36,8 @@ final class RtReflectionPass {
         float strength = Initializer.CONFIG.effectiveRtReflections();
         int range = Initializer.CONFIG.effectiveRtReflectionDistance();
         if (strength <= 0.0f || range <= 0 || !RtScene.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null) return;
+        // No water, glass or ice in range: every primary ray of the translucent pass would miss.
+        if (translucent && RtScene.translucentInstances() == 0) return;
         if (pipeline == null) {
             pipeline = new RtPipeline(RtDescriptors.layout(), PUSH, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                     "rt/reflections.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
@@ -47,6 +49,12 @@ final class RtReflectionPass {
         boolean opaque = FrameTargets.opaqueTaken();
 
         FrameTargets.sceneDepthToShaderRead(cmd, stack);
+        // The lighting pass wrote the normals from ray-tracing shaders.
+        VkMemoryBarrier2.Buffer mem = VkMemoryBarrier2.calloc(1, stack);
+        mem.get(0).sType$Default()
+                .srcStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).srcAccessMask(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
+                .dstStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).dstAccessMask(VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(mem));
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(opaque ? 2 : 1, stack);
         FrameTargets.imageBarrier(pre.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -61,10 +69,14 @@ final class RtReflectionPass {
         }
         FrameTargets.pipelineBarrier(cmd, pre, stack);
 
+        // R1: the opaque pass skips rough terrain known from the lighting pass's normals.a.
+        long normals = translucent ? 0L : RtLightingPass.normalsCovering(range * 16.0f);
         long set = RtDescriptors.write(translucent ? RtDescriptors.PASS_REFLECTIONS : RtDescriptors.PASS_REFLECTIONS_OPAQUE,
                 scene.colorView(), scene.depthView(),
                 // Binding 5 must be valid even unused: the scene color stands in (same layout).
-                opaque ? FrameTargets.opaqueColor.view : scene.colorView());
+                opaque ? FrameTargets.opaqueColor.view : scene.colorView(),
+                // Binding 12 likewise: without the lighting normals the flag below is 0.
+                normals != 0L ? normals : scene.colorView());
 
         invJittered.identity()
                 .m30(2.0f * CameraHistory.jitterX() / scene.width())
@@ -87,6 +99,7 @@ final class RtReflectionPass {
                 .putFloat(108, sky ? 0.2f + 0.8f * sun[3] : 0.0f);
         c.putFloat(112, (float) (CameraHistory.camX() % 1024.0)).putFloat(116, (float) (CameraHistory.camY() % 1024.0))
                 .putFloat(120, (float) (CameraHistory.camZ() % 1024.0)).putFloat(124, translucent ? 1.0f : 0.0f);
+        c.putFloat(128, normals != 0L ? 1.0f : 0.0f);
 
         pipeline.trace(cmd, set, c, scene.width(), scene.height());
 

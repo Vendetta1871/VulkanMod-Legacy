@@ -13,6 +13,8 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba8) uniform image2D sceneColor;
 layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
 layout(set = 0, binding = 5, rgba8) uniform readonly image2D opaqueColor;
+// The lighting pass's normals; a: roughness of the terrain hit (see lighting.rgen).
+layout(set = 0, binding = 12, rgba8) uniform readonly image2D gbufferNormals;
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
@@ -20,6 +22,7 @@ layout(push_constant) uniform Constants {
     vec4 sky;           // rgb: sky color, w: time (seconds)
     vec4 params;        // x: strength, y: opaque copy bound, z: RT range (blocks), w: sky brightness factor
     vec4 cam;           // xyz: camera position modulo 1024 (wave phase), w: 1 translucent surfaces, 0 opaque
+    vec4 flags;         // x: 1 when gbufferNormals covers this frame's reflection range
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -83,6 +86,8 @@ void main() {
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, dist + slack, 0);
         if (payload.t < 0.0) return;
     } else {
+        // Rough terrain (known from the lighting pass) reflects nothing: no primary ray.
+        if (pc.flags.x > 0.5 && imageLoad(gbufferNormals, p).a > 0.5) return;
         // The opaque surface of the depth sample; only smooth materials reflect visibly.
         // Entities too: dropped blocks carry their atlas material (an iron block on the ground).
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);

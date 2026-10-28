@@ -44,7 +44,7 @@ struct VmNrdFrame {
     uint32_t frameIndex;
     uint32_t reset;
     float denoisingRange;
-    uint32_t pad;
+    uint32_t flags; // bit 0: the indirect light is checkerboarded (BLACK), packed to the left half
     VmNrdImage mv, normalRoughness, viewZ, blockIn, blockOut, giIn, giOut;
 };
 static_assert(offsetof(VmNrdFrame, viewToClip) == 8, "layout");
@@ -158,11 +158,13 @@ VM_EXPORT int vmnrd_denoise(const VmNrdFrame* f) {
     common.accumulationMode = f->reset ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
     common.denoisingRange = f->denoisingRange;
     common.isMotionVectorInWorldSpace = false;
-    nrd::RelaxSettings relax = {};
-    for (nrd::Integration* integration : g_nrd) {
-        integration->NewFrame();
-        if (integration->SetCommonSettings(common) != nrd::Result::SUCCESS) return 2;
-        integration->SetDenoiserSettings(DENOISER, &relax);
+    nrd::RelaxSettings relax[2] = {};
+    // Indirect light may trace half the pixels per frame (lighting.rgen).
+    if (f->flags & 1u) relax[1].checkerboardMode = nrd::CheckerboardMode::BLACK;
+    for (int i = 0; i < 2; i++) {
+        g_nrd[i]->NewFrame();
+        if (g_nrd[i]->SetCommonSettings(common) != nrd::Result::SUCCESS) return 2;
+        g_nrd[i]->SetDenoiserSettings(DENOISER, &relax[i]);
     }
 
     nri::CommandBufferVKDesc cmd = {};

@@ -36,6 +36,7 @@ public final class RtLights {
     private static int gridMask, lightCount, lastHash;
     private static int originX, originY, originZ;
     private static final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+    private static final float[] LIGHT_SCRATCH = new float[MAX_LIGHTS * 8];
 
     private RtLights() {}
 
@@ -209,7 +210,8 @@ public final class RtLights {
         sorted.sort((a, b) -> Integer.compare(a[0], b[0]));
 
         // Per light: center (relative to the origin), level, then rgb color.
-        float[] lx = new float[MAX_LIGHTS * 8];
+        // Reused: this runs after every BLAS batch, usually to find nothing changed.
+        float[] lx = LIGHT_SCRATCH;
         int n = 0;
         outer:
         for (int[] e : sorted) {

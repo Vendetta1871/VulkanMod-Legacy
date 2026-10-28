@@ -28,6 +28,7 @@ public final class MotionVectorPass {
     private static ComputeSets sets;
     private static ComputePipeline pipeline;
     private static int boundGeneration = -1;
+    private static long recordedFrame = -1;
 
     private static final Matrix4f jitteredInverse = new Matrix4f();
     private static final Matrix4f toPrev = new Matrix4f();
@@ -66,6 +67,12 @@ public final class MotionVectorPass {
         RenderTarget scene = FrameTargets.scene;
 
         FrameTargets.sceneDepthToShaderRead(cmd, stack);
+        // Once per frame: NRD (RT lighting) and FSR 3 both read them. The RT pass records
+        // first, before translucent geometry; camera motion of the surface behind water
+        // differs by parallax only, and FSR marks translucent pixels reactive anyway.
+        long frame = FrameTargets.recordingId();
+        if (frame == recordedFrame) return;
+        recordedFrame = frame;
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(1, stack);
         // Previous readers of the vectors: the upscaler's compute or the debug blit.
         FrameTargets.imageBarrier(pre.get(0), motionVectors.image, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -122,5 +129,6 @@ public final class MotionVectorPass {
         if (pipeline != null) { pipeline.cleanUp(); pipeline = null; }
         if (sets != null) { sets.destroy(); sets = null; }
         boundGeneration = -1;
+        recordedFrame = -1;
     }
 }

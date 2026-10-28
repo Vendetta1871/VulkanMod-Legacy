@@ -53,7 +53,7 @@ layout(push_constant) uniform Constants {
     vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
     vec4 sky;           // rgb: sky radiance (luminance 1), w: indirect light range (blocks, 0: off)
     vec4 restir;        // x: 1 when the previous reservoirs' light indices are still valid, y: NRD denoises,
-                        // z: dynamic light count
+                        // z: dynamic light count, w: NRD frame index parity (indirect light checkerboard)
     vec4 viewRowZ;      // camera-relative position -> view-space z (third row of the view matrix)
 } pc;
 
@@ -63,6 +63,14 @@ layout(location = 1) rayPayloadEXT vec4 shadow;
 const int CELL = 8;
 const int MAX_CANDIDATES = 8;
 const float MAX_FRAMES = 24.0;
+
+// With NRD the indirect light traces half the pixels per frame (NRD checkerboard, BLACK
+// mode): valid cells alternate with NRD's frame index and are packed to the left half.
+bool giCell(ivec2 p) { return ((p.x + p.y + int(pc.restir.w)) & 1) == 0; }
+
+void storeGiRaw(ivec2 p, vec4 v) {
+    if (giCell(p)) imageStore(giRaw, ivec2(p.x >> 1, p.y), v);
+}
 
 // Vanilla's lightmap curve for a 0..1 light level.
 float brightness(float l) { return l / (4.0 - 3.0 * l); }
@@ -280,12 +288,12 @@ void main() {
     if (d >= 0.99999) {   // sky, clouds past the far plane
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(aux2, p, vec4(1.0, 1.0, 1.0, 0.0));
-        imageStore(historyCur, p, vec4(0.0));
+        if (pc.restir.y <= 0.0) imageStore(historyCur, p, vec4(0.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
         if (pc.restir.y > 0.0) {
             imageStore(blockRaw, p, vec4(0.0));
-            imageStore(giRaw, p, vec4(0.0));
+            storeGiRaw(p, vec4(0.0));
             imageStore(viewZ, p, vec4(-1e6));   // past NRD's denoising range
         }
         return;
@@ -304,12 +312,12 @@ void main() {
     if ((fade <= 0.0 && giFade <= 0.0) || !(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) {
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(aux2, p, vec4(1.0, 1.0, 1.0, 0.0));
-        imageStore(historyCur, p, vec4(0.0));
+        if (pc.restir.y <= 0.0) imageStore(historyCur, p, vec4(0.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
         if (pc.restir.y > 0.0) {
             imageStore(blockRaw, p, vec4(0.0));
-            imageStore(giRaw, p, vec4(0.0));
+            storeGiRaw(p, vec4(0.0));
             imageStore(viewZ, p, vec4(-1e6));   // past NRD's denoising range
         }
         return;
@@ -349,18 +357,20 @@ void main() {
         vec3 hue = through > 1e-3 ? lit / through : vec3(1.0);
         sunFactor = (1.0 - pc.light.w * fade * (1.0 - through)) * mix(vec3(1.0), hue, fade);
     }
-    imageStore(normals, p, vec4(n * 0.5 + 0.5, 1.0));
+    // a: linear roughness of a terrain hit (NRD's IN_NORMAL_ROUGHNESS; the opaque reflection
+    // pass skips pixels with a > 0.5); 0 without a hit (entities: reflections still trace).
+    imageStore(normals, p, vec4(n * 0.5 + 0.5, hit ? 1.0 - payload.material.r : 0.0));
     float distance = length(pos);
 
     if (!hit) {
         imageStore(aux, p, vec4(0.0, 0.0, 0.0, 0.0));
         imageStore(aux2, p, vec4(sunFactor, 0.0));
-        imageStore(historyCur, p, vec4(0.0));
+        if (pc.restir.y <= 0.0) imageStore(historyCur, p, vec4(0.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0, 0.0, 0.0, distance));
         if (pc.restir.y > 0.0) {
             imageStore(blockRaw, p, vec4(0.0));
-            imageStore(giRaw, p, vec4(0.0));
+            storeGiRaw(p, vec4(0.0));
             imageStore(viewZ, p, vec4(-1e6));   // past NRD's denoising range
         }
         return;
@@ -392,11 +402,12 @@ void main() {
     }
 
     // Temporal accumulation: bilinear reprojection, taps whose stored distance disagrees
-    // with this surface (disocclusion) are dropped.
+    // with this surface (disocclusion) are dropped. NRD keeps its own history instead.
+    bool nrd = pc.restir.y > 0.0;
     vec3 prev = vec3(0.0);
     float frames = 0.0;
     vec3 giHist = vec3(0.0);
-    if (pc.params.z > 0.0) {
+    if (pc.params.z > 0.0 && !nrd) {
         vec4 clip = pc.prevViewProj * vec4(pos, 1.0);
         if (clip.w > 0.0) {
             vec2 uv = clip.xy / clip.w * vec2(0.5, -0.5) + 0.5;
@@ -430,22 +441,22 @@ void main() {
         }
     }
     frames = min(frames + 1.0, MAX_FRAMES);
-    imageStore(historyCur, p, vec4(mix(prev, rt, 1.0 / frames), frames));
+    // With NRD the own history images are 1x1 placeholders: never written.
+    if (!nrd) imageStore(historyCur, p, vec4(mix(prev, rt, 1.0 / frames), frames));
 
-    // Indirect light on a checkerboard alternating per frame (half the rays); the other
-    // pixels keep their reprojected history unless they have none.
-    // With NRD every pixel traces (NRD wants a full-resolution signal).
+    // Indirect light on a checkerboard alternating per frame (half the rays); without NRD
+    // the other pixels keep their reprojected history unless they have none.
     vec3 giNew = vec3(0.0);
     vec3 giSample = vec3(0.0);
     giHitDistance = 0.0;
     if (giFade > 0.0) {
-        bool trace = pc.restir.y > 0.0 || frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
+        bool trace = nrd ? giCell(p) : frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
         if (trace) giSample = indirect(pos, n, skyLight);
         giNew = trace ? mix(giHist, giSample, 1.0 / max(frames * 0.5, 1.0)) : giHist;
     }
-    if (pc.restir.y > 0.0) {
+    if (nrd) {
         imageStore(blockRaw, p, vec4(rt, lightDistance));
-        imageStore(giRaw, p, vec4(giSample, giHitDistance));
+        storeGiRaw(p, vec4(giSample, giHitDistance));
         imageStore(viewZ, p, vec4(dot(pc.viewRowZ.xyz, pos) + pc.viewRowZ.w));
     }
     imageStore(giCur, p, vec4(giNew, distance));

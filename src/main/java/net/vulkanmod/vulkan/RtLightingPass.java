@@ -52,6 +52,9 @@ final class RtLightingPass {
             blockDenoised = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, NRD_USAGE),
             giDenoised = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, NRD_USAGE);
     private static final StorageImage albedo = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
+    /** 1x1 placeholders bound where a path does not use an image (see record). */
+    private static final StorageImage unused16 = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT),
+            unused32 = new StorageImage(VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
     private static final StorageImage aux2 = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
     /** ReSTIR reservoirs per pixel: light index (bits), W, M. */
     private static final StorageImage[] reservoirs = {
@@ -69,27 +72,49 @@ final class RtLightingPass {
 
     private RtLightingPass() {}
 
+    /** Recording id (FrameTargets.recordingId) of the last frame this pass traced. */
+    private static long tracedFrame = -1;
+    private static float tracedRange;
+
+    /**
+     * The normals image when this frame's lighting wrote it for every pixel within
+     * {@code range} blocks (its a: terrain roughness, see lighting.rgen), else 0.
+     */
+    static long normalsCovering(float range) {
+        return tracedFrame == FrameTargets.recordingId() && range <= tracedRange ? normals.view : 0L;
+    }
+
     static void record(VkCommandBuffer cmd, MemoryStack stack) {
         if (!RtScene.ready() || !RtLights.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null) return;
         prepare();
         RenderTarget scene = FrameTargets.scene;
         int w = scene.width(), h = scene.height();
-        boolean fresh = false;
-        StorageImage[] all = {history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2,
-                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised, albedo};
         boolean nrd = NrdDenoiser.ensure(w, h);
-        for (StorageImage img : all) fresh |= img.ensure(w, h);
-        if (fresh) historyValid = false;
+        // R5: the own history only without NRD, NRD's inputs and outputs only with it; the
+        // shaders skip the other set (bound to 1x1 placeholders, never accessed).
+        StorageImage[] needed = nrd
+                ? new StorageImage[]{aux, normals, giHistory[0], giHistory[1], aux2, reservoirs[0], reservoirs[1],
+                        albedo, blockRaw, giRaw, viewZ, blockDenoised, giDenoised, unused16, unused32}
+                : new StorageImage[]{aux, normals, giHistory[0], giHistory[1], aux2, reservoirs[0], reservoirs[1],
+                        albedo, history[0], history[1], unused16, unused32};
+        java.util.ArrayList<StorageImage> created = new java.util.ArrayList<>();
+        for (StorageImage img : needed) {
+            boolean placeholder = img == unused16 || img == unused32;
+            if (img.ensure(placeholder ? 1 : w, placeholder ? 1 : h)) created.add(img);
+        }
+        if (!created.isEmpty()) historyValid = false;
         parity ^= 1;
-        StorageImage cur = history[parity], prev = history[parity ^ 1];
+        StorageImage cur = nrd ? unused16 : history[parity], prev = nrd ? unused16 : history[parity ^ 1];
         StorageImage giCur = giHistory[parity], giPrev = giHistory[parity ^ 1];
+        StorageImage blockIn = nrd ? blockRaw : unused16, giIn = nrd ? giRaw : unused16,
+                viewZIn = nrd ? viewZ : unused32;
 
         // Inputs and the previous frame's readers/writers of these images.
         FrameTargets.sceneDepthToShaderRead(cmd, stack);
-        if (fresh) {
-            VkImageMemoryBarrier2.Buffer init = VkImageMemoryBarrier2.calloc(all.length, stack);
-            for (int i = 0; i < all.length; i++) {
-                FrameTargets.imageBarrier(init.get(i), all[i].image, VK_IMAGE_ASPECT_COLOR_BIT,
+        if (!created.isEmpty()) {
+            VkImageMemoryBarrier2.Buffer init = VkImageMemoryBarrier2.calloc(created.size(), stack);
+            for (int i = 0; i < created.size(); i++) {
+                FrameTargets.imageBarrier(init.get(i), created.get(i).image, VK_IMAGE_ASPECT_COLOR_BIT,
                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
                         VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -104,7 +129,7 @@ final class RtLightingPass {
 
         long rtSet = RtDescriptors.write(RtDescriptors.PASS_LIGHTING, 0L, scene.depthView(), 0L,
                 new long[]{prev.view, cur.view, aux.view, normals.view, giPrev.view, giCur.view, aux2.view,
-                        reservoirs[parity ^ 1].view, reservoirs[parity].view, blockRaw.view, giRaw.view, viewZ.view,
+                        reservoirs[parity ^ 1].view, reservoirs[parity].view, blockIn.view, giIn.view, viewZIn.view,
                         albedo.view});
 
         // The depth was rendered with the jittered projection.
@@ -149,12 +174,18 @@ final class RtLightingPass {
         boolean lightsStable = RtLights.generation() == lightGeneration;
         lightGeneration = RtLights.generation();
         c.putFloat(208, lightsStable ? 1.0f : 0.0f).putFloat(212, nrd ? 1.0f : 0.0f)
-                .putFloat(216, RtLights.dynamicCount());
+                .putFloat(216, RtLights.dynamicCount())
+                // The checkerboard parity NRD expects this frame (BLACK mode, see lighting.rgen).
+                .putFloat(220, nrd ? NrdDenoiser.nextFrameIndex() & 1 : 0.0f);
         // View-space z of a camera-relative position: the view matrix's third row.
         org.joml.Matrix4f view = CameraHistory.view();
         c.putFloat(224, view.m02()).putFloat(228, view.m12()).putFloat(232, view.m22()).putFloat(236, view.m32());
         rtPipeline.trace(cmd, rtSet, c, w, h);
+        GpuTimer.mark(cmd, GpuTimer.LIGHT_TRACE);
         historyValid = true;
+        tracedFrame = FrameTargets.recordingId();
+        // Pixels past both ranges return before the primary ray (no normals written).
+        tracedRange = Math.max(Initializer.CONFIG.effectiveRtShadowDistance() * 16.0f, giRange);
 
         if (nrd) {
             memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -169,7 +200,8 @@ final class RtLightingPass {
             images[NrdDenoiser.BLOCK_OUT] = new long[]{blockDenoised.image, blockDenoised.format, 0};
             images[NrdDenoiser.GI_IN] = new long[]{giRaw.image, giRaw.format, 0};
             images[NrdDenoiser.GI_OUT] = new long[]{giDenoised.image, giDenoised.format, 0};
-            NrdDenoiser.denoise(cmd, images, !hasPrev, stack);
+            NrdDenoiser.denoise(cmd, images, !hasPrev, true, stack);
+            GpuTimer.mark(cmd, GpuTimer.LIGHT_DENOISE);
             memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
         }
@@ -186,7 +218,7 @@ final class RtLightingPass {
         FrameTargets.pipelineBarrier(cmd, pre, stack);
 
         long set = sets[Drawer.getCurrentFrame() % RtDescriptors.SLOTS];
-        writeCompositeSet(set, scene, cur, giCur);
+        writeCompositeSet(set, scene, cur, giCur, nrd);
         ByteBuffer p = stack.calloc(COMPOSITE_PUSH);
         invJittered.get(0, p);
         p.putFloat(64, Initializer.CONFIG.effectiveRtBlockLight()).putFloat(68, 0.2f).putFloat(72, DEBUG)
@@ -251,10 +283,11 @@ final class RtLightingPass {
         }
     }
 
-    private static void writeCompositeSet(long set, RenderTarget scene, StorageImage cur, StorageImage giCur) {
+    private static void writeCompositeSet(long set, RenderTarget scene, StorageImage cur, StorageImage giCur,
+                                          boolean nrd) {
         try (MemoryStack stack = stackPush()) {
             long[] views = {scene.depthView(), scene.colorView(), cur.view, aux.view, normals.view, giCur.view, aux2.view,
-                    blockDenoised.view, giDenoised.view, albedo.view};
+                    (nrd ? blockDenoised : unused16).view, (nrd ? giDenoised : unused16).view, albedo.view};
             VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(views.length, stack);
             for (int i = 0; i < views.length; i++) {
                 VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
@@ -295,7 +328,8 @@ final class RtLightingPass {
     static void destroy() {
         NrdDenoiser.destroy();
         for (StorageImage img : new StorageImage[]{history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2,
-                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised, albedo}) {
+                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised, albedo,
+                unused16, unused32}) {
             img.destroy();
         }
         historyValid = false;

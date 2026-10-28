@@ -136,10 +136,31 @@ public final class RtScene {
         Initializer.LOGGER.info("[rt] on");
         // The scene color needs STORAGE before the first RT frame records.
         net.vulkanmod.vulkan.FrameTargets.recreateIfCreated();
-        // Sections uploaded while RT was off carry no RT state: rebuild them.
+        // Sections uploaded while RT was off carry no RT state: register their arena data.
         if (mc.world != null && mc.renderGlobal != null) {
-            mc.renderGlobal.loadRenderers();
+            registerLoadedChunks(mc);
         }
+    }
+
+    /** Registers every built render chunk layer with the RT scene (no chunk reload). */
+    private static void registerLoadedChunks(net.minecraft.client.Minecraft mc) {
+        net.minecraft.client.renderer.ViewFrustum frustum =
+                ((net.vulkanmod.mixin.render.RenderGlobalAccessor) mc.renderGlobal).vulkanmod$getViewFrustum();
+        if (frustum == null || frustum.renderChunks == null) return;
+        int registered = 0;
+        for (net.minecraft.client.renderer.chunk.RenderChunk chunk : frustum.renderChunks) {
+            net.minecraft.client.renderer.chunk.CompiledChunk compiled = chunk.getCompiledChunk();
+            if (compiled == null || compiled == net.minecraft.client.renderer.chunk.CompiledChunk.DUMMY) continue;
+            for (net.minecraft.util.BlockRenderLayer layer : net.minecraft.util.BlockRenderLayer.values()) {
+                if (compiled.isLayerEmpty(layer)) continue;
+                if (chunk.getVertexBufferByLayer(layer.ordinal()) instanceof net.vulkanmod.render.IVboHolder holder
+                        && holder.vulkanmod$getVbo() != null) {
+                    holder.vulkanmod$getVbo().registerRt(chunk.getPosition(), layer);
+                    registered++;
+                }
+            }
+        }
+        Initializer.LOGGER.info("[rt] registered {} loaded chunk layers", registered);
     }
 
     // --- section lifecycle (called from VBO) ---
@@ -228,6 +249,9 @@ public final class RtScene {
     public static long tlas() { return tlas; }
     public static boolean ready() { return tlasBuilt; }
     public static int instanceCount() { return tlasInstanceCount; }
+    /** Translucent sections (water, glass, ice) in this frame's TLAS. */
+    public static int translucentInstances() { return translucentInstances; }
+    private static int translucentInstances;
 
     /** This frame's instance data buffer (one uint64 vertex address per instance). */
     public static long instanceDataBuffer() { return instanceDataBuffers[instanceRingIndex].buffer; }
@@ -279,7 +303,7 @@ public final class RtScene {
     }
 
     // --- GPU hang breadcrumbs (VULKANMOD_RT_LOG): the last value the GPU wrote shows
-    // which RT step a hung frame is stuck in. ---
+    // which step a hung frame is stuck in. ---
 
     private static RtBuffer crumbs;
     private static final Object CRUMB_LOCK = new Object();
@@ -289,7 +313,8 @@ public final class RtScene {
     /**
      * Writes (frame << 4 | step) once everything recorded before has finished. Steps:
      * 0 frame start, 1 RT start, 2 BLAS builds done, 3 TLAS build done, 4 RT passes done,
-     * 5 frame end (swapchain copy done).
+     * 6 upscale done (scene phase over), 5 frame end (swapchain copy done).
+     * Recorded on every frame, with or without ray tracing.
      */
     public static void breadcrumb(VkCommandBuffer cmd, MemoryStack stack, int step) {
         if (!LOG) return;
@@ -445,12 +470,18 @@ public final class RtScene {
                         buildQueue.size() - count);
             }
 
+            // A rebuilt chunk uploads all its layers together: scan its blocks once, not per layer.
+            java.util.HashMap<Long, int[]> scanned = new java.util.HashMap<>();
             for (Section s : batch) {
                 s.dirty = false;
-                s.lights = RtLights.scan(s);
+                long key = ((long) (s.originX >> 4) & 0x3FFFFF) << 42 | ((long) (s.originY >> 4) & 0xFFFFF) << 22
+                        | ((long) (s.originZ >> 4) & 0x3FFFFF);
+                s.lights = scanned.containsKey(key) ? scanned.get(key) : RtLights.scan(s);
+                scanned.put(key, s.lights);
             }
             RtLights.markDirty();
-            buildQueue.removeAll(batch);
+            // The batch cleared its dirty flags above (removeAll would be O(queue * batch)).
+            buildQueue.removeIf(s -> !s.dirty);
             return true;
         }
     }
@@ -490,8 +521,25 @@ public final class RtScene {
         updateBuffer(cmd, buffer, 0, src, bytes);
     }
 
-    /** vkCmdUpdateBuffer in 64 KiB pieces, writing {@code bytes} of {@code src} at {@code dstOffset}. */
+    /** Above this a copy from the frame's staging buffer beats inline vkCmdUpdateBuffer data. */
+    private static final int INLINE_UPDATE_MAX = 16 * 1024;
+
+    /**
+     * Writes {@code bytes} of {@code src} at {@code dstOffset} with a transfer command:
+     * small data inline (vkCmdUpdateBuffer, 64 KiB per call), larger data through the
+     * frame's staging buffer (released with the frame's fence).
+     */
     static void updateBuffer(VkCommandBuffer cmd, long buffer, long dstOffset, ByteBuffer src, int bytes) {
+        if (bytes > INLINE_UPDATE_MAX && Drawer.isActive()) {
+            net.vulkanmod.vulkan.memory.StagingBuffer staging = Vulkan.getStagingBuffer(Drawer.getCurrentFrame());
+            staging.copyBuffer(bytes, org.lwjgl.system.MemoryUtil.memSlice(src, 0, bytes));
+            try (MemoryStack stack = stackPush()) {
+                VkBufferCopy.Buffer region = VkBufferCopy.calloc(1, stack);
+                region.get(0).srcOffset(staging.getOffset()).dstOffset(dstOffset).size(bytes);
+                vkCmdCopyBuffer(cmd, staging.getBufferId(), buffer, region);
+            }
+            return;
+        }
         for (int off = 0; off < bytes; off += 65536) {
             int len = Math.min(65536, bytes - off);
             ByteBuffer slice = org.lwjgl.system.MemoryUtil.memSlice(src, off, len);
@@ -549,8 +597,10 @@ public final class RtScene {
             ByteBuffer m = cpuInstances = ensureCpu(cpuInstances, needed);
             ByteBuffer dataCpu = cpuInstanceData = ensureCpu(cpuInstanceData, (long) Math.max(1, count) * 8);
             int n = 0;
+            int translucent = 0;
             for (Section s : sections) {
                 if (!inTlas(s)) continue;
+                if (s.mask == MASK_TRANSLUCENT) translucent++;
                 int o = n * INSTANCE_BYTES;
                 // 3x4 row-major transform: identity rotation, translation origin - camera.
                 m.putFloat(o, 1f).putFloat(o + 4, 0f).putFloat(o + 8, 0f).putFloat(o + 12, (float) (s.originX - cx));
@@ -579,6 +629,7 @@ public final class RtScene {
                 n++;
             }
             tlasInstanceCount = n;
+            translucentInstances = translucent;
             if (n > 0) {
                 updateBuffer(cmd, instances.buffer, m, n * INSTANCE_BYTES);
                 updateBuffer(cmd, data.buffer, dataCpu, n * 8);
@@ -678,6 +729,7 @@ public final class RtScene {
         }
         RtLights.destroy();
         RtEntities.destroy();
+        RtMaterials.destroy();
         synchronized (CRUMB_LOCK) {
             if (crumbs != null) { crumbs.destroyNow(); crumbs = null; }
         }
