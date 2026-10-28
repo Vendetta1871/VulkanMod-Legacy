@@ -6,7 +6,8 @@
             "fields": [
                 { "name": "MVP", "type": "matrix4x4", "count": 16 },
                 { "name": "ModelViewMat", "type": "matrix4x4", "count": 16 },
-                { "name": "FogRadial", "type": "int", "count": 1 }
+                { "name": "FogRadial", "type": "int", "count": 1 },
+                { "name": "DynLightsAll", "type": "vec4array", "count": 16 }
             ]
         },
         {

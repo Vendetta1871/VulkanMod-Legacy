@@ -416,6 +416,9 @@ public class AutoTest {
             serverCommand(mc, "time set 18000");
         } else if (t == 5) {
             serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 30", mc.player.getName(), bx + 6.5, by + 1.0, bz + 10.5));
+        } else if (t == 114) {
+            // Block-breaking particles right in front of the player (lit by the held torch).
+            mc.effectRenderer.addBlockDestroyEffects(new BlockPos(bx + 6, by + 1, bz + 8), Blocks.STONEBRICK.getDefaultState());
         } else if (t == 120) {
             capture(mc, "dynLight");
         } else if (t >= 130) {

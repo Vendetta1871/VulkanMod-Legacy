@@ -16,6 +16,8 @@ layout(binding = 0) uniform UniformBufferObject {
     mat4 MVP;
     mat4 ModelViewMat;
     int FogRadial;
+    // Dynamic lights (fast and ray-traced modes): view-space position, level (0 = unused).
+    vec4 DynLightsAll[16];
 };
 
 layout(location = 0) out float vertexDistance;
@@ -34,5 +36,10 @@ void main() {
 
     // Same shifted-LINEAR lightmap sampling as the terrain shaders (see
     // terrain_batch.vsh); particles share the lightmap texture and sampler.
-    lightCoord = clamp(vec2(LightMapCoord) / 256.0, vec2(0.001953126), vec2(0.96875)) + vec2(0.03125);
+    vec2 light = vec2(LightMapCoord);
+    for (int i = 0; i < 16; i++) {
+        vec4 dl = DynLightsAll[i];
+        if (dl.w > 0.0) light.x = max(light.x, clamp(dl.w - distance(viewPos.xyz, dl.xyz), 0.0, 15.0) * 16.0);
+    }
+    lightCoord = clamp(light / 256.0, vec2(0.001953126), vec2(0.96875)) + vec2(0.03125);
 }

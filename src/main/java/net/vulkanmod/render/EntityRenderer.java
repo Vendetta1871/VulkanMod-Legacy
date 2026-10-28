@@ -736,7 +736,12 @@ public class EntityRenderer {
         // the dark (the ITEM format carries no UV2, so the shader cannot supply the light).
         if (handPass) {
             Entity view = net.minecraft.client.Minecraft.getMinecraft().getRenderViewEntity();
-            return view == null ? -1 : view.getBrightnessForRender();
+            if (view == null) return -1;
+            int light = view.getBrightnessForRender();
+            // A held light source lights the hand (and itself) like it lights the world.
+            int dyn = DynamicLights.levelAt(0.0, 0.0, 0.0);
+            if (dyn * 16 > (light & 0xFFFF)) light = (light & 0xFFFF0000) | dyn * 16;
+            return light;
         }
         // The eye layers (spider, enderman, ender dragon) blend additively (ONE/ONE)
         // and force the lightmap unit to full-bright (61680) so eyes glow in the dark.

@@ -136,8 +136,20 @@ public final class DynamicLights {
      * 0 unused). Empty unless the mode is "fast".
      */
     public static float[] viewSpaceArray() {
+        return fill(mode().equals("fast"));
+    }
+
+    /**
+     * As {@link #viewSpaceArray()} but in both "fast" and "on": for what ray tracing does not
+     * relight (particles, drawn after the RT lighting).
+     */
+    public static float[] viewSpaceArrayAll() {
+        return fill(!mode().equals("off"));
+    }
+
+    private static float[] fill(boolean enabled) {
         java.util.Arrays.fill(viewSpace, 0.0f);
-        if (!mode().equals("fast")) return viewSpace;
+        if (!enabled) return viewSpace;
         ArrayList<Light> list = lights();
         org.joml.Matrix4f view = CameraHistory.view();
         for (int i = 0; i < list.size(); i++) {

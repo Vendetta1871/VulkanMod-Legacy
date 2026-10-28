@@ -16,6 +16,8 @@ public class Vec4Array extends Field {
     void setFunction() {
         if (this.name.equals("DynLights")) {
             this.set = net.vulkanmod.render.DynamicLights::viewSpaceArray;
+        } else if (this.name.equals("DynLightsAll")) {
+            this.set = net.vulkanmod.render.DynamicLights::viewSpaceArrayAll;
         }
     }
 
