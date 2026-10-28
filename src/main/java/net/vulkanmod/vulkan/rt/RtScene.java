@@ -44,7 +44,7 @@ public final class RtScene {
     private static boolean enabled;
     private static boolean warned;
     /** VULKANMOD_RT_LOG=1: per-frame build statistics. */
-    private static final boolean LOG = System.getenv("VULKANMOD_RT_LOG") != null;
+    static final boolean LOG = System.getenv("VULKANMOD_RT_LOG") != null;
 
     /** Per-section state, owned by the section's VBO. */
     public static final class Section {
@@ -56,6 +56,8 @@ public final class RtScene {
         long blas;
         RtBuffer blasBuffer;
         long blasAddress;
+        /** Light-emitting blocks (see RtLights.scan), scanned with the BLAS. */
+        int[] lights;
 
         /** Holds geometry in the scene (unplaced/closed sections are not re-added by a draw). */
         public boolean isRegistered() { return index >= 0; }
@@ -202,6 +204,10 @@ public final class RtScene {
     }
 
     private static void releaseBlas(Section s) {
+        if (s.lights != null) {
+            s.lights = null;
+            RtLights.markDirty();
+        }
         if (s.blas != 0L) {
             long handle = s.blas;
             RtBuffer buffer = s.blasBuffer;
@@ -259,6 +265,7 @@ public final class RtScene {
                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
         }
         buildTlas(cmd);
+        RtLights.update(cmd, sections, CameraHistory.camX(), CameraHistory.camY(), CameraHistory.camZ());
         breadcrumb(cmd, stack, 3);
         memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                 VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
@@ -270,6 +277,8 @@ public final class RtScene {
     // which RT step a hung frame is stuck in. ---
 
     private static RtBuffer crumbs;
+    private static final Object CRUMB_LOCK = new Object();
+    private static boolean watchdogStarted;
     private static long crumbFrame;
 
     /**
@@ -280,10 +289,15 @@ public final class RtScene {
     public static void breadcrumb(VkCommandBuffer cmd, MemoryStack stack, int step) {
         if (!LOG) return;
         if (crumbs == null) {
-            crumbs = RtBuffer.create(64, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-            Thread watchdog = new Thread(RtScene::watchdog, "RT hang watchdog");
-            watchdog.setDaemon(true);
-            watchdog.start();
+            synchronized (CRUMB_LOCK) {
+                crumbs = RtBuffer.create(64, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            }
+            if (!watchdogStarted) {
+                watchdogStarted = true;
+                Thread watchdog = new Thread(RtScene::watchdog, "RT hang watchdog");
+                watchdog.setDaemon(true);
+                watchdog.start();
+            }
         }
         if (step == 0) crumbFrame++;
         memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0);
@@ -295,9 +309,11 @@ public final class RtScene {
         long since = System.currentTimeMillis();
         while (true) {
             try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
-            RtBuffer c = crumbs;
-            if (c == null) continue;
-            int v = c.mapped.getInt(0);
+            int v;
+            synchronized (CRUMB_LOCK) {
+                if (crumbs == null) continue;
+                v = crumbs.mapped.getInt(0);
+            }
             if (v != last) {
                 last = v;
                 since = System.currentTimeMillis();
@@ -424,7 +440,11 @@ public final class RtScene {
                         buildQueue.size() - count);
             }
 
-            for (Section s : batch) s.dirty = false;
+            for (Section s : batch) {
+                s.dirty = false;
+                s.lights = RtLights.scan(s);
+            }
+            RtLights.markDirty();
             buildQueue.removeAll(batch);
             return true;
         }
@@ -461,7 +481,7 @@ public final class RtScene {
     }
 
     /** vkCmdUpdateBuffer in 64 KiB pieces (its per-call limit). */
-    private static void updateBuffer(VkCommandBuffer cmd, long buffer, ByteBuffer src, int bytes) {
+    static void updateBuffer(VkCommandBuffer cmd, long buffer, ByteBuffer src, int bytes) {
         for (int off = 0; off < bytes; off += 65536) {
             int len = Math.min(65536, bytes - off);
             ByteBuffer slice = org.lwjgl.system.MemoryUtil.memSlice(src, off, len);
@@ -629,8 +649,13 @@ public final class RtScene {
             if (instanceBuffers[i] != null) { instanceBuffers[i].destroyNow(); instanceBuffers[i] = null; }
             if (instanceDataBuffers[i] != null) { instanceDataBuffers[i].destroyNow(); instanceDataBuffers[i] = null; }
         }
+        RtLights.destroy();
+        synchronized (CRUMB_LOCK) {
+            if (crumbs != null) { crumbs.destroyNow(); crumbs = null; }
+        }
         RtBuffer.flushAll();
         tlasBuilt = false;
+        if (LOG) Initializer.LOGGER.info("[rt] destroyed, {} RT buffers still alive", RtBuffer.live);
     }
 
     /** The batched chunk path is required: BLAS geometry lives in its arena. */

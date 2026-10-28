@@ -87,7 +87,7 @@ public final class FrameTargets {
     /** Destroys the RT passes' pipelines and descriptors (RT turned off; device idle). */
     public static void releaseRtPasses() {
         RtDebugView.destroy();
-        RtShadowPass.destroy();
+        RtLightingPass.destroy();
         RtDescriptors.destroy();
     }
 
@@ -149,7 +149,7 @@ public final class FrameTargets {
         opaqueDone = true;
         vkCmdEndRendering(cmd);
         if (shadows) {
-            // T8: shadows land on opaque geometry only; water and particles blend over them.
+            // T8: RT lighting lands on opaque geometry only; water and particles blend over it.
             recordRtShadows(cmd, stack);
             depthBackToAttachment(cmd, stack);
         }
@@ -165,7 +165,7 @@ public final class FrameTargets {
 
     private static void recordRtShadows(VkCommandBuffer cmd, MemoryStack stack) {
         recordRtScene(cmd, stack);
-        RtShadowPass.record(cmd, stack);
+        RtLightingPass.record(cmd, stack);
     }
 
     /** Builds this frame's TLAS once, outside rendering. */

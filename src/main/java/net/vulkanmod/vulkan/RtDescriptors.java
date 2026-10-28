@@ -15,13 +15,15 @@ import static org.lwjgl.vulkan.VK10.*;
 /**
  * Shared descriptor layout of the RT passes, with sets per pass and frame slot:
  * 0 TLAS, 1 storage image (output or scene color), 2 per-instance vertex addresses,
- * 3 block atlas, 4 scene depth, 5 storage image (opaque-only scene copy).
+ * 3 block atlas, 4 scene depth, 5 storage image (opaque-only scene copy),
+ * 6-8 block lights (list, cell grid, cell indices, see RtLights),
+ * 9-12 storage images of the lighting pass (history read, history write, aux, normals).
  * Bindings a pass does not use stay unwritten.
  */
 final class RtDescriptors {
 
     static final int PASSES = 2, SLOTS = 8;
-    static final int PASS_DEBUG = 0, PASS_SHADOWS = 1;
+    static final int PASS_DEBUG = 0, PASS_LIGHTING = 1;
 
     private static long layout, pool;
     private static final long[][] sets = new long[PASSES][SLOTS];
@@ -43,6 +45,13 @@ final class RtDescriptors {
                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, hits},
                 {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, hits},
                 {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
         };
         try (MemoryStack stack = stackPush()) {
@@ -74,11 +83,16 @@ final class RtDescriptors {
      * use retired with the slot's fence). Views equal to 0 are left unwritten.
      */
     static long write(int pass, long storageView, long depthView, long opaqueView) {
+        return write(pass, storageView, depthView, opaqueView, null);
+    }
+
+    /** As {@link #write(int, long, long, long)}, plus the lighting pass's lights and images 9-12. */
+    static long write(int pass, long storageView, long depthView, long opaqueView, long[] lightingViews) {
         if (layout == 0L) create();
         long set = sets[pass][Drawer.getCurrentFrame() % SLOTS];
         VulkanImage atlas = net.vulkanmod.render.TextureBridge.getAtlasImage();
         try (MemoryStack stack = stackPush()) {
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(6, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(13, stack);
             int n = 0;
 
             VkWriteDescriptorSetAccelerationStructureKHR as = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
@@ -100,6 +114,24 @@ final class RtDescriptors {
             n = image(writes, n, set, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
                     depthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
             n = image(writes, n, set, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0L, opaqueView, VK_IMAGE_LAYOUT_GENERAL, stack);
+
+            if (lightingViews != null) {
+                long[][] buffers = {
+                        {net.vulkanmod.vulkan.rt.RtLights.lightBuffer(), net.vulkanmod.vulkan.rt.RtLights.lightBytes()},
+                        {net.vulkanmod.vulkan.rt.RtLights.gridBuffer(), net.vulkanmod.vulkan.rt.RtLights.gridBytes()},
+                        {net.vulkanmod.vulkan.rt.RtLights.indexBuffer(), net.vulkanmod.vulkan.rt.RtLights.indexBytes()},
+                };
+                for (int i = 0; i < 3; i++) {
+                    VkDescriptorBufferInfo.Buffer info = VkDescriptorBufferInfo.calloc(1, stack);
+                    info.get(0).buffer(buffers[i][0]).offset(0).range(buffers[i][1]);
+                    writes.get(n++).sType$Default().dstSet(set).dstBinding(6 + i)
+                            .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).pBufferInfo(info);
+                }
+                for (int i = 0; i < 4; i++) {
+                    n = image(writes, n, set, 9 + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0L, lightingViews[i],
+                            VK_IMAGE_LAYOUT_GENERAL, stack);
+                }
+            }
 
             writes.limit(n);
             vkUpdateDescriptorSets(Vulkan.getDevice(), writes, null);

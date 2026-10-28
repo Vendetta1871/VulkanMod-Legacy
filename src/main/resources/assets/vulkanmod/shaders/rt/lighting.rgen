@@ -1,0 +1,250 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// Hybrid RT lighting (T8): per scene pixel, reconstructed from the depth buffer and
+// refined by a short primary ray, traces
+//  - one shadow ray towards the sun or moon,
+//  - one shadow ray towards a block light picked by resampled importance sampling (RIS)
+//    among the lights of the pixel's grid cell; its noisy estimate is accumulated over
+//    frames (depth-validated reprojection) into the history image.
+// rt_composite.comp filters the history spatially and relights the scene color.
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 6, scalar) readonly buffer Lights { vec4 lights[]; };       // xyz: center rel. origin, w: level
+layout(set = 0, binding = 7, scalar) readonly buffer Grid { ivec4 cells[]; };          // cell xyz, start | count << 24
+layout(set = 0, binding = 8, scalar) readonly buffer LightIndex { int lightIndex[]; };
+layout(set = 0, binding = 9, rgba16f) uniform readonly image2D historyPrev;
+layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D historyCur;   // x: block light, y: frames, z: distance
+layout(set = 0, binding = 11, rgba16f) uniform writeonly image2D aux;          // x: sun factor, y: vanilla block, z: sky term, w: fade (-1 none, 0 no hit)
+layout(set = 0, binding = 12, rgba8) uniform writeonly image2D normals;
+
+layout(push_constant) uniform Constants {
+    mat4 invViewProj;   // jittered: the depth was rendered with it
+    mat4 prevViewProj;  // camera-relative position -> previous clip space
+    vec4 light;         // xyz: towards the sun/moon, w: sun shadow strength
+    vec4 params;        // x: RT range (blocks), y: frame, z: history valid, w: grid mask
+    vec4 cam;           // xyz: camera - light origin, w: light count
+    vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
+} pc;
+
+layout(location = 0) rayPayloadEXT Payload payload;
+layout(location = 1) rayPayloadEXT float visible;
+
+const int CELL = 8;
+const int MAX_CANDIDATES = 8;
+const float MAX_FRAMES = 24.0;
+
+// Vanilla's lightmap curve for a 0..1 light level.
+float brightness(float l) { return l / (4.0 - 3.0 * l); }
+
+uint rngState;
+uint pcg() {
+    rngState = rngState * 747796405u + 2891336453u;
+    uint w = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float rand() { return float(pcg() >> 8) * (1.0 / 16777216.0); }
+
+vec3 unproject(ivec2 p, float depth, vec2 size) {
+    vec2 uv = (vec2(p) + 0.5) / size;
+    // The viewport flips Y: NDC +1 is the top row.
+    vec4 h = pc.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    return h.xyz / h.w;
+}
+
+// Of the two neighbours along an axis, the one closer in depth gives the surface tangent.
+vec3 tangent(ivec2 p, ivec2 axis, float d, vec3 pos, ivec2 size) {
+    ivec2 a = p + axis;
+    ivec2 b = p - axis;
+    bool hasA = all(lessThan(a, size));
+    bool hasB = all(greaterThanEqual(b, ivec2(0)));
+    float da = hasA ? texelFetch(sceneDepth, a, 0).r : 2.0;
+    float db = hasB ? texelFetch(sceneDepth, b, 0).r : 2.0;
+    return abs(da - d) < abs(db - d)
+            ? unproject(a, da, vec2(size)) - pos
+            : pos - unproject(b, db, vec2(size));
+}
+
+bool traceShadow(vec3 origin, vec3 dir, float tMax) {
+    visible = 0.0;
+    traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                0xFF, 0, 0, 1, origin, 0.0, dir, tMax, 1);
+    return visible > 0.5;
+}
+
+int findCell(ivec3 c) {
+    int mask = int(pc.params.w);
+    int slot = (c.x * 73856093 ^ c.y * 19349663 ^ c.z * 83492791) & mask;
+    for (int i = 0; i <= mask; i++) {
+        ivec4 e = cells[slot];
+        if (e.x == int(0x80000000)) return -1;
+        if (e.xyz == c) return slot;
+        slot = (slot + 1) & mask;
+    }
+    return -1;
+}
+
+// Unshadowed block light from one emitter: vanilla's level falloff (one level per block)
+// through the brightness curve, shaped by the angle of incidence.
+float lightTarget(vec4 l, vec3 pos, vec3 n, out vec3 toLight, out float dist) {
+    toLight = l.xyz - pc.cam.xyz - pos;
+    dist = length(toLight);
+    float level = l.w - max(dist - 0.5, 0.0);
+    if (level <= 0.0) return 0.0;
+    float ndl = dot(n, toLight) / max(dist, 1e-4);
+    if (ndl <= 0.0) return 0.0;
+    return brightness(level / 15.0) * (0.35 + 0.65 * ndl);
+}
+
+// Distance along the ray at which it enters the light's own block (stops the shadow ray there).
+float blockEntry(vec3 origin, vec3 dir, vec3 center) {
+    vec3 inv = 1.0 / dir;
+    vec3 t0 = (center - 0.5 - origin) * inv;
+    vec3 t1 = (center + 0.5 - origin) * inv;
+    vec3 tmin = min(t0, t1);
+    return max(max(tmin.x, tmin.y), tmin.z);
+}
+
+float blockLight(vec3 pos, vec3 n) {
+    if (pc.cam.w <= 0.0) return 0.0;
+    vec3 q = pos + pc.cam.xyz;
+    int slot = findCell(ivec3(floor(q / float(CELL))));
+    if (slot < 0) return 0.0;
+    int packed = cells[slot].w;
+    int start = packed & 0xFFFFFF;
+    int count = (packed >> 24) & 0xFF;
+    if (count == 0) return 0.0;
+
+    int candidates = min(count, MAX_CANDIDATES);
+    float wsum = 0.0;
+    int chosen = -1;
+    float chosenTarget = 0.0;
+    for (int k = 0; k < candidates; k++) {
+        int i = count <= MAX_CANDIDATES ? k : int(rand() * float(count));
+        int li = lightIndex[start + min(i, count - 1)];
+        vec3 toLight;
+        float dist;
+        float t = lightTarget(lights[li], pos, n, toLight, dist);
+        wsum += t;
+        if (t > 0.0 && rand() * wsum < t) {
+            chosen = li;
+            chosenTarget = t;
+        }
+    }
+    if (chosen < 0) return 0.0;
+
+    // A random point inside the emitter's block: soft shadows over the accumulated frames.
+    vec3 center = lights[chosen].xyz - pc.cam.xyz;
+    vec3 target = center + (vec3(rand(), rand(), rand()) - 0.5) * 0.6;
+    vec3 origin = pos + n * 0.02;
+    vec3 dir = target - origin;
+    float len = length(dir);
+    dir /= max(len, 1e-4);
+    float tMax = blockEntry(origin, dir, center) - 0.01;
+    if (tMax > 0.05 && !traceShadow(origin, dir, tMax)) return 0.0;
+    // RIS estimate: f(y) / p_hat(y) * (1/M) * sum(w); with uniform candidates w = p_hat * count.
+    // Exhaustive (count <= M): the estimate is the sum itself.
+    return count <= MAX_CANDIDATES ? wsum : wsum * float(count) / float(candidates);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    float d = texelFetch(sceneDepth, p, 0).r;
+    if (d >= 0.99999) {   // sky, clouds past the far plane
+        imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
+        imageStore(historyCur, p, vec4(0.0));
+        return;
+    }
+
+    vec3 pos = unproject(p, d, vec2(size));
+    // Past the RT range the raster image stays as is; the last chunk fades out.
+    float fade = clamp((pc.params.x - max(abs(pos.x), abs(pos.z))) / 16.0, 0.0, 1.0);
+    vec3 c = cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size));
+    // Degenerate or non-finite geometry: never trace a NaN ray (software traversal on GPUs
+    // without RT cores can spin on it).
+    float len2 = dot(c, c);
+    if (fade <= 0.0 || !(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) {
+        imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
+        imageStore(historyCur, p, vec4(0.0));
+        return;
+    }
+    vec3 n = c * inversesqrt(len2);
+    vec3 eye = unproject(p, 0.0, vec2(size));
+    vec3 view = pos - eye;
+    if (dot(n, view) > 0.0) n = -n;
+    float dist = length(view);
+
+    rngState = uint(p.x) * 1973u + uint(p.y) * 9277u + uint(pc.params.y) * 26699u;
+    pcg();
+
+    // Primary ray around the depth sample: exact normal and the surface's lightmap.
+    // No hit (entities, clouds - not in the TLAS): depth normal, sun shadows only.
+    payload.t = -1.0;
+    vec3 dir = view / dist;
+    float slack = 0.05 + 0.01 * dist;
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
+    bool hit = payload.t >= 0.0;
+    if (hit) {
+        n = payload.normal;
+        pos = eye + dir * payload.t;
+    }
+
+    // Sun/moon: only occlusion darkens; faces turned away keep vanilla's face shading.
+    float sunFactor = 1.0;
+    float ndl = dot(n, pc.light.xyz);
+    float sky = hit ? payload.skyLight : 1.0;
+    if (pc.light.w > 0.0 && ndl > 0.0 && sky > 0.01) {
+        bool lit = traceShadow(pos + n * (0.02 + 0.002 * dist), pc.light.xyz, 512.0);
+        sunFactor = lit ? 1.0 : 1.0 - pc.light.w * fade;
+    }
+    imageStore(normals, p, vec4(n * 0.5 + 0.5, 1.0));
+
+    if (!hit) {
+        imageStore(aux, p, vec4(sunFactor, 0.0, 0.0, 0.0));
+        imageStore(historyCur, p, vec4(0.0, 0.0, length(pos), 0.0));
+        return;
+    }
+
+    float rt = min(blockLight(pos, n), 1.5);
+
+    // Temporal accumulation: bilinear reprojection, taps whose stored distance disagrees
+    // with this surface (disocclusion) are dropped.
+    float prev = 0.0, frames = 0.0;
+    if (pc.params.z > 0.0) {
+        vec4 clip = pc.prevViewProj * vec4(pos, 1.0);
+        if (clip.w > 0.0) {
+            vec2 uv = clip.xy / clip.w * vec2(0.5, -0.5) + 0.5;
+            vec2 texel = uv * vec2(size) - 0.5;
+            ivec2 base = ivec2(floor(texel));
+            vec2 f = texel - vec2(base);
+            float expected = length(pos - pc.camDelta.xyz);
+            float wsum = 0.0;
+            for (int i = 0; i < 4; i++) {
+                ivec2 o = ivec2(i & 1, i >> 1);
+                ivec2 q = base + o;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size))) continue;
+                vec4 h = imageLoad(historyPrev, q);
+                if (h.y <= 0.0 || abs(h.z - expected) > 0.03 * expected + 0.05) continue;
+                float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+                prev += h.x * w;
+                frames += h.y * w;
+                wsum += w;
+            }
+            if (wsum > 0.05) {
+                prev /= wsum;
+                frames /= wsum;
+            } else {
+                prev = frames = 0.0;
+            }
+        }
+    }
+    frames = min(frames + 1.0, MAX_FRAMES);
+    float accumulated = mix(prev, rt, 1.0 / frames);
+    imageStore(historyCur, p, vec4(accumulated, frames, length(pos), 0.0));
+
+    float skyTerm = brightness(payload.skyLight) * pc.camDelta.w;
+    imageStore(aux, p, vec4(sunFactor, brightness(payload.blockLight), skyTerm, fade));
+}

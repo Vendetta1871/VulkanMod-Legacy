@@ -59,6 +59,7 @@ final class RtBuffer {
             long address = vkGetBufferDeviceAddress(Vulkan.getDevice(),
                     VkBufferDeviceAddressInfo.calloc(stack).sType$Default().buffer(buffer));
             ByteBuffer mapped = hostVisible ? memByteBuffer(allocInfo.pMappedData(), (int) size) : null;
+            live++;
             return new RtBuffer(buffer, pAlloc.get(0), size, address, mapped);
         }
     }
@@ -70,7 +71,11 @@ final class RtBuffer {
         }
     }
 
+    /** Buffers created and not yet destroyed (leak check under VULKANMOD_RT_LOG). */
+    static int live;
+
     void destroyNow() {
+        live--;
         vmaDestroyBuffer(Vulkan.getAllocator(), buffer, allocation);
     }
 

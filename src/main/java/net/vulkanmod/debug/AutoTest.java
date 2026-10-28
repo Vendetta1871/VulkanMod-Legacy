@@ -166,6 +166,50 @@ public class AutoTest {
     private static final boolean RT_TOGGLE_MODE = System.getenv("VULKANMOD_AUTOTEST_RTTOGGLE") != null;
     private static int rtToggleTicks;
 
+    /**
+     * {@code VULKANMOD_AUTOTEST_TORCH=1}: builds a closed stone room high in the air (no sky
+     * light inside) with torches, glowstone and a pillar between them and the camera, moves
+     * the player in and captures "torchRoom" twice (early and with the RT history settled).
+     * Checks RT block light and its shadows; run with VULKANMOD_RT_BLOCK=0 for the vanilla look.
+     */
+    private static final boolean TORCH_MODE = System.getenv("VULKANMOD_AUTOTEST_TORCH") != null;
+    private static int torchTicks;
+
+    private static void torchStage(Minecraft mc) {
+        int t = ++torchTicks;
+        int bx = 200, by = 150, bz = 200;
+        if (t == 1) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server == null) return;
+            server.addScheduledTask(() -> {
+                net.minecraft.world.World world = server.getWorld(0);
+                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                for (int dx = 0; dx <= 14; dx++)
+                    for (int dy = 0; dy <= 7; dy++)
+                        for (int dz = 0; dz <= 14; dz++) {
+                            boolean shell = dx == 0 || dx == 14 || dy == 0 || dy == 7 || dz == 0 || dz == 14;
+                            world.setBlockState(c.setPos(bx + dx, by + dy, bz + dz),
+                                    shell ? Blocks.STONE.getDefaultState() : Blocks.AIR.getDefaultState());
+                        }
+                for (int dy = 1; dy <= 4; dy++) world.setBlockState(c.setPos(bx + 7, by + dy, bz + 6), Blocks.STONE.getDefaultState());
+                world.setBlockState(c.setPos(bx + 7, by + 1, bz + 3), Blocks.TORCH.getDefaultState());
+                world.setBlockState(c.setPos(bx + 3, by + 1, bz + 9), Blocks.TORCH.getDefaultState());
+                world.setBlockState(c.setPos(bx + 12, by + 3, bz + 2), Blocks.GLOWSTONE.getDefaultState());
+                world.setBlockState(c.setPos(bx + 2, by + 1, bz + 12), Blocks.CRAFTING_TABLE.getDefaultState());
+            });
+            serverCommand(mc, "time set 18000");
+        } else if (t == 5) {
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 25", mc.player.getName(), bx + 7.5, by + 1.0, bz + 12.5));
+        } else if (t == 100) {
+            capture(mc, "torchRoomEarly");
+        } else if (t == 160) {
+            capture(mc, "torchRoom");
+        } else if (t >= 170) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
         net.minecraft.client.settings.GameSettings.Options rtx = net.vulkanmod.config.gui.VulkanVideoOptions.rtx();
@@ -366,6 +410,11 @@ public class AutoTest {
 
                 if (RT_TOGGLE_MODE) {
                     rtToggleStage(mc);
+                    return;
+                }
+
+                if (TORCH_MODE) {
+                    torchStage(mc);
                     return;
                 }
 
