@@ -26,7 +26,7 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class RtLightingPass {
 
-    private static final int RT_PUSH = 208, COMPOSITE_PUSH = 80;
+    private static final int RT_PUSH = 224, COMPOSITE_PUSH = 80;
     /** VULKANMOD_DEBUG_VIEW=rtlight / rtgi: shows the filtered RT block light / indirect light alone. */
     private static final float DEBUG = "rtlight".equalsIgnoreCase(System.getenv("VULKANMOD_DEBUG_VIEW")) ? 1.0f
             : "rtgi".equalsIgnoreCase(System.getenv("VULKANMOD_DEBUG_VIEW")) ? 2.0f : 0.0f;
@@ -44,6 +44,11 @@ final class RtLightingPass {
     private static final StorageImage aux = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
     private static final StorageImage normals = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
     private static final StorageImage aux2 = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
+    /** ReSTIR reservoirs per pixel: light index (bits), W, M. */
+    private static final StorageImage[] reservoirs = {
+            new StorageImage(VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT),
+            new StorageImage(VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT)};
+    private static int lightGeneration = -1;
     private static final StorageImage[] giHistory = {
             new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT),
             new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT)};
@@ -61,7 +66,8 @@ final class RtLightingPass {
         RenderTarget scene = FrameTargets.scene;
         int w = scene.width(), h = scene.height();
         boolean fresh = false;
-        StorageImage[] all = {history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2};
+        StorageImage[] all = {history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2,
+                reservoirs[0], reservoirs[1]};
         for (StorageImage img : all) fresh |= img.ensure(w, h);
         if (fresh) historyValid = false;
         parity ^= 1;
@@ -87,7 +93,8 @@ final class RtLightingPass {
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
         long rtSet = RtDescriptors.write(RtDescriptors.PASS_LIGHTING, 0L, scene.depthView(), 0L,
-                new long[]{prev.view, cur.view, aux.view, normals.view, giPrev.view, giCur.view, aux2.view});
+                new long[]{prev.view, cur.view, aux.view, normals.view, giPrev.view, giCur.view, aux2.view,
+                        reservoirs[parity ^ 1].view, reservoirs[parity].view});
 
         // The depth was rendered with the jittered projection.
         invJittered.identity()
@@ -127,6 +134,10 @@ final class RtLightingPass {
         float[] skyRad = skyRadiance();
         float giRange = gi > 0.0f ? Initializer.CONFIG.effectiveRtIndirectDistance() * 16.0f : 0.0f;
         c.putFloat(192, skyRad[0]).putFloat(196, skyRad[1]).putFloat(200, skyRad[2]).putFloat(204, giRange);
+        // Re-uploaded lights renumber: the previous reservoirs point at stale indices.
+        boolean lightsStable = RtLights.generation() == lightGeneration;
+        lightGeneration = RtLights.generation();
+        c.putFloat(208, lightsStable ? 1.0f : 0.0f);
         rtPipeline.trace(cmd, rtSet, c, w, h);
         historyValid = true;
 
@@ -247,7 +258,8 @@ final class RtLightingPass {
     }
 
     static void destroy() {
-        for (StorageImage img : new StorageImage[]{history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2}) {
+        for (StorageImage img : new StorageImage[]{history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2,
+                reservoirs[0], reservoirs[1]}) {
             img.destroy();
         }
         historyValid = false;

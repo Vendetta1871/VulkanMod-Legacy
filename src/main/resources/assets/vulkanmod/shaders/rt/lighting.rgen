@@ -5,8 +5,10 @@
 // Hybrid RT lighting (T8): per scene pixel, reconstructed from the depth buffer and
 // refined by a short primary ray, traces
 //  - one shadow ray towards the sun or moon,
-//  - one shadow ray towards a block light picked by resampled importance sampling (RIS)
-//    among the lights of the pixel's grid cell; its noisy estimate is accumulated over
+//  - one shadow ray towards a block light picked by ReSTIR DI: resampled importance
+//    sampling among the lights of the pixel's grid cell, merged with the reservoirs of the
+//    reprojected pixel and three neighbours from the previous frame (temporal and spatial
+//    reuse, after Bitterli et al. 2020); its noisy estimate is accumulated over
 //    frames (depth-validated reprojection) into the history image. Shadow rays pass through
 //    stained glass and ice and take their color.
 //  - one cosine-distributed indirect (GI) ray on half the pixels per frame, shaded from its hit's albedo and lightmap
@@ -25,6 +27,8 @@ layout(set = 0, binding = 12, rgba8) uniform writeonly image2D normals;
 layout(set = 0, binding = 13, rgba16f) uniform readonly image2D giPrev;
 layout(set = 0, binding = 14, rgba16f) uniform writeonly image2D giCur;      // rgb: indirect light, a: distance
 layout(set = 0, binding = 15, rgba8) uniform writeonly image2D aux2;         // rgb: sun factor, a: indirect light fade
+layout(set = 0, binding = 17, rgba32f) uniform readonly image2D reservoirPrev;
+layout(set = 0, binding = 18, rgba32f) uniform writeonly image2D reservoirCur; // x: light index (bits), y: W, z: M
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
@@ -34,6 +38,7 @@ layout(push_constant) uniform Constants {
     vec4 cam;           // xyz: camera - light origin, w: light count
     vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
     vec4 sky;           // rgb: sky radiance (luminance 1), w: indirect light range (blocks, 0: off)
+    vec4 restir;        // x: 1 when the previous reservoirs' light indices are still valid
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -115,36 +120,80 @@ float blockEntry(vec3 origin, vec3 dir, vec3 center) {
     return max(max(tmin.x, tmin.y), tmin.z);
 }
 
-vec3 blockLight(vec3 pos, vec3 n) {
-    if (pc.cam.w <= 0.0) return vec3(0.0);
-    vec3 q = pos + pc.cam.xyz;
-    int slot = findCell(ivec3(floor(q / float(CELL))));
-    if (slot < 0) return vec3(0.0);
-    int packed = cells[slot].w;
-    int start = packed & 0xFFFFFF;
-    int count = (packed >> 24) & 0xFF;
-    if (count == 0) return vec3(0.0);
+struct Reservoir {
+    int light;    // -1: none
+    float wsum;
+    float M;
+    float target; // target function of the chosen light at this pixel
+};
 
-    int candidates = min(count, MAX_CANDIDATES);
-    float wsum = 0.0;
-    int chosen = -1;
-    float chosenTarget = 0.0;
-    for (int k = 0; k < candidates; k++) {
-        int i = count <= MAX_CANDIDATES ? k : int(rand() * float(count));
-        int li = lightIndex[start + min(i, count - 1)];
-        vec3 toLight;
-        float dist;
-        float t = lightTarget(lights[li], pos, n, toLight, dist);
-        wsum += t;
-        if (t > 0.0 && rand() * wsum < t) {
-            chosen = li;
-            chosenTarget = t;
+const float RESERVOIR_M_CAP = 20.0;
+
+float targetOf(int li, vec3 pos, vec3 n) {
+    if (li < 0 || li >= int(pc.cam.w)) return 0.0;
+    vec3 toLight;
+    float dist;
+    return lightTarget(lights[li], pos, n, toLight, dist);
+}
+
+void addCandidate(inout Reservoir r, int li, float target, float weight, float m) {
+    r.wsum += weight;
+    r.M += m;
+    if (weight > 0.0 && rand() * r.wsum < weight) {
+        r.light = li;
+        r.target = target;
+    }
+}
+
+// Merges a previous-frame reservoir, re-evaluating its light at this pixel.
+void mergeReservoir(inout Reservoir r, ivec2 q, vec3 pos, vec3 n) {
+    vec4 pr = imageLoad(reservoirPrev, q);
+    int li = floatBitsToInt(pr.x);
+    float m = min(pr.z, RESERVOIR_M_CAP);
+    if (li < 0 || m <= 0.0 || !(pr.y > 0.0)) return;
+    float t = targetOf(li, pos, n);
+    addCandidate(r, li, t, t * pr.y * m, m);
+}
+
+// Block light at a surface: ReSTIR picks one emitter, a shadow ray to a random point in its
+// block (soft shadows over the accumulated frames, colored through glass) checks it.
+vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
+    Reservoir r = Reservoir(-1, 0.0, 0.0, 0.0);
+    if (pc.cam.w > 0.0) {
+        vec3 q = pos + pc.cam.xyz;
+        int slot = findCell(ivec3(floor(q / float(CELL))));
+        if (slot >= 0) {
+            int packed = cells[slot].w;
+            int start = packed & 0xFFFFFF;
+            int count = (packed >> 24) & 0xFF;
+            int candidates = min(count, MAX_CANDIDATES);
+            for (int k = 0; k < candidates; k++) {
+                int i = count <= MAX_CANDIDATES ? k : int(rand() * float(count));
+                int li = lightIndex[start + min(i, count - 1)];
+                float t = targetOf(li, pos, n);
+                // Source pdf: uniform over the cell's lights (1 / count) per candidate.
+                addCandidate(r, li, t, t * float(count) / float(candidates), 1.0 / float(candidates));
+            }
+            // The streamed candidates count as one sample of M.
+            if (candidates > 0) r.M = 1.0;
         }
     }
-    if (chosen < 0) return vec3(0.0);
+    if (reuse) {
+        ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+        mergeReservoir(r, prevPixel, pos, n);
+        for (int k = 0; k < 3; k++) {
+            float ang = 6.2831853 * rand();
+            ivec2 q = prevPixel + ivec2(vec2(cos(ang), sin(ang)) * (2.0 + 10.0 * rand()));
+            if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, size))) mergeReservoir(r, q, pos, n);
+        }
+    }
+
+    float W = r.light >= 0 && r.target > 0.0 && r.M > 0.0 ? r.wsum / (r.M * r.target) : 0.0;
+    imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), W, r.M, 0.0));
+    if (W <= 0.0) return vec3(0.0);
 
     // A random point inside the emitter's block: soft shadows over the accumulated frames.
-    vec3 center = lights[chosen].xyz - pc.cam.xyz;
+    vec3 center = lights[r.light].xyz - pc.cam.xyz;
     vec3 target = center + (vec3(rand(), rand(), rand()) - 0.5) * 0.6;
     vec3 origin = pos + n * 0.02;
     vec3 dir = target - origin;
@@ -152,9 +201,7 @@ vec3 blockLight(vec3 pos, vec3 n) {
     dir /= max(len, 1e-4);
     float tMax = blockEntry(origin, dir, center) - 0.01;
     vec3 vis = tMax > 0.05 ? traceShadow(origin, dir, tMax) : vec3(1.0);
-    // RIS estimate: f(y) / p_hat(y) * (1/M) * sum(w); with uniform candidates w = p_hat * count.
-    // Exhaustive (count <= M): the estimate is the sum itself.
-    return vis * (count <= MAX_CANDIDATES ? wsum : wsum * float(count) / float(candidates));
+    return vis * (r.target * W);
 }
 
 // One cosine-weighted bounce: the hit's albedo times its vanilla light and face shading;
@@ -184,6 +231,7 @@ void main() {
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(aux2, p, vec4(1.0, 1.0, 1.0, 0.0));
         imageStore(historyCur, p, vec4(0.0));
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
         return;
     }
@@ -201,6 +249,7 @@ void main() {
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(aux2, p, vec4(1.0, 1.0, 1.0, 0.0));
         imageStore(historyCur, p, vec4(0.0));
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
         return;
     }
@@ -242,12 +291,32 @@ void main() {
         imageStore(aux, p, vec4(0.0, 0.0, 0.0, 0.0));
         imageStore(aux2, p, vec4(sunFactor, 0.0));
         imageStore(historyCur, p, vec4(0.0));
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0, 0.0, 0.0, distance));
         return;
     }
     float skyLight = payload.skyLight, blockLevel = payload.blockLight;
 
-    vec3 rt = fade > 0.0 ? min(blockLight(pos, n), vec3(1.5)) : vec3(0.0);
+    // The previous frame's pixel of this surface (nearest, distance-validated) for ReSTIR reuse.
+    ivec2 prevPixel = p;
+    bool reuse = false;
+    if (pc.params.z > 0.0 && pc.restir.x > 0.0) {
+        vec4 clip = pc.prevViewProj * vec4(pos, 1.0);
+        if (clip.w > 0.0) {
+            vec2 uv = clip.xy / clip.w * vec2(0.5, -0.5) + 0.5;
+            prevPixel = ivec2(floor(uv * vec2(size)));
+            if (all(greaterThanEqual(prevPixel, ivec2(0))) && all(lessThan(prevPixel, size))) {
+                float expected = length(pos - pc.camDelta.xyz);
+                reuse = abs(imageLoad(giPrev, prevPixel).a - expected) < 0.05 * expected + 0.1;
+            }
+        }
+    }
+    vec3 rt = vec3(0.0);
+    if (fade > 0.0) {
+        rt = min(blockLight(pos, n, p, prevPixel, reuse), vec3(1.5));
+    } else {
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
+    }
 
     // Temporal accumulation: bilinear reprojection, taps whose stored distance disagrees
     // with this surface (disocclusion) are dropped.

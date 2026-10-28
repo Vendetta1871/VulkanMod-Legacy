@@ -68,6 +68,9 @@ public final class RtLights {
 
     public static boolean ready() { return lights != null; }
     public static int count() { return lightCount; }
+    /** Bumped whenever the light list is re-uploaded (light indices change). */
+    public static int generation() { return generation; }
+    private static int generation;
     public static int gridMask() { return gridMask; }
     public static long lightBuffer() { return lights.buffer; }
     public static long lightBytes() { return lights.size; }
@@ -128,6 +131,7 @@ public final class RtLights {
         if (!far && lights != null && hash == lastHash && n == lightCount) return;
         lastHash = hash;
         lightCount = n;
+        generation++;
 
         // Cells reached by each light's range.
         HashMap<Long, int[]> cells = new HashMap<>();
