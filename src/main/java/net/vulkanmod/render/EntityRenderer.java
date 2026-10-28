@@ -534,11 +534,14 @@ public class EntityRenderer {
         // shadows within the RT range give way to traced ones.
         if (net.vulkanmod.vulkan.rt.RtScene.enabled() && !handPass && !GuiRenderer.isGuiPass()
                 && net.vulkanmod.vulkan.FrameTargets.phase() == net.vulkanmod.vulkan.FrameTargets.Phase.SCENE) {
-            if (pipeline == shadowPipeline && inRtRange(data, format)) {
+            if (pipeline == shadowPipeline
+                    && inRtRange(data, net.vulkanmod.Initializer.CONFIG.effectiveRtShadowDistance() * 16.0f - 8.0f)) {
                 net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
                 return;
             }
-            if (pipeline == entityPipeline || pipeline == itemPipeline || pipeline == blockPipeline) {
+            // Only what rays can reach: the RT scene ends at the largest effect distance.
+            if ((pipeline == entityPipeline || pipeline == itemPipeline || pipeline == blockPipeline)
+                    && inRtRange(data, net.vulkanmod.vulkan.rt.RtScene.distanceChunks() * 16.0f + 8.0f)) {
                 // Raw tint (before the lightmap multiply) and the entity's light, for RT shading.
                 int light = packed >= 0 ? packed : packedLight();
                 net.vulkanmod.vulkan.rt.RtEntities.add(data, vertexCount, format.getSize(), VRenderSystem.getModelViewMatrix4f(),
@@ -584,11 +587,10 @@ public class EntityRenderer {
 
     private static final org.joml.Vector3f rtOrigin = new org.joml.Vector3f();
 
-    /** Whether the batch's first vertex lies within the RT range (horizontal, camera-relative). */
-    private static boolean inRtRange(ByteBuffer data, VertexFormat format) {
+    /** Whether the batch's first vertex lies within {@code range} blocks (horizontal, camera-relative). */
+    private static boolean inRtRange(ByteBuffer data, float range) {
         org.joml.Vector3f o = net.vulkanmod.vulkan.rt.RtEntities.origin(VRenderSystem.getModelViewMatrix4f(), rtOrigin);
-        float x = o.x + data.getFloat(0), z = o.z + data.getFloat(8);
-        float range = net.vulkanmod.Initializer.CONFIG.effectiveRtShadowDistance() * 16.0f - 8.0f;
+        float x = o.x + data.getFloat(data.position()), z = o.z + data.getFloat(data.position() + 8);
         return Math.max(Math.abs(x), Math.abs(z)) < range;
     }
 
@@ -879,9 +881,12 @@ public class EntityRenderer {
         VulkanImage image = new VulkanImage(1, width, height, 4, false, clamp);
         image.uploadSubTextureAsync(0, width, height, 0, 0, 4, 0, 0, width, pixels);
         // RT: entity hits are shaded with a color per model face, picked from these pixels.
-        byte[] copy = new byte[width * height * 4];
-        pixels.get(0, copy);
-        cpuPixels.put(image, new net.vulkanmod.vulkan.rt.RtEntities.Texture(width, height, copy));
+        // Only on devices that can ray trace (the copy doubles the texture in the heap).
+        if (net.vulkanmod.vulkan.rt.RtScene.supported()) {
+            byte[] copy = new byte[width * height * 4];
+            pixels.get(0, copy);
+            cpuPixels.put(image, new net.vulkanmod.vulkan.rt.RtEntities.Texture(width, height, copy));
+        }
         MemoryUtil.memFree(pixels);
         return image;
     }

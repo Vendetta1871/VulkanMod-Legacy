@@ -19,14 +19,21 @@ import java.nio.file.StandardCopyOption;
  */
 public class Config {
 
-    /** Number of swapchain images / frames in flight. */
-    public int frameQueueSize = 2;
+    /**
+     * Number of swapchain images / frames in flight. 3: with only 2 the CPU waits for the
+     * present of the previous frame, which on a PRIME setup (render GPU without a display)
+     * is a full-frame copy over PCIe that then cannot overlap rendering.
+     */
+    public int frameQueueSize = 3;
+    /** Settings format; null in files written before it existed (see {@link #migrate}). */
+    public Integer configVersion;
+    private static final int CONFIG_VERSION = 1;
     /** Batch GUI draws through the Vulkan GUI renderer. */
     public boolean guiOptimizations = true;
 
     /** World resolution relative to the window, 0.25..1; below 1 the upscaler fills in (F7). */
     public float renderScale = 1.0f;
-    /** auto (FSR 3 when scaled and available, else FSR 1) | fsr3 | fsr1 | blit. */
+    /** auto (FSR 3 when scaled with ray tracing on and available, else FSR 1) | fsr3 | fsr1 | blit. */
     public String upscaler = "auto";
     /** FSR 1 RCAS sharpness in stops: 0 = strongest. */
     public float fsr1Sharpness = 0.2f;
@@ -199,12 +206,22 @@ public class Config {
                 c.rayTracing = null;
                 c.rtDistance = null;
             }
+            if (c != null) c.migrate();
             return c;
         } catch (JsonParseException | IOException e) {
             net.vulkanmod.Initializer.LOGGER.error("Failed to load VulkanMod config, using defaults: {}", path, e);
             backup(path);
             return null;
         }
+    }
+
+    /** Upgrades settings written by older versions; a new config just gets the current version. */
+    public void migrate() {
+        if (configVersion == null || configVersion < 1) {
+            // 0.2.0 and older defaulted to 2 frames in flight.
+            if (frameQueueSize == 2) frameQueueSize = 3;
+        }
+        configVersion = CONFIG_VERSION;
     }
 
     private static void backup(Path path) {

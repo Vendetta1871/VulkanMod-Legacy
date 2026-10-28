@@ -40,7 +40,8 @@ public final class FrameTargets {
     private static int generation;
     /**
      * auto | fsr3 | fsr1 | blit (Config.upscaler, VULKANMOD_UPSCALER overrides).
-     * auto: FSR 3 when the scene is scaled and the native library loads, else FSR 1.
+     * auto: FSR 3 when the scene is scaled, ray tracing is on and the native library loads,
+     * else FSR 1.
      * "fsr3" also runs at scale 1 (native AA).
      */
     private static String upscaler = "auto";
@@ -52,6 +53,11 @@ public final class FrameTargets {
     public static int depthFormat() { return depthFormat; }
     public static Phase phase() { return phase; }
     public static float renderScale() { return renderScale; }
+    private static long recording;
+
+    /** Bumped at the start of every recorded frame (also frames that never get submitted). */
+    static long recordingId() { return recording; }
+
     /** Bumped whenever the targets are recreated; descriptor users compare it. */
     public static int generation() { return generation; }
 
@@ -68,7 +74,8 @@ public final class FrameTargets {
         upscaler = config.effectiveUpscaler();
         blitOnly = upscaler.equals("blit");
         float scale = config.effectiveRenderScale();
-        if (scale != renderScale) {
+        boolean share = scale == 1.0f && shareColorAllowed();
+        if (scale != renderScale || (display.width() > 0 && share != sharedColor)) {
             renderScale = scale;
             if (display.width() > 0) Drawer.shouldRecreate = true;
         }
@@ -102,19 +109,35 @@ public final class FrameTargets {
     static void resize(int displayW, int displayH) {
         int sw = Math.max(1, Math.round(displayW * renderScale));
         int sh = Math.max(1, Math.round(displayH * renderScale));
-        scene.create(sw, sh, COLOR_FORMAT,
-                // STORAGE: RT passes modify the scene color in place.
-                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-                        | (net.vulkanmod.vulkan.rt.RtScene.enabled() ? VK_IMAGE_USAGE_STORAGE_BIT : 0), depthFormat);
-        // STORAGE: the upscalers write the display color from compute.
+        // The scene goes first: it may borrow the display color, which must outlive it.
+        scene.destroy();
+        // STORAGE: the upscalers write the display color from compute (and RT, when shared).
         display.create(displayW, displayH, COLOR_FORMAT,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
                         | VK_IMAGE_USAGE_STORAGE_BIT,
                 depthFormat);
+        sharedColor = sw == displayW && sh == displayH && shareColorAllowed();
+        scene.create(sw, sh, COLOR_FORMAT,
+                // STORAGE: RT passes modify the scene color in place.
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                        | (net.vulkanmod.vulkan.rt.RtScene.enabled() ? VK_IMAGE_USAGE_STORAGE_BIT : 0), depthFormat,
+                sharedColor ? display : null);
         generation++;
     }
 
+    /**
+     * N2: at render scale 1 without a temporal upscaler the scene renders straight into the
+     * display color (no full-screen copy between the phases). FSR 3 at scale 1 needs a
+     * separate input; the debug views blit over the display.
+     */
+    private static boolean sharedColor;
+
+    private static boolean shareColorAllowed() {
+        return !upscaler.equals("fsr3") && !RtDebugView.ACTIVE && !MotionVectorPass.DEBUG_VIEW;
+    }
+
     static void destroy() {
+        GpuTimer.destroy();
         releaseRtPasses();
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.destroy();
         Fsr3Upscaler.destroy();
@@ -168,7 +191,9 @@ public final class FrameTargets {
     private static void recordRtShadows(VkCommandBuffer cmd, MemoryStack stack) {
         recordRtScene(cmd, stack);
         RtLightingPass.record(cmd, stack);
+        GpuTimer.mark(cmd, GpuTimer.RT_LIGHTING);
         RtReflectionPass.record(cmd, stack, false);
+        GpuTimer.mark(cmd, GpuTimer.RT_REFLECT_OPAQUE);
     }
 
     /** Builds this frame's TLAS once, outside rendering. */
@@ -176,6 +201,7 @@ public final class FrameTargets {
         if (rtRecorded) return;
         rtRecorded = true;
         net.vulkanmod.vulkan.rt.RtScene.record(cmd, stack);
+        GpuTimer.mark(cmd, GpuTimer.RT_SCENE);
     }
 
     /** Returns the scene depth to the attachment layout, contents kept, for the rest of the scene. */
@@ -272,12 +298,18 @@ public final class FrameTargets {
 
     /** Whether this frame uses the temporal upscaler (decided at frame start: jitter depends on it). */
     private static boolean wantTemporal() {
-        boolean requested = upscaler.equals("fsr3") || (upscaler.equals("auto") && scaled());
-        return requested && Fsr3Upscaler.available();
+        // auto: FSR 3 only with ray tracing, whose noisy lighting gains from the temporal
+        // accumulation; without RT the scene is cheap and FSR 1 costs less (AUDIT N1).
+        boolean requested = upscaler.equals("fsr3")
+                || (upscaler.equals("auto") && scaled() && net.vulkanmod.vulkan.rt.RtScene.enabled());
+        // Camera history (jitter, motion vectors) is captured by the batched chunk path only.
+        return requested && net.vulkanmod.render.TerrainRenderer.BATCH && Fsr3Upscaler.available();
     }
 
     /** Starts the SCENE phase: clears and begins rendering into the scene target. */
     static void beginFrame(VkCommandBuffer cmd, float[] clearColor, MemoryStack stack) {
+        recording++;
+        GpuTimer.beginFrame(cmd);
         temporal = wantTemporal();
         updateLodBias();
         net.vulkanmod.render.CameraHistory.setJitterEnabled(temporal);
@@ -297,7 +329,7 @@ public final class FrameTargets {
         opaqueTaken = opaqueDone = rtRecorded = false;
         net.vulkanmod.vulkan.rt.RtEntities.beginFrame();
         depthReadable = false;
-        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 0);
+        net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 0);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.SCENE;
     }
@@ -310,6 +342,7 @@ public final class FrameTargets {
     public static void enterDisplayPhase(VkCommandBuffer cmd, MemoryStack stack) {
         if (phase != Phase.SCENE) return;
         vkCmdEndRendering(cmd);
+        GpuTimer.mark(cmd, GpuTimer.SCENE_END);
 
         if (MotionVectorPass.enabled()) {
             MotionVectorPass.record(cmd, depthAspect(), stack);
@@ -321,6 +354,7 @@ public final class FrameTargets {
             else recordRtScene(cmd, stack);
             // Reflections see the translucent layer, so they run after it.
             if (rtShadowsWanted()) RtReflectionPass.record(cmd, stack, true);
+            GpuTimer.mark(cmd, GpuTimer.RT_REFLECT_TRANSLUCENT);
             net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 4);
         }
 
@@ -348,12 +382,25 @@ public final class FrameTargets {
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
             depthToAttachment(depth.get(0), display);
             pipelineBarrier(cmd, depth, stack);
+        } else if (sharedColor) {
+            // The scene already is the display color (still an attachment): only the
+            // display depth needs to become an attachment.
+            VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(2, stack);
+            imageBarrier(b.get(0), display.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            depthToAttachment(b.get(1), display);
+            pipelineBarrier(cmd, b, stack);
         } else {
             blitIntoDisplay(cmd, scene.colorImage(), scene.width(), scene.height(), COLOR_FORMAT,
                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, stack);
         }
 
+        net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 6);
+        GpuTimer.mark(cmd, GpuTimer.UPSCALE);
         beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.DISPLAY;
     }
@@ -418,7 +465,8 @@ public final class FrameTargets {
                 VK_PIPELINE_STAGE_2_NONE, 0,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         pipelineBarrier(cmd, post, stack);
-        if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 5);
+        GpuTimer.mark(cmd, GpuTimer.FRAME_END);
+        net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 5);
     }
 
     private static void beginRendering(VkCommandBuffer cmd, RenderTarget target, int colorLoadOp,

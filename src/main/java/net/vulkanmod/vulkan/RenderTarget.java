@@ -17,6 +17,8 @@ public final class RenderTarget {
     private int width, height;
     private long colorImage, colorMemory, colorView;
     private long depthImage, depthMemory, depthView;
+    /** False when the color image belongs to another target (see {@link #create}). */
+    private boolean ownsColor;
 
     RenderTarget(String name) {
         this.name = name;
@@ -31,6 +33,14 @@ public final class RenderTarget {
 
     /** (Re)creates the images; the caller guarantees the GPU no longer uses the old ones. */
     void create(int w, int h, int colorFormat, int colorUsage, int depthFormat) {
+        create(w, h, colorFormat, colorUsage, depthFormat, null);
+    }
+
+    /**
+     * As above; with {@code shareColor} this target renders into that target's color image
+     * (same extent and format) and only owns its depth.
+     */
+    void create(int w, int h, int colorFormat, int colorUsage, int depthFormat, RenderTarget shareColor) {
         destroy();
         width = w;
         height = h;
@@ -39,12 +49,20 @@ public final class RenderTarget {
             LongBuffer pImage = stack.mallocLong(1);
             PointerBuffer pMemory = stack.mallocPointer(1);
 
-            MemoryManager.createImage(w, h, 1, colorFormat, VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | colorUsage,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pImage, pMemory);
-            colorImage = pImage.get(0);
-            colorMemory = pMemory.get(0);
-            colorView = Vulkan.createImageView(colorImage, colorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            if (shareColor != null) {
+                colorImage = shareColor.colorImage;
+                colorView = shareColor.colorView;
+                colorMemory = 0L;
+                ownsColor = false;
+            } else {
+                MemoryManager.createImage(w, h, 1, colorFormat, VK_IMAGE_TILING_OPTIMAL,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | colorUsage,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pImage, pMemory);
+                colorImage = pImage.get(0);
+                colorMemory = pMemory.get(0);
+                colorView = Vulkan.createImageView(colorImage, colorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+                ownsColor = true;
+            }
 
             // STORE + SAMPLED: FSR, motion-vector reprojection and RT read the depth later.
             MemoryManager.createImage(w, h, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL,
@@ -60,8 +78,11 @@ public final class RenderTarget {
     void destroy() {
         VkDevice device = Vulkan.getDevice();
         // Views go before the images they were created from (N24).
-        if (colorView != 0L) vkDestroyImageView(device, colorView, null);
-        if (colorImage != 0L) MemoryManager.freeImage(colorImage, colorMemory);
+        if (ownsColor) {
+            if (colorView != 0L) vkDestroyImageView(device, colorView, null);
+            if (colorImage != 0L) MemoryManager.freeImage(colorImage, colorMemory);
+        }
+        ownsColor = false;
         if (depthView != 0L) vkDestroyImageView(device, depthView, null);
         if (depthImage != 0L) MemoryManager.freeImage(depthImage, depthMemory);
         colorView = colorImage = colorMemory = 0L;

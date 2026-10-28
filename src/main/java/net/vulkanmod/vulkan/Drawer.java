@@ -213,6 +213,98 @@ public class Drawer {
         drawFrame();
     }
 
+    /** The current slot was readied between frames and may hold pre-frame copies. */
+    private boolean slotPrepared;
+    /** Set around the animation tick: its uploads join the next frame's transfer buffer. */
+    private static boolean preFrameUploads;
+
+    /**
+     * N3: uploads of the animation tick (TextureBridge tile batch) record into the transfer
+     * command buffer of the frame about to start instead of a separate TransferQueue submit,
+     * whose fence the next frame start had to wait on - which serialized CPU and GPU on
+     * every tick.
+     */
+    public static void beginPreFrameUploads() { preFrameUploads = true; }
+    public static void endPreFrameUploads() { preFrameUploads = false; }
+
+    /**
+     * Readies the current frame slot: waits for its previous frame, retires out-of-frame
+     * TransferQueue submits that read its staging, rewinds its allocators. Once per slot use.
+     */
+    private void prepareSlot() {
+        if(slotPrepared) {
+            return;
+        }
+        // Only wait on a fence that a successful submit will signal (see fencePending).
+        if(fencePending[currentFrame]) {
+            vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
+        }
+        fencePending[currentFrame] = false;
+
+        // Uploads issued between frames through the TransferQueue are not covered by the
+        // frame fence; retire them before rewinding the staging slot they read from.
+        // No-op when nothing is pending.
+        TransferQueue.waitPendingFences();
+
+        // The frame fence covers every copy submitted with the previous occupant of this
+        // slot (staging included), so the CPU-side allocators can be rewound here.
+        resetFrameBuffers(currentFrame);
+
+        // A frame abandoned between the begin and the end of its transfer command buffer
+        // (submit failure) would leave the flag set; the buffer is reset on its next lazy use.
+        frameTransferRecording = false;
+        slotPrepared = true;
+    }
+
+    /** Ends the frame transfer command buffer with the barrier that publishes its writes. */
+    private VkCommandBuffer endFrameTransferCmd(MemoryStack stack) {
+        frameTransferRecording = false;
+        VkCommandBuffer transferCmd = transferCommandBuffers.get(currentFrame);
+
+        VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack);
+        barrier.sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+        barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+        barrier.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT
+                | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT
+                | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT
+                | VK_ACCESS_TRANSFER_WRITE_BIT);
+
+        vkCmdPipelineBarrier(transferCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
+                | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                0, barrier, (VkBufferMemoryBarrier.Buffer) null,
+                (VkImageMemoryBarrier.Buffer) null);
+
+        int err = vkEndCommandBuffer(transferCmd);
+        if(err != VK_SUCCESS) {
+            throw new RuntimeException("Failed to end frame transfer command buffer: " + err);
+        }
+        return transferCmd;
+    }
+
+    /**
+     * Submits pre-frame copies on their own, fenced by the slot's fence, when no frame will
+     * follow to carry them (minimized window, swapchain recreation).
+     */
+    private void flushPreFrameTransfers() {
+        if(!slotPrepared || !frameTransferRecording || activeCommandBuffers[currentFrame]) {
+            return;
+        }
+        try(MemoryStack stack = stackPush()) {
+            VkCommandBuffer transferCmd = endFrameTransferCmd(stack);
+            VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack).sType$Default()
+                    .pCommandBuffers(stack.pointers(transferCmd));
+            vkResetFences(device, stack.longs(inFlightFences.get(currentFrame)));
+            int rc = vkQueueSubmit(getGraphicsQueue(), submitInfo, inFlightFences.get(currentFrame));
+            if(rc != VK_SUCCESS) {
+                throw new RuntimeException("Failed to submit pre-frame transfers: " + rc);
+            }
+            fencePending[currentFrame] = true;
+        }
+        slotPrepared = false;
+    }
+
     public void initiateRenderPass() {
 
         try (MemoryStack stack = stackPush()) {
@@ -229,6 +321,7 @@ public class Drawer {
         }
 
         if(skipRendering) {
+            flushPreFrameTransfers();
             // Minimized: no frames are rendered, but the tick loop keeps uploading
             // animated tiles and the renderer keeps deferring frees. Retire everything
             // pending and reset the frame-slot buffers so nothing accumulates until
@@ -250,29 +343,11 @@ public class Drawer {
             recreateAfterPresent |= shouldRecreate;
             shouldRecreate = false;
         } else {
-            // Only wait on a fence that a successful submit will signal (see fencePending).
-            if(fencePending[currentFrame]) {
-                vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
-            }
-            fencePending[currentFrame] = false;
-
-            // Uploads issued between frames (animated tiles in runTick etc.) submit through
-            // the TransferQueue; the frame fence waited on above does not cover those
-            // submits. Retire them before rewinding the staging slot, or the next in-frame
-            // upload would overwrite bytes the GPU copy has not read yet (the minimized
-            // path below already does the same). No-op when nothing is pending.
-            TransferQueue.waitPendingFences();
-
-            // The frame fence just waited on covers every copy submitted with the previous
-            // occupant of this frame slot (staging included), so the CPU-side allocators
-            // can be rewound here. Doing it at frame start instead of frame end also keeps
-            // the staging buffer safe while minimized (endRenderPass() is skipped then).
-            resetFrameBuffers(currentFrame);
-
-            // A frame abandoned between the begin and the end of its transfer command
-            // buffer (submit failure) would leave the flag set; the buffer itself is reset
-            // on its next lazy use.
-            frameTransferRecording = false;
+            // Waits for the slot's previous frame and rewinds its allocators, unless the
+            // tick before this frame already did (pre-frame uploads, see prepareSlot).
+            prepareSlot();
+            // Consumed by this frame; a frame abandoned before its submit prepares anew.
+            slotPrepared = false;
 
             // TransferQueue pool slots are recycled by index; rewinding it once per frame
             // bounds the pool to the uploads issued between two frames. beginCommands()
@@ -441,8 +516,14 @@ public class Drawer {
      */
     public static VkCommandBuffer getFrameTransferCmd() {
         Drawer drawer = INSTANCE;
-        if(drawer == null || !drawer.activeCommandBuffers[currentFrame]) {
+        if(drawer == null) {
             return null;
+        }
+        if(!drawer.activeCommandBuffers[currentFrame]) {
+            if(!preFrameUploads || skipRendering || drawer.imageAcquired) {
+                return null;
+            }
+            drawer.prepareSlot();
         }
 
         VkCommandBuffer commandBuffer = drawer.transferCommandBuffers.get(currentFrame);
@@ -592,6 +673,9 @@ public class Drawer {
 
     public static int getCurrentFrame() { return currentFrame; }
 
+    /** Frames that can be queued on the GPU at once (one per swapchain image). */
+    public static int framesInFlight() { return Math.max(1, MAX_FRAMES_IN_FLIGHT); }
+
     /** True while the command buffer of the current frame is recording. */
     public static boolean isActive() {
         return INSTANCE != null && INSTANCE.activeCommandBuffers[currentFrame];
@@ -721,29 +805,7 @@ public class Drawer {
             // to run first by the intra-submit implicit dependency.
             VkCommandBuffer transferCmd = null;
             if(frameTransferRecording) {
-                frameTransferRecording = false;
-
-                transferCmd = transferCommandBuffers.get(currentFrame);
-
-                VkMemoryBarrier.Buffer barrier = VkMemoryBarrier.calloc(1, stack);
-                barrier.sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
-                barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
-                barrier.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT
-                        | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT
-                        | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT
-                        | VK_ACCESS_TRANSFER_WRITE_BIT);
-
-                vkCmdPipelineBarrier(transferCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
-                        | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                        | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                        0, barrier, (VkBufferMemoryBarrier.Buffer) null,
-                        (VkImageMemoryBarrier.Buffer) null);
-
-                int err = vkEndCommandBuffer(transferCmd);
-                if(err != VK_SUCCESS) {
-                    throw new RuntimeException("Failed to end frame transfer command buffer: " + err);
-                }
+                transferCmd = endFrameTransferCmd(stack);
             }
 
             VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack);
@@ -832,6 +894,7 @@ public class Drawer {
 
     /** @return true when the swapchain was replaced. */
     private boolean recreateSwapChain() {
+        flushPreFrameTransfers();
         vkDeviceWaitIdle(device);
         shouldRecreate = false;
 

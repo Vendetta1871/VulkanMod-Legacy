@@ -6,7 +6,6 @@ import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureMap;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.mixin.render.EntityRendererAccessor;
-import net.vulkanmod.vulkan.TransferQueue;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.lwjgl.opengl.GL11;
@@ -66,9 +65,9 @@ public class TextureBridge {
     private static int atlasMipLevels = 1;
 
     /**
-     * Opens the shared transfer command buffer for the tile uploads of one animation tick
-     * (TextureMapM brackets {@code TextureMap.updateAnimations} with these), so a tick with a
-     * dozen animated sprites costs one queue submit instead of a dozen.
+     * Brackets the tile uploads of one animation tick (TextureMapM wraps
+     * {@code TextureMap.updateAnimations} with these): they record into the next frame's
+     * transfer command buffer, so a tick costs no queue submit of its own.
      */
     public static void beginTileBatch(boolean blockAtlas, int atlasId) {
         animatingAtlasId = atlasId;
@@ -77,7 +76,9 @@ public class TextureBridge {
         if (NO_TILEMIRROR || tileBatchOpen || !Initializer.isVulkanActive()) {
             return;
         }
-        TransferQueue.startRecording();
+        // The copies join the transfer command buffer of the next frame (N3); when there is
+        // none to join, each copy falls back to a TransferQueue submit of its own.
+        net.vulkanmod.vulkan.Drawer.beginPreFrameUploads();
         tileBatchOpen = true;
     }
 
@@ -103,7 +104,7 @@ public class TextureBridge {
         }
         if (tileBatchOpen) {
             tileBatchOpen = false;
-            TransferQueue.endRecording();
+            net.vulkanmod.vulkan.Drawer.endPreFrameUploads();
         }
     }
 
