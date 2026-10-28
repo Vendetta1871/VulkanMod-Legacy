@@ -39,7 +39,48 @@ public final class RtLights {
 
     private RtLights() {}
 
-    /** Packs the section's emitters as x | y << 4 | z << 8 | level << 12, or null when none. */
+    /**
+     * Light color per block (registry path); others get {@link #DEFAULT_COLOR}. Vanilla has
+     * no light colors: these follow what the blocks look like.
+     */
+    private static final java.util.Map<String, float[]> COLORS = new HashMap<>();
+    private static final float[] DEFAULT_COLOR = {1.0f, 0.86f, 0.66f};
+    /** Blocks that glow for RT although vanilla gives them no light: path -> level. */
+    private static final java.util.Map<String, Integer> EXTRA_EMITTERS = new HashMap<>();
+    private static final java.util.List<float[]> colorTable = new ArrayList<>();
+    private static final java.util.Map<String, Integer> colorIndex = new HashMap<>();
+
+    static {
+        color(1.0f, 0.82f, 0.55f, "torch", "lit_pumpkin", "lit_furnace", "fire");
+        color(1.0f, 0.18f, 0.10f, "redstone_torch", "lit_redstone_ore", "redstone_block", "powered_repeater", "powered_comparator");
+        color(1.0f, 0.88f, 0.62f, "glowstone", "lit_redstone_lamp");
+        color(1.0f, 0.45f, 0.12f, "lava", "flowing_lava", "magma");
+        color(0.78f, 0.92f, 1.0f, "sea_lantern", "beacon");
+        color(0.95f, 0.92f, 1.0f, "end_rod");
+        color(0.62f, 0.25f, 1.0f, "portal", "end_portal", "end_gateway", "ender_chest");
+        color(0.45f, 1.0f, 0.55f, "brewing_stand");
+        EXTRA_EMITTERS.put("redstone_block", 7);
+    }
+
+    /** Saturated colors are lifted to a common luminance, so a red light is not a dim one. */
+    private static void color(float r, float g, float b, String... blocks) {
+        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        float k = Math.max(1.0f, 0.8f / lum);
+        for (String block : blocks) COLORS.put(block, new float[]{r * k, g * k, b * k});
+    }
+
+    /** Index into the color table (created on first use; stable for the session). */
+    private static int colorOf(String path) {
+        Integer i = colorIndex.get(path);
+        if (i == null) {
+            i = colorTable.size();
+            colorTable.add(COLORS.getOrDefault(path, DEFAULT_COLOR));
+            colorIndex.put(path, i);
+        }
+        return i;
+    }
+
+    /** Packs the section's emitters as x | y << 4 | z << 8 | level << 12 | color << 16, or null when none. */
     static int[] scan(RtScene.Section s) {
         World world = Minecraft.getMinecraft().world;
         int cy = s.originY >> 4;
@@ -54,10 +95,15 @@ public final class RtLights {
                     IBlockState state = storage.get(x, y, z);
                     if (state.getBlock() == Blocks.AIR) continue;
                     int level = state.getLightValue(world, pos.setPos(s.originX + x, s.originY + y, s.originZ + z));
+                    // Only emitters (and the extra ones) pay for the registry lookup.
+                    if (level <= 0 && state.getBlock() != Blocks.REDSTONE_BLOCK) continue;
+                    net.minecraft.util.ResourceLocation id = state.getBlock().getRegistryName();
+                    String path = id == null ? "" : id.getPath();
+                    if (level <= 0) level = EXTRA_EMITTERS.getOrDefault(path, 0);
                     if (level <= 0) continue;
                     if (out == null) out = new int[16];
                     else if (n == out.length) out = java.util.Arrays.copyOf(out, n * 2);
-                    out[n++] = x | y << 4 | z << 8 | Math.min(level, 15) << 12;
+                    out[n++] = x | y << 4 | z << 8 | Math.min(level, 15) << 12 | Math.min(colorOf(path), 0x7FFF) << 16;
                 }
             }
         }
@@ -111,23 +157,28 @@ public final class RtLights {
         }
         sorted.sort((a, b) -> Integer.compare(a[0], b[0]));
 
-        float[] lx = new float[MAX_LIGHTS * 4];
+        // Per light: center (relative to the origin), level, then rgb color.
+        float[] lx = new float[MAX_LIGHTS * 8];
         int n = 0;
         outer:
         for (int[] e : sorted) {
             RtScene.Section s = sections.get(e[1]);
             for (int packed : s.lights) {
                 if (n == MAX_LIGHTS) break outer;
-                lx[n * 4] = s.originX + (packed & 15) - originX + 0.5f;
-                lx[n * 4 + 1] = s.originY + (packed >> 4 & 15) - originY + 0.5f;
-                lx[n * 4 + 2] = s.originZ + (packed >> 8 & 15) - originZ + 0.5f;
-                lx[n * 4 + 3] = packed >> 12 & 15;
+                float[] rgb = colorTable.get(packed >>> 16);
+                lx[n * 8] = s.originX + (packed & 15) - originX + 0.5f;
+                lx[n * 8 + 1] = s.originY + (packed >> 4 & 15) - originY + 0.5f;
+                lx[n * 8 + 2] = s.originZ + (packed >> 8 & 15) - originZ + 0.5f;
+                lx[n * 8 + 3] = packed >> 12 & 15;
+                lx[n * 8 + 4] = rgb[0];
+                lx[n * 8 + 5] = rgb[1];
+                lx[n * 8 + 6] = rgb[2];
                 n++;
             }
         }
         // Chunk rebuilds without emitter changes (most of them) keep the uploaded data.
         int hash = n;
-        for (int i = 0; i < n * 4; i++) hash = hash * 31 + Float.floatToIntBits(lx[i]);
+        for (int i = 0; i < n * 8; i++) hash = hash * 31 + Float.floatToIntBits(lx[i]);
         if (!far && lights != null && hash == lastHash && n == lightCount) return;
         lastHash = hash;
         lightCount = n;
@@ -136,7 +187,7 @@ public final class RtLights {
         // Cells reached by each light's range.
         HashMap<Long, int[]> cells = new HashMap<>();
         for (int i = 0; i < n; i++) {
-            float x = lx[i * 4], y = lx[i * 4 + 1], z = lx[i * 4 + 2], r = lx[i * 4 + 3];
+            float x = lx[i * 8], y = lx[i * 8 + 1], z = lx[i * 8 + 2], r = lx[i * 8 + 3];
             int x0 = floorDiv(x - r), x1 = floorDiv(x + r);
             int y0 = floorDiv(y - r), y1 = floorDiv(y + r);
             int z0 = floorDiv(z - r), z1 = floorDiv(z + r);
@@ -184,7 +235,7 @@ public final class RtLights {
         }
 
         release();
-        lights = upload(cmd, floatsToBytes(lx, Math.max(1, n) * 4));
+        lights = upload(cmd, floatsToBytes(lx, Math.max(1, n) * 8));
         grid = upload(cmd, intsToBytes(table, table.length));
         index = upload(cmd, intsToBytes(indices, indices.length));
 

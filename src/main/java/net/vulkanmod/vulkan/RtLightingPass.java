@@ -51,6 +51,7 @@ final class RtLightingPass {
             viewZ = new StorageImage(VK_FORMAT_R32_SFLOAT, NRD_USAGE),
             blockDenoised = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, NRD_USAGE),
             giDenoised = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, NRD_USAGE);
+    private static final StorageImage albedo = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
     private static final StorageImage aux2 = new StorageImage(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
     /** ReSTIR reservoirs per pixel: light index (bits), W, M. */
     private static final StorageImage[] reservoirs = {
@@ -75,7 +76,7 @@ final class RtLightingPass {
         int w = scene.width(), h = scene.height();
         boolean fresh = false;
         StorageImage[] all = {history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2,
-                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised};
+                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised, albedo};
         boolean nrd = NrdDenoiser.ensure(w, h);
         for (StorageImage img : all) fresh |= img.ensure(w, h);
         if (fresh) historyValid = false;
@@ -103,7 +104,8 @@ final class RtLightingPass {
 
         long rtSet = RtDescriptors.write(RtDescriptors.PASS_LIGHTING, 0L, scene.depthView(), 0L,
                 new long[]{prev.view, cur.view, aux.view, normals.view, giPrev.view, giCur.view, aux2.view,
-                        reservoirs[parity ^ 1].view, reservoirs[parity].view, blockRaw.view, giRaw.view, viewZ.view});
+                        reservoirs[parity ^ 1].view, reservoirs[parity].view, blockRaw.view, giRaw.view, viewZ.view,
+                        albedo.view});
 
         // The depth was rendered with the jittered projection.
         invJittered.identity()
@@ -224,7 +226,7 @@ final class RtLightingPass {
         int[] types = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
         try (MemoryStack stack = stackPush()) {
             LongBuffer ptr = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(types.length, stack);
@@ -251,7 +253,7 @@ final class RtLightingPass {
     private static void writeCompositeSet(long set, RenderTarget scene, StorageImage cur, StorageImage giCur) {
         try (MemoryStack stack = stackPush()) {
             long[] views = {scene.depthView(), scene.colorView(), cur.view, aux.view, normals.view, giCur.view, aux2.view,
-                    blockDenoised.view, giDenoised.view};
+                    blockDenoised.view, giDenoised.view, albedo.view};
             VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(views.length, stack);
             for (int i = 0; i < views.length; i++) {
                 VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
@@ -292,7 +294,7 @@ final class RtLightingPass {
     static void destroy() {
         NrdDenoiser.destroy();
         for (StorageImage img : new StorageImage[]{history[0], history[1], aux, normals, giHistory[0], giHistory[1], aux2,
-                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised}) {
+                reservoirs[0], reservoirs[1], blockRaw, giRaw, viewZ, blockDenoised, giDenoised, albedo}) {
             img.destroy();
         }
         historyValid = false;

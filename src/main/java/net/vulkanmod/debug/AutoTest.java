@@ -196,10 +196,17 @@ public class AutoTest {
                 world.setBlockState(c.setPos(bx + 3, by + 1, bz + 9), Blocks.TORCH.getDefaultState());
                 world.setBlockState(c.setPos(bx + 12, by + 3, bz + 2), Blocks.GLOWSTONE.getDefaultState());
                 world.setBlockState(c.setPos(bx + 2, by + 1, bz + 12), Blocks.CRAFTING_TABLE.getDefaultState());
+                world.setBlockState(c.setPos(bx + 2, by + 1, bz + 3), Blocks.REDSTONE_BLOCK.getDefaultState());
+                world.setBlockState(c.setPos(bx + 11, by + 1, bz + 9), Blocks.REDSTONE_TORCH.getDefaultState());
             });
             serverCommand(mc, "time set 18000");
         } else if (t == 5) {
             serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 25", mc.player.getName(), bx + 7.5, by + 1.0, bz + 12.5));
+        } else if (t == 60) {
+            // A light placed in the loaded world (its light crosses the x = 208 section border).
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server != null) server.addScheduledTask(() -> server.getWorld(0).setBlockState(
+                    new BlockPos(bx + 9, by + 1, bz + 4), Blocks.TORCH.getDefaultState()));
         } else if (t == 100) {
             capture(mc, "torchRoomEarly");
         } else if (t == 160) {

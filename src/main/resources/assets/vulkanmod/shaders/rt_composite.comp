@@ -14,6 +14,7 @@ layout(set = 0, binding = 5, rgba16f) uniform readonly image2D gi;      // rgb: 
 layout(set = 0, binding = 6, rgba8) uniform readonly image2D aux2;     // rgb: sun factor, a: indirect light fade
 layout(set = 0, binding = 7, rgba16f) uniform readonly image2D blockDenoised;   // NRD outputs
 layout(set = 0, binding = 8, rgba16f) uniform readonly image2D giDenoised;
+layout(set = 0, binding = 9, rgba8) uniform readonly image2D albedo;   // texture * vertex tint
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered
@@ -40,6 +41,13 @@ void main() {
     if (a.w < 0.0) return;
     vec4 color = imageLoad(sceneColor, p);
     vec4 a2 = imageLoad(aux2, p);
+    if (a.x > 0.5) {
+        // A light source's own surface: fully lit in its own colors (vanilla leaves blocks
+        // that glow only for RT, like redstone, dark).
+        vec4 c = imageLoad(sceneColor, p);
+        imageStore(sceneColor, p, vec4(max(c.rgb, imageLoad(albedo, p).rgb), c.a));
+        return;
+    }
     if (a.w == 0.0) {
         // No primary hit (entities): sun shadows only.
         imageStore(sceneColor, p, vec4(color.rgb * a2.rgb, color.a));
@@ -98,7 +106,9 @@ void main() {
     vec3 block = mix(vec3(vanillaBlock), traced, pc.params.x * fade);
     // Open ground under the sky gathers about skyTerm: the difference is occlusion or bounce.
     vec3 giDelta = pc.params.w * giFade * (indirect - vec3(skyTerm));
-    vec3 ratio = (AMBIENT + skyTerm * sunFactor + block + giDelta) / (AMBIENT + skyTerm + vanillaBlock);
+    vec3 lightNew = AMBIENT + skyTerm * sunFactor + block + giDelta;
+    float lightOld = AMBIENT + skyTerm + vanillaBlock;
+    vec3 ratio = lightNew / lightOld;
     if (pc.params.z > 1.5) {
         imageStore(sceneColor, p, vec4(indirect, color.a));
         return;
@@ -107,5 +117,11 @@ void main() {
         imageStore(sceneColor, p, vec4(rt, color.a));
         return;
     }
-    imageStore(sceneColor, p, vec4(color.rgb * clamp(ratio, vec3(0.0), vec3(2.0)), color.a));
+    // Relighting scales vanilla's color (keeping its fog and shading). Where vanilla's light is
+    // (near) black that cannot add light - a fresh emitter in a chunk vanilla has not
+    // relit, light around corners - so dark pixels are lit from their albedo instead.
+    vec3 relit = color.rgb * clamp(ratio, vec3(0.0), vec3(2.0));
+    vec3 fromAlbedo = imageLoad(albedo, p).rgb * clamp(lightNew, vec3(0.0), vec3(1.0));
+    float dark = 1.0 - smoothstep(0.08, 0.3, lightOld);
+    imageStore(sceneColor, p, vec4(mix(relit, max(relit, fromAlbedo), dark), color.a));
 }
