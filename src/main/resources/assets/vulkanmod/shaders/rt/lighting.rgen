@@ -28,10 +28,10 @@ layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
     mat4 prevViewProj;  // camera-relative position -> previous clip space
     vec4 light;         // xyz: towards the sun/moon, w: sun shadow strength
-    vec4 params;        // x: RT range (blocks), y: frame, z: history valid, w: grid mask
+    vec4 params;        // x: shadow range (blocks), y: frame, z: history valid, w: grid mask
     vec4 cam;           // xyz: camera - light origin, w: light count
     vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
-    vec4 sky;           // rgb: sky radiance (luminance 1), w: > 0 traces indirect light
+    vec4 sky;           // rgb: sky radiance (luminance 1), w: indirect light range (blocks, 0: off)
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -185,13 +185,15 @@ void main() {
     }
 
     vec3 pos = unproject(p, d, vec2(size));
-    // Past the RT range the raster image stays as is; the last chunk fades out.
-    float fade = clamp((pc.params.x - max(abs(pos.x), abs(pos.z))) / 16.0, 0.0, 1.0);
+    // Past an effect's range the raster image stays as is; the last chunk fades out.
+    float horizontal = max(abs(pos.x), abs(pos.z));
+    float fade = clamp((pc.params.x - horizontal) / 16.0, 0.0, 1.0);
+    float giFade = clamp((pc.sky.w - horizontal) / 16.0, 0.0, 1.0);
     vec3 c = cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size));
     // Degenerate or non-finite geometry: never trace a NaN ray (software traversal on GPUs
     // without RT cores can spin on it).
     float len2 = dot(c, c);
-    if (fade <= 0.0 || !(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) {
+    if ((fade <= 0.0 && giFade <= 0.0) || !(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) {
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(historyCur, p, vec4(0.0));
         imageStore(giCur, p, vec4(0.0));
@@ -223,7 +225,7 @@ void main() {
     float sunFactor = 1.0;
     float ndl = dot(n, pc.light.xyz);
     float sky = hit ? payload.skyLight : 1.0;
-    if (pc.light.w > 0.0 && ndl > 0.0 && sky > 0.01) {
+    if (fade > 0.0 && pc.light.w > 0.0 && ndl > 0.0 && sky > 0.01) {
         bool lit = traceShadow(pos + n * (0.02 + 0.002 * dist), pc.light.xyz, 512.0);
         sunFactor = lit ? 1.0 : 1.0 - pc.light.w * fade;
     }
@@ -237,7 +239,7 @@ void main() {
     }
     float skyLight = payload.skyLight, blockLevel = payload.blockLight;
 
-    float rt = min(blockLight(pos, n), 1.5);
+    float rt = fade > 0.0 ? min(blockLight(pos, n), 1.5) : 0.0;
 
     // Temporal accumulation: bilinear reprojection, taps whose stored distance disagrees
     // with this surface (disocclusion) are dropped.
@@ -281,12 +283,13 @@ void main() {
     // Indirect light on a checkerboard alternating per frame (half the rays); the other
     // pixels keep their reprojected history unless they have none.
     vec3 giNew = vec3(0.0);
-    if (pc.sky.w > 0.0) {
+    if (giFade > 0.0) {
         bool trace = frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
         giNew = trace ? mix(giHist, indirect(pos, n, skyLight), 1.0 / max(frames * 0.5, 1.0)) : giHist;
     }
-    imageStore(giCur, p, vec4(giNew, 0.0));
+    imageStore(giCur, p, vec4(giNew, giFade));
 
     float skyTerm = brightness(skyLight) * pc.camDelta.w;
-    imageStore(aux, p, vec4(sunFactor, brightness(blockLevel), skyTerm, fade));
+    // w > 0 marks a hit; a pixel past the shadow range keeps vanilla block light.
+    imageStore(aux, p, vec4(sunFactor, brightness(blockLevel), skyTerm, max(fade, 1e-4)));
 }

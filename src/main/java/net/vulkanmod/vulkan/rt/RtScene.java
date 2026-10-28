@@ -107,7 +107,7 @@ public final class RtScene {
     }
 
     /**
-     * Applies Config.rtDistance (VULKANMOD_RT / VULKANMOD_RT_DISTANCE override). Turning it on recreates the frame
+     * Applies the RT preset/distances (VULKANMOD_RT / VULKANMOD_RT_DISTANCE override). Turning it on recreates the frame
      * targets (the scene color needs STORAGE) and reloads the chunks so every section gets
      * its BLAS; turning it off waits for the GPU and releases the RT resources.
      * Client thread only.

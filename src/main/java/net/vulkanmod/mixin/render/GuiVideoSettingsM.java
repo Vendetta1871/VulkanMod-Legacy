@@ -14,19 +14,20 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Adds an "Upscaling..." button to the vanilla video settings screen and opens
- * {@link UpscalingSettingsScreen} from it. Only shown while the Vulkan renderer
+ * Adds "Upscaling..." and "Ray Tracing..." buttons to the vanilla video settings screen
+ * (either side of Done) and opens {@link UpscalingSettingsScreen} / RayTracingSettingsScreen. Only shown while the Vulkan renderer
  * is the active one, since the settings do nothing on the GL path.
  *
- * <p>Also appends the VulkanMod entries (RTX toggle, FSR resolution slider) to the
+ * <p>Also appends the VulkanMod entries (FSR resolution slider) to the
  * option array {@code initGui} passes to the {@code GuiOptionsRowList} constructor.
  * Both branches of that constructor call (with and without the USE_VBO filtering)
- * get the extended array, so the two extra rows show on either path.</p>
+ * get the extended array, so the extra row shows on either path.</p>
  */
 @Mixin(GuiVideoSettings.class)
 public class GuiVideoSettingsM {
 
     private static final int UPSCALING_BUTTON_ID = 7300;
+    private static final int RAY_TRACING_BUTTON_ID = 7301;
 
     @Inject(method = "initGui", at = @At("TAIL"))
     private void vulkanmod$addUpscalingButton(CallbackInfo ci) {
@@ -38,17 +39,21 @@ public class GuiVideoSettingsM {
         // in the free space left of it on the same row.
         ((GuiScreenAccessor) this).vulkanmod$getButtonList().add(new GuiButton(UPSCALING_BUTTON_ID,
                 screen.width / 2 - 204, screen.height - 27, 100, 20, "Upscaling..."));
+        ((GuiScreenAccessor) this).vulkanmod$getButtonList().add(new GuiButton(RAY_TRACING_BUTTON_ID,
+                screen.width / 2 + 104, screen.height - 27, 100, 20, "Ray Tracing..."));
     }
 
     @Inject(method = "actionPerformed(Lnet/minecraft/client/gui/GuiButton;)V",
             at = @At("HEAD"), cancellable = true)
     private void vulkanmod$openUpscaling(GuiButton button, CallbackInfo ci) {
-        if (button.id != UPSCALING_BUTTON_ID) {
-            return;
-        }
         GuiScreen screen = (GuiScreen) (Object) this;
-        screen.mc.displayGuiScreen(new UpscalingSettingsScreen(screen));
-        ci.cancel();
+        if (button.id == UPSCALING_BUTTON_ID) {
+            screen.mc.displayGuiScreen(new UpscalingSettingsScreen(screen));
+            ci.cancel();
+        } else if (button.id == RAY_TRACING_BUTTON_ID) {
+            screen.mc.displayGuiScreen(new net.vulkanmod.config.gui.RayTracingSettingsScreen(screen));
+            ci.cancel();
+        }
     }
 
     @ModifyArg(method = "initGui",

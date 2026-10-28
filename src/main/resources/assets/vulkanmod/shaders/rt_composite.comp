@@ -49,7 +49,7 @@ void main() {
 
     float sum = 0.0, wsum = 0.0;
     vec3 giSum = vec3(0.0);
-    float giW = 0.0;
+    float giW = 0.0, giFadeSum = 0.0;
     for (int dy = -2; dy <= 2; dy++) {
         for (int dx = -2; dx <= 2; dx++) {
             ivec2 q = p + ivec2(dx, dy) * stride;
@@ -70,13 +70,17 @@ void main() {
                 vec3 pg = unproject(g, texelFetch(sceneDepth, g, 0).r, vec2(size));
                 float gw = exp(-0.12 * float(dx * dx + dy * dy)) * pow(max(dot(n, ng), 0.0), 8.0)
                         * exp(-abs(dot(n, pg - pos)) / (0.05 + 0.006 * dist));
-                giSum += imageLoad(gi, g).rgb * gw;
+                vec4 gq = imageLoad(gi, g);
+                giSum += gq.rgb * gw;
+                giFadeSum += gq.a * gw;
                 giW += gw;
             }
         }
     }
     float rt = wsum > 0.0 ? sum / wsum : h.x;
-    vec3 indirect = giW > 0.0 ? giSum / giW : imageLoad(gi, p).rgb;
+    vec4 giCenter = imageLoad(gi, p);
+    vec3 indirect = giW > 0.0 ? giSum / giW : giCenter.rgb;
+    float giFade = giW > 0.0 ? giFadeSum / giW : giCenter.a;
 
     float sunFactor = a.x, vanillaBlock = a.y, skyTerm = a.z, fade = a.w;
     // Several emitters add up where vanilla takes the brightest: the cap keeps lit areas
@@ -84,7 +88,7 @@ void main() {
     float traced = min(1.3 * rt + pc.params.y * vanillaBlock, 1.4 * vanillaBlock + 0.06);
     float block = mix(vanillaBlock, traced, pc.params.x * fade);
     // Open ground under the sky gathers about skyTerm: the difference is occlusion or bounce.
-    vec3 giDelta = pc.params.w * fade * (indirect - vec3(skyTerm));
+    vec3 giDelta = pc.params.w * giFade * (indirect - vec3(skyTerm));
     vec3 ratio = (AMBIENT + skyTerm * sunFactor + block + giDelta) / (AMBIENT + skyTerm + vanillaBlock);
     if (pc.params.z > 1.5) {
         imageStore(sceneColor, p, vec4(indirect, color.a));

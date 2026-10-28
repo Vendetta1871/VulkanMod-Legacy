@@ -116,7 +116,7 @@ final class RtLightingPass {
         invJittered.get(0, c);
         prevRel.get(64, c);
         c.putFloat(128, sun[0] * s).putFloat(132, sun[1] * s).putFloat(136, sun[2] * s).putFloat(140, sunStrength);
-        c.putFloat(144, RtScene.distanceChunks() * 16.0f).putFloat(148, frame++ & 0xFFFF)
+        c.putFloat(144, Initializer.CONFIG.effectiveRtShadowDistance() * 16.0f).putFloat(148, frame++ & 0xFFFF)
                 .putFloat(152, hasPrev ? 1.0f : 0.0f).putFloat(156, RtLights.gridMask());
         c.putFloat(160, camOff[0]).putFloat(164, camOff[1]).putFloat(168, camOff[2]).putFloat(172, RtLights.count());
         c.putFloat(176, (float) (CameraHistory.prevCamX() - cx)).putFloat(180, (float) (CameraHistory.prevCamY() - cy))
@@ -124,7 +124,8 @@ final class RtLightingPass {
                 .putFloat(188, sky ? 0.2f + 0.8f * sun[3] : 0.0f);
         float gi = Initializer.CONFIG.effectiveRtIndirect();
         float[] skyRad = skyRadiance();
-        c.putFloat(192, skyRad[0]).putFloat(196, skyRad[1]).putFloat(200, skyRad[2]).putFloat(204, gi > 0.0f ? 1.0f : 0.0f);
+        float giRange = gi > 0.0f ? Initializer.CONFIG.effectiveRtIndirectDistance() * 16.0f : 0.0f;
+        c.putFloat(192, skyRad[0]).putFloat(196, skyRad[1]).putFloat(200, skyRad[2]).putFloat(204, giRange);
         rtPipeline.trace(cmd, rtSet, c, w, h);
         historyValid = true;
 

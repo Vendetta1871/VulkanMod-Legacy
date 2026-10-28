@@ -34,14 +34,40 @@ public class Config {
     public float fsr3Sharpness = 0.3f;
 
     /**
-     * Ray-traced effects (shadows for now) within this many chunks of the camera; farther
-     * sections keep plain raster lighting. 0 = off. Needs ray-tracing pipeline support.
+     * Ray tracing preset: off | low | medium | high | custom. The named presets set the three
+     * distances below; custom keeps them as edited. Needs ray-tracing pipeline support.
      */
-    public int rtDistance = 0;
-    /** Pre-rtDistance on/off switch, read once and migrated (true becomes {@link #RT_DISTANCE_DEFAULT}). */
+    public String rtPreset = "off";
+    /** Per effect: within this many chunks of the camera (0 = off); farther stays raster. */
+    public int rtShadowDistance = 6, rtIndirectDistance = 3, rtReflectionDistance = 4;
+    /** Older settings, read once and migrated to the preset and distances. */
+    public Integer rtDistance;
     public Boolean rayTracing;
 
-    public static final int RT_DISTANCE_MAX = 16, RT_DISTANCE_DEFAULT = 8;
+    public static final int RT_DISTANCE_MAX = 16;
+    public static final String[] RT_PRESETS = {"off", "low", "medium", "high", "custom"};
+
+    /** {shadows, indirect, reflections} of a named preset, or null for custom. */
+    public static int[] rtPresetDistances(String preset) {
+        return switch (preset == null ? "off" : preset) {
+            case "off" -> new int[]{0, 0, 0};
+            case "low" -> new int[]{4, 0, 2};
+            case "medium" -> new int[]{6, 3, 4};
+            case "high" -> new int[]{10, 6, 8};
+            default -> null;
+        };
+    }
+
+    /** Applies a named preset to the distances (custom leaves them). */
+    public void applyRtPreset(String preset) {
+        rtPreset = preset;
+        int[] d = rtPresetDistances(preset);
+        if (d != null) {
+            rtShadowDistance = d[0];
+            rtIndirectDistance = d[1];
+            rtReflectionDistance = d[2];
+        }
+    }
     /** How much ray-traced shadows darken, 0..1. */
     public float rtShadowStrength = 0.45f;
     /** How much ray-traced block light (torches, glowstone...) replaces vanilla's, 0..1. */
@@ -57,15 +83,35 @@ public class Config {
         return effectiveRtDistance() > 0;
     }
 
-    /** VULKANMOD_RT=0 turns RT off; VULKANMOD_RT=1 turns it on at the configured or default distance. */
+    /** Range of the RT scene: the largest effect distance. */
     public int effectiveRtDistance() {
-        int d = (int) envFloat("VULKANMOD_RT_DISTANCE", rtDistance);
+        int[] d = effectiveRtDistances();
+        return Math.max(d[0], Math.max(d[1], d[2]));
+    }
+
+    public int effectiveRtShadowDistance() { return effectiveRtDistances()[0]; }
+    public int effectiveRtIndirectDistance() { return effectiveRtDistances()[1]; }
+    public int effectiveRtReflectionDistance() { return effectiveRtDistances()[2]; }
+
+    /**
+     * {shadows, indirect, reflections} in chunks. VULKANMOD_RT=0 turns RT off, VULKANMOD_RT=1
+     * turns an "off" config on with the medium preset, VULKANMOD_RT_DISTANCE sets all three.
+     */
+    public int[] effectiveRtDistances() {
+        int[] d = rtPresetDistances(rtPreset);
+        if (d == null) d = new int[]{rtShadowDistance, rtIndirectDistance, rtReflectionDistance};
         String env = System.getenv("VULKANMOD_RT");
         if (env != null) {
-            if (!env.isEmpty() && env.charAt(0) == '0') return 0;
-            if (d <= 0) d = RT_DISTANCE_DEFAULT;
+            if (!env.isEmpty() && env.charAt(0) == '0') return new int[]{0, 0, 0};
+            if (d[0] + d[1] + d[2] == 0) d = rtPresetDistances("medium");
         }
-        return Math.max(0, Math.min(RT_DISTANCE_MAX, d));
+        String all = System.getenv("VULKANMOD_RT_DISTANCE");
+        if (all != null) {
+            int v = (int) envFloat("VULKANMOD_RT_DISTANCE", 0.0f);
+            d = new int[]{v, v, v};
+        }
+        for (int i = 0; i < 3; i++) d[i] = Math.max(0, Math.min(RT_DISTANCE_MAX, d[i]));
+        return d;
     }
 
     public float effectiveRtIndirect() {
@@ -134,9 +180,16 @@ public class Config {
         // JsonParseException covers both JsonSyntaxException and JsonIOException.
         try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
             Config c = GSON.fromJson(reader, Config.class);
-            if (c != null && c.rayTracing != null) {
-                if (c.rayTracing && c.rtDistance <= 0) c.rtDistance = RT_DISTANCE_DEFAULT;
+            if (c != null && (c.rayTracing != null || c.rtDistance != null)) {
+                int old = c.rtDistance != null ? c.rtDistance : Boolean.TRUE.equals(c.rayTracing) ? 8 : 0;
+                if (old > 0) {
+                    c.rtPreset = "custom";
+                    c.rtShadowDistance = c.rtIndirectDistance = c.rtReflectionDistance = Math.min(old, RT_DISTANCE_MAX);
+                } else {
+                    c.rtPreset = "off";
+                }
                 c.rayTracing = null;
+                c.rtDistance = null;
             }
             return c;
         } catch (JsonParseException | IOException e) {

@@ -31,7 +31,8 @@ final class RtReflectionPass {
 
     static void record(VkCommandBuffer cmd, MemoryStack stack) {
         float strength = Initializer.CONFIG.effectiveRtReflections();
-        if (strength <= 0.0f || !RtScene.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null) return;
+        int range = Initializer.CONFIG.effectiveRtReflectionDistance();
+        if (strength <= 0.0f || range <= 0 || !RtScene.ready() || net.vulkanmod.render.TextureBridge.getAtlasImage() == null) return;
         if (pipeline == null) {
             pipeline = new RtPipeline(RtDescriptors.layout(), PUSH, VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                     "rt/reflections.rgen", new String[]{"rt/debug.rmiss", "rt/shadow.rmiss"},
@@ -77,7 +78,7 @@ final class RtReflectionPass {
         c.putFloat(64, sun[0] * s).putFloat(68, sun[1] * s).putFloat(72, sun[2] * s).putFloat(76, glint);
         c.putFloat(80, skyColor[0]).putFloat(84, skyColor[1]).putFloat(88, skyColor[2])
                 .putFloat(92, (float) ((System.nanoTime() - START) / 1e9 % 3600.0));
-        c.putFloat(96, strength).putFloat(100, opaque ? 1.0f : 0.0f).putFloat(104, RtScene.distanceChunks() * 16.0f)
+        c.putFloat(96, strength).putFloat(100, opaque ? 1.0f : 0.0f).putFloat(104, range * 16.0f)
                 .putFloat(108, sky ? 0.2f + 0.8f * sun[3] : 0.0f);
         c.putFloat(112, (float) (CameraHistory.camX() % 1024.0)).putFloat(116, (float) (CameraHistory.camY() % 1024.0))
                 .putFloat(120, (float) (CameraHistory.camZ() % 1024.0));

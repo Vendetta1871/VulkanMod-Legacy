@@ -569,7 +569,7 @@ public class EntityRenderer {
     private static boolean inRtRange(ByteBuffer data, VertexFormat format) {
         org.joml.Vector3f o = net.vulkanmod.vulkan.rt.RtEntities.origin(VRenderSystem.getModelViewMatrix4f(), rtOrigin);
         float x = o.x + data.getFloat(0), z = o.z + data.getFloat(8);
-        float range = net.vulkanmod.vulkan.rt.RtScene.distanceChunks() * 16.0f - 8.0f;
+        float range = net.vulkanmod.Initializer.CONFIG.effectiveRtShadowDistance() * 16.0f - 8.0f;
         return Math.max(Math.abs(x), Math.abs(z)) < range;
     }
 

@@ -159,9 +159,9 @@ public class AutoTest {
     private static final boolean FPS_MODE = System.getenv("VULKANMOD_AUTOTEST_FPS") != null;
 
     /**
-     * {@code VULKANMOD_AUTOTEST_RTTOGGLE=1}: in the world, moves the video-settings "RTX"
-     * distance slider through the same GameSettings path a drag takes: 4 chunks (chunks
-     * reload, BLASes build), 12 chunks, off; captures after each step, then quits.
+     * {@code VULKANMOD_AUTOTEST_RTTOGGLE=1}: in the world, switches the ray tracing preset the
+     * way the Ray Tracing screen does: low (chunks reload, BLASes build), high, off; captures
+     * after each step, then quits.
      */
     private static final boolean RT_TOGGLE_MODE = System.getenv("VULKANMOD_AUTOTEST_RTTOGGLE") != null;
     private static int rtToggleTicks;
@@ -296,12 +296,13 @@ public class AutoTest {
 
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
-        net.minecraft.client.settings.GameSettings.Options rtx = net.vulkanmod.config.gui.VulkanVideoOptions.rtx();
         if (t == 20) {
             capture(mc, "rtBefore");
         } else if (t == 30 || t == 170 || t == 240) {
-            mc.gameSettings.setOptionFloatValue(rtx, t == 30 ? 4.0f : t == 170 ? 12.0f : 0.0f);
-            Initializer.LOGGER.info("[autotest] RTX -> {}", mc.gameSettings.getKeyBinding(rtx));
+            String preset = t == 30 ? "low" : t == 170 ? "high" : "off";
+            Initializer.CONFIG.applyRtPreset(preset);
+            net.vulkanmod.vulkan.FrameTargets.applySettings();
+            Initializer.LOGGER.info("[autotest] RT preset -> {}", preset);
         } else if (t == 160) {
             capture(mc, "rtNear");
         } else if (t == 230) {
@@ -1510,7 +1511,13 @@ public class AutoTest {
         } else if (mc.currentScreen instanceof net.vulkanmod.config.gui.UpscalingSettingsScreen) {
             if (++guiTicks == 50) {
                 capture(mc, "upscaling");
-            } else if (guiTicks >= 56 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
+            } else if (guiTicks == 54) {
+                mc.displayGuiScreen(new net.vulkanmod.config.gui.RayTracingSettingsScreen(mc.currentScreen));
+            }
+        } else if (mc.currentScreen instanceof net.vulkanmod.config.gui.RayTracingSettingsScreen) {
+            if (++guiTicks == 60) {
+                capture(mc, "rayTracing");
+            } else if (guiTicks >= 66 && System.getenv("VULKANMOD_AUTOTEST_STAY") == null) {
                 Initializer.LOGGER.info("[autotest] done, shutting down");
                 mc.shutdown();
             }

@@ -41,9 +41,7 @@ public abstract class GameSettingsM {
     @Inject(method = "getKeyBinding(Lnet/minecraft/client/settings/GameSettings$Options;)Ljava/lang/String;",
             at = @At("HEAD"), cancellable = true)
     private void vulkanmod$customOptionLabel(GameSettings.Options option, CallbackInfoReturnable<String> cir) {
-        if (VulkanVideoOptions.isRtx(option)) {
-            cir.setReturnValue(VulkanVideoOptions.rtxLabel());
-        } else if (VulkanVideoOptions.isFsrResolution(option)) {
+        if (VulkanVideoOptions.isFsrResolution(option)) {
             cir.setReturnValue(VulkanVideoOptions.fsrResolutionLabel());
         }
     }
@@ -53,19 +51,12 @@ public abstract class GameSettingsM {
     private void vulkanmod$customOptionFloat(GameSettings.Options option, CallbackInfoReturnable<Float> cir) {
         if (VulkanVideoOptions.isFsrResolution(option)) {
             cir.setReturnValue(VulkanVideoOptions.fsrResolutionValue());
-        } else if (VulkanVideoOptions.isRtx(option)) {
-            cir.setReturnValue((float) Initializer.CONFIG.rtDistance);
         }
     }
 
     @Inject(method = "setOptionFloatValue(Lnet/minecraft/client/settings/GameSettings$Options;F)V",
             at = @At("HEAD"), cancellable = true)
     private void vulkanmod$setCustomOptionFloat(GameSettings.Options option, float value, CallbackInfo ci) {
-        if (VulkanVideoOptions.isRtx(option)) {
-            VulkanVideoOptions.setRtDistance(value);
-            ci.cancel();
-            return;
-        }
         if (!VulkanVideoOptions.isFsrResolution(option)) {
             return;
         }
