@@ -8,7 +8,9 @@
 //  - one shadow ray towards a block light picked by resampled importance sampling (RIS)
 //    among the lights of the pixel's grid cell; its noisy estimate is accumulated over
 //    frames (depth-validated reprojection) into the history image.
-// rt_composite.comp filters the history spatially and relights the scene color.
+//  - one cosine-distributed indirect (GI) ray on half the pixels per frame, shaded from its hit's albedo and lightmap
+//    (sky color on a miss where the pixel sees the sky), accumulated likewise.
+// rt_composite.comp filters the histories spatially and relights the scene color.
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
@@ -19,6 +21,8 @@ layout(set = 0, binding = 9, rgba16f) uniform readonly image2D historyPrev;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D historyCur;   // x: block light, y: frames, z: distance
 layout(set = 0, binding = 11, rgba16f) uniform writeonly image2D aux;          // x: sun factor, y: vanilla block, z: sky term, w: fade (-1 none, 0 no hit)
 layout(set = 0, binding = 12, rgba8) uniform writeonly image2D normals;
+layout(set = 0, binding = 13, rgba16f) uniform readonly image2D giPrev;
+layout(set = 0, binding = 14, rgba16f) uniform writeonly image2D giCur;      // rgb: indirect light
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
@@ -27,6 +31,7 @@ layout(push_constant) uniform Constants {
     vec4 params;        // x: RT range (blocks), y: frame, z: history valid, w: grid mask
     vec4 cam;           // xyz: camera - light origin, w: light count
     vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
+    vec4 sky;           // rgb: sky radiance (luminance 1), w: > 0 traces indirect light
 } pc;
 
 layout(location = 0) rayPayloadEXT Payload payload;
@@ -149,6 +154,25 @@ float blockLight(vec3 pos, vec3 n) {
     return count <= MAX_CANDIDATES ? wsum : wsum * float(count) / float(candidates);
 }
 
+// One cosine-weighted bounce: the hit's albedo times its vanilla light and face shading;
+// a miss sees the sky, scaled by how much sky this pixel's lightmap says it sees.
+vec3 indirect(vec3 pos, vec3 n, float skyLight) {
+    vec3 t1 = normalize(abs(n.y) < 0.9 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    vec3 t2 = cross(n, t1);
+    float phi = 6.2831853 * rand();
+    float r2 = rand();
+    float sr = sqrt(r2);
+    vec3 dir = normalize(t1 * (cos(phi) * sr) + t2 * (sin(phi) * sr) + n * sqrt(1.0 - r2));
+    if (any(isnan(dir)) || any(isnan(pos))) return vec3(0.0);
+    payload.t = -1.0;
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, pos + n * 0.02, 0.0, dir, 128.0, 0);
+    if (payload.t < 0.0) return pc.sky.rgb * pc.camDelta.w * brightness(skyLight);
+    vec3 hn = payload.normal;
+    float face = abs(hn.y) > 0.5 ? (hn.y > 0.0 ? 1.0 : 0.5) : (abs(hn.z) > 0.5 ? 0.8 : 0.6);
+    float light = max(brightness(payload.skyLight) * pc.camDelta.w, brightness(payload.blockLight));
+    return payload.albedo * light * face;
+}
+
 void main() {
     ivec2 p = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
@@ -156,6 +180,7 @@ void main() {
     if (d >= 0.99999) {   // sky, clouds past the far plane
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(historyCur, p, vec4(0.0));
+        imageStore(giCur, p, vec4(0.0));
         return;
     }
 
@@ -169,6 +194,7 @@ void main() {
     if (fade <= 0.0 || !(len2 > 1e-20) || any(isnan(pos)) || any(isinf(pos))) {
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(historyCur, p, vec4(0.0));
+        imageStore(giCur, p, vec4(0.0));
         return;
     }
     vec3 n = c * inversesqrt(len2);
@@ -188,7 +214,7 @@ void main() {
     float slack = 0.05 + 0.01 * dist;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
     bool hit = payload.t >= 0.0;
-    if (hit) {
+    if (hit && !any(isnan(payload.normal))) {
         n = payload.normal;
         pos = eye + dir * payload.t;
     }
@@ -206,14 +232,17 @@ void main() {
     if (!hit) {
         imageStore(aux, p, vec4(sunFactor, 0.0, 0.0, 0.0));
         imageStore(historyCur, p, vec4(0.0, 0.0, length(pos), 0.0));
+        imageStore(giCur, p, vec4(0.0));
         return;
     }
+    float skyLight = payload.skyLight, blockLevel = payload.blockLight;
 
     float rt = min(blockLight(pos, n), 1.5);
 
     // Temporal accumulation: bilinear reprojection, taps whose stored distance disagrees
     // with this surface (disocclusion) are dropped.
     float prev = 0.0, frames = 0.0;
+    vec3 giHist = vec3(0.0);
     if (pc.params.z > 0.0) {
         vec4 clip = pc.prevViewProj * vec4(pos, 1.0);
         if (clip.w > 0.0) {
@@ -232,13 +261,16 @@ void main() {
                 float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
                 prev += h.x * w;
                 frames += h.y * w;
+                giHist += imageLoad(giPrev, q).rgb * w;
                 wsum += w;
             }
             if (wsum > 0.05) {
                 prev /= wsum;
                 frames /= wsum;
+                giHist /= wsum;
             } else {
                 prev = frames = 0.0;
+                giHist = vec3(0.0);
             }
         }
     }
@@ -246,6 +278,15 @@ void main() {
     float accumulated = mix(prev, rt, 1.0 / frames);
     imageStore(historyCur, p, vec4(accumulated, frames, length(pos), 0.0));
 
-    float skyTerm = brightness(payload.skyLight) * pc.camDelta.w;
-    imageStore(aux, p, vec4(sunFactor, brightness(payload.blockLight), skyTerm, fade));
+    // Indirect light on a checkerboard alternating per frame (half the rays); the other
+    // pixels keep their reprojected history unless they have none.
+    vec3 giNew = vec3(0.0);
+    if (pc.sky.w > 0.0) {
+        bool trace = frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
+        giNew = trace ? mix(giHist, indirect(pos, n, skyLight), 1.0 / max(frames * 0.5, 1.0)) : giHist;
+    }
+    imageStore(giCur, p, vec4(giNew, 0.0));
+
+    float skyTerm = brightness(skyLight) * pc.camDelta.w;
+    imageStore(aux, p, vec4(sunFactor, brightness(blockLevel), skyTerm, fade));
 }

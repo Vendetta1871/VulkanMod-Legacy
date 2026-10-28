@@ -48,6 +48,8 @@ public class Config {
     public float rtBlockLight = 1.0f;
     /** Ray-traced reflections on water, glass and ice, 0..1 (0 = off). */
     public float rtReflections = 1.0f;
+    /** Ray-traced indirect light (bounces, occlusion), 0..1 (0 = off). */
+    public float rtIndirect = 1.0f;
 
     // Environment overrides (tests and autotest runs) take precedence over the file.
 
@@ -64,6 +66,10 @@ public class Config {
             if (d <= 0) d = RT_DISTANCE_DEFAULT;
         }
         return Math.max(0, Math.min(RT_DISTANCE_MAX, d));
+    }
+
+    public float effectiveRtIndirect() {
+        return clamp(envFloat("VULKANMOD_RT_GI", rtIndirect), 0.0f, 1.0f);
     }
 
     public float effectiveRtReflections() {

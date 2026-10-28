@@ -85,6 +85,7 @@ void main() {
 
     vec3 r = reflect(dir, n);
     if (dot(r, n0) < 0.02) r = normalize(r + n0 * (0.02 - dot(r, n0)));
+    if (any(isnan(r)) || any(isnan(hitPos))) return;
     vec3 origin = hitPos + n0 * (0.02 + 0.001 * dist);
     payload.t = -1.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, 0.0, r, 512.0, 0);

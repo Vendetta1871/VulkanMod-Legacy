@@ -16,7 +16,11 @@ void main() {
     vec4 tint = unpackUnorm4x8(a.color) * w.x + unpackUnorm4x8(b.color) * w.y + unpackUnorm4x8(c.color) * w.z;
     vec3 albedo = textureLod(blockAtlas, uv, 0.0).rgb * tint.rgb;
 
-    vec3 n = normalize(cross(b.pos - a.pos, c.pos - a.pos));
+    // Degenerate (zero-area) triangles have no normal: face the ray instead. A NaN normal
+    // would turn into NaN secondary rays, which software traversal can spin on.
+    vec3 cr = cross(b.pos - a.pos, c.pos - a.pos);
+    float len2 = dot(cr, cr);
+    vec3 n = len2 > 1e-20 ? cr * inversesqrt(len2) : -gl_WorldRayDirectionEXT;
     if (dot(n, gl_WorldRayDirectionEXT) > 0.0) n = -n;
 
     float sky = (float((a.light >> 16) & 0xFFFFu) * w.x + float((b.light >> 16) & 0xFFFFu) * w.y
