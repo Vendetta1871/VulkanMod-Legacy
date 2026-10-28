@@ -67,6 +67,11 @@ public class RayTracingSettingsScreen extends GuiScreen {
         this.presetButton = new GuiButton(ID_PRESET, x, y, CONTROL_WIDTH, CONTROL_HEIGHT, presetLabel());
         this.presetButton.enabled = this.supported;
         this.buttonList.add(this.presetButton);
+        y += CONTROL_HEIGHT + 6;
+
+        // Independent of the preset; "fast" works without ray tracing.
+        this.dynamicButton = new GuiButton(ID_DYNAMIC, x, y, CONTROL_WIDTH, CONTROL_HEIGHT, dynamicLabel());
+        this.buttonList.add(this.dynamicButton);
         y += CONTROL_HEIGHT + 12;
 
         for (int i = 0; i < 3; i++) {
@@ -78,11 +83,6 @@ public class RayTracingSettingsScreen extends GuiScreen {
             this.buttonList.add(slider);
             y += CONTROL_HEIGHT + 6;
         }
-
-        // Independent of the preset; "fast" works without ray tracing.
-        y += 6;
-        this.dynamicButton = new GuiButton(ID_DYNAMIC, x, y, CONTROL_WIDTH, CONTROL_HEIGHT, dynamicLabel());
-        this.buttonList.add(this.dynamicButton);
 
         this.buttonList.add(new GuiButton(ID_DONE, this.width / 2 - 100, this.height - 27, I18n.format("gui.done")));
     }
