@@ -90,6 +90,7 @@ void main() {
     vec3 n0 = payload.normal;
     vec3 albedo = payload.albedo;
     vec4 material = payload.material;
+    float surfaceSky = payload.skyLight, surfaceBlock = payload.blockLight;
     bool water = translucent && payload.tinted > 0.5 && n0.y > 0.9;
     bool metal = !translucent && material.g >= 229.5 / 255.0;
     float smoothness = translucent ? max(material.r, 0.94) : material.r;
@@ -124,10 +125,21 @@ void main() {
     vec4 color = imageLoad(sceneColor, p);
     vec3 c = color.rgb;
     if (water && pc.params.y > 0.0) {
-        // Refraction: shift the opaque scene seen through the surface by the wave slope.
-        vec2 shift = n.xz * (40.0 / (1.0 + 0.15 * dist));
+        // The water's own look instead of vanilla's flat blend: the bed (opaque-only copy,
+        // shifted by the wave slope for refraction) absorbed along the path through the water
+        // (Beer-Lambert, thickness from a refracted ray), the rest in-scattered water color.
+        vec3 down = refract(dir, n, 1.0 / 1.33);
+        if (any(isnan(down)) || dot(down, down) < 0.5) down = dir;
+        payload.t = -1.0;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, hitPos - n0 * 0.02, 0.0, down, 48.0, 0);
+        float thickness = payload.t < 0.0 ? 48.0 : payload.t;
+        vec2 shift = n.xz * (40.0 / (1.0 + 0.15 * dist)) * min(thickness, 2.0);
         ivec2 q = clamp(p + ivec2(shift), ivec2(0), size - 1);
-        c += 0.5 * (imageLoad(opaqueColor, q).rgb - imageLoad(opaqueColor, p).rgb);
+        vec3 bed = imageLoad(opaqueColor, q).rgb;
+        vec3 waterColor = clamp(albedo * 1.4, vec3(0.02), vec3(1.0));
+        vec3 transmit = exp(-(1.0 - waterColor) * 0.35 * thickness);
+        float light = max(brightness(surfaceSky) * pc.params.w, brightness(surfaceBlock)) * 0.9 + 0.05;
+        c = bed * transmit + waterColor * light * 0.55 * (1.0 - transmit);
     }
     if (metal) {
         // Metals: mostly the (tinted) reflection, keeping some of the lit texture.
