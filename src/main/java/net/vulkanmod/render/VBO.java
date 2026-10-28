@@ -55,8 +55,21 @@ public class VBO {
 
     private static int rtMask(net.minecraft.util.BlockRenderLayer layer) {
         return layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT ? net.vulkanmod.vulkan.rt.RtScene.MASK_TRANSLUCENT
-                : layer == net.minecraft.util.BlockRenderLayer.CUTOUT
+                // Both cutout layers are alpha tested (CUTOUT_MIPPED: leaves, grass sides).
+                : layer == net.minecraft.util.BlockRenderLayer.CUTOUT || layer == net.minecraft.util.BlockRenderLayer.CUTOUT_MIPPED
                 ? net.vulkanmod.vulkan.rt.RtScene.MASK_CUTOUT : net.vulkanmod.vulkan.rt.RtScene.MASK_OPAQUE;
+    }
+
+    /**
+     * Adds geometry uploaded while ray tracing was off to the RT scene (it is still in the
+     * chunk arena), so turning RT on needs no chunk reload.
+     */
+    public void registerRt(net.minecraft.util.math.BlockPos origin, net.minecraft.util.BlockRenderLayer layer) {
+        if (rt != null && rt.isRegistered()) return;
+        if (arenaOffset < 0 || vertexCount <= 0 || arenaGeneration != ChunkBatcher.arena().generation()) return;
+        if (rt == null) rt = new net.vulkanmod.vulkan.rt.RtScene.Section();
+        net.vulkanmod.vulkan.rt.RtScene.onUpload(rt, arenaOffset, vertexCount);
+        net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, origin.getX(), origin.getY(), origin.getZ(), rtMask(layer));
     }
 
     /** The render chunk moved: its old geometry leaves the RT scene until the rebuild. */

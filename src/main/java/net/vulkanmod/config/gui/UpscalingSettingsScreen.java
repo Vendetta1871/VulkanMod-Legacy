@@ -123,6 +123,17 @@ public class UpscalingSettingsScreen extends GuiScreen {
         // Slider clicks also arrive here; their value was already handled by the responder.
     }
 
+    private boolean scalePending;
+
+    @Override
+    protected void mouseReleased(int mouseX, int mouseY, int state) {
+        super.mouseReleased(mouseX, mouseY, state);
+        if (this.scalePending) {
+            this.scalePending = false;
+            this.commit(false);
+        }
+    }
+
     @Override
     protected void keyTyped(char typedChar, int keyCode) throws IOException {
         if (keyCode == 1) {
@@ -199,6 +210,10 @@ public class UpscalingSettingsScreen extends GuiScreen {
                 case ID_RENDER_SCALE -> {
                     renderScale = snapRenderScale(value);
                     renderScaleSlider.setSliderValue(renderScale, false);
+                    // A new scale recreates the targets (and with RT its images and NRD):
+                    // applied when the slider is released, not on every step of a drag.
+                    scalePending = true;
+                    return;
                 }
                 case ID_FSR1 -> {
                     fsr1Sharpness = snap(value, 0.1F, 0.0F, 2.0F);

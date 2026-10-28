@@ -33,6 +33,7 @@
     "render.GuiScreenM",
     "render.GuiScreenAccessor",
     "render.TextureMapAccessor",
+    "render.RenderGlobalAccessor",
     "render.GuiMainMenuM",
     "render.GuiVideoSettingsM",
     "render.GuiVideoSettingsAccessor",

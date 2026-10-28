@@ -45,8 +45,6 @@ public final class DynamicLights {
 
     private static final ArrayList<Light> lights = new ArrayList<>();
     private static long collectedFrame = -1;
-    /** View-space position and level per light for the raster ("fast") path. */
-    private static final float[] viewSpace = new float[MAX * 4];
     private static final Vector4f v = new Vector4f();
 
     private DynamicLights() {}
@@ -115,15 +113,30 @@ public final class DynamicLights {
         }
     }
 
+    /** Light level per item and metadata. */
+    private static final HashMap<net.minecraft.item.Item, HashMap<Integer, Integer>> levelCache = new HashMap<>();
+
     private static int levelOf(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return 0;
+        HashMap<Integer, Integer> perMeta = levelCache.computeIfAbsent(stack.getItem(), k -> new HashMap<>());
+        Integer cached = perMeta.get(stack.getMetadata());
+        if (cached != null) return cached;
+        int level = 0;
         if (stack.getItem() instanceof ItemBlock ib) {
             Block block = ib.getBlock();
-            @SuppressWarnings("deprecation")
-            int l = block.getStateFromMeta(stack.getMetadata()).getLightValue();
-            return l;
+            try {
+                @SuppressWarnings("deprecation")
+                int l = block.getStateFromMeta(stack.getMetadata()).getLightValue();
+                level = l;
+            } catch (RuntimeException e) {
+                // Mod blocks may reject metadata they do not map.
+                level = 0;
+            }
+        } else {
+            level = ITEM_LEVELS.getOrDefault(pathOf(stack), 0);
         }
-        return ITEM_LEVELS.getOrDefault(pathOf(stack), 0);
+        perMeta.put(stack.getMetadata(), level);
+        return level;
     }
 
     private static String pathOf(ItemStack stack) {
@@ -132,11 +145,13 @@ public final class DynamicLights {
     }
 
     /**
-     * For the raster ("fast") path: up to {@link #MAX} vec4 (view-space position, level; level
-     * 0 unused). Empty unless the mode is "fast".
+     * For the terrain shaders: up to {@code MAX - 1} vec4 (view-space position, level; level
+     * 0 unused), then (RT shadow range in blocks, 0, 0, 0): in "on" mode the terrain applies
+     * them only past the ray-traced range, in "fast" mode everywhere.
      */
     public static float[] viewSpaceArray() {
-        return fill(mode().equals("fast"));
+        refill();
+        return filled[0];
     }
 
     /**
@@ -144,15 +159,33 @@ public final class DynamicLights {
      * relight (particles, drawn after the RT lighting).
      */
     public static float[] viewSpaceArrayAll() {
-        return fill(!mode().equals("off"));
+        refill();
+        return filled[1];
     }
 
-    private static float[] fill(boolean enabled) {
+    /** Per frame: [0] terrain array, [1] particles (all lights, everywhere). Read by every UBO update. */
+    private static final float[][] filled = {new float[MAX * 4], new float[MAX * 4]};
+    private static long filledFrame = -1;
+
+    private static void refill() {
+        long frame = net.vulkanmod.vulkan.Drawer.frameCounter();
+        if (frame == filledFrame && CameraHistory.valid()) return;
+        filledFrame = frame;
+        String m = mode();
+        // Terrain: 15 lights, slot 15 carries the RT shadow range ("on": ray traced inside it).
+        fillInto(filled[0], !m.equals("off"), MAX - 1);
+        if (m.equals("on")) {
+            filled[0][(MAX - 1) * 4] = Initializer.CONFIG.effectiveRtShadowDistance() * 16.0f;
+        }
+        fillInto(filled[1], !m.equals("off"), MAX);
+    }
+
+    private static void fillInto(float[] viewSpace, boolean enabled, int max) {
         java.util.Arrays.fill(viewSpace, 0.0f);
-        if (!enabled) return viewSpace;
+        if (!enabled) return;
         ArrayList<Light> list = lights();
         org.joml.Matrix4f view = CameraHistory.view();
-        for (int i = 0; i < list.size(); i++) {
+        for (int i = 0; i < Math.min(max, list.size()); i++) {
             Light l = list.get(i);
             v.set(l.x(), l.y(), l.z(), 1.0f);
             view.transform(v);
@@ -161,7 +194,6 @@ public final class DynamicLights {
             viewSpace[i * 4 + 2] = v.z;
             viewSpace[i * 4 + 3] = l.level();
         }
-        return viewSpace;
     }
 
     /** The strongest dynamic block light level at a camera-relative point (entity lighting). */

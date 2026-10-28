@@ -807,6 +807,7 @@ public class Vulkan {
             for(int i = 0;i < pSwapchainImages.capacity();i++) {
                 swapChainImages.add(pSwapchainImages.get(i));
             }
+            Initializer.LOGGER.info("[swapchain] {} images, present mode {}", swapChainImages.size(), presentMode);
         }
     }
 

@@ -64,8 +64,10 @@ public class Initializer {
         CONFIG = Config.load(configPath);
         if (CONFIG == null) {
             CONFIG = new Config();
-            CONFIG.write(configPath);
+            CONFIG.migrate();
         }
+        // Also persists what Config.load migrated.
+        CONFIG.write(configPath);
     }
 
     /**
@@ -135,6 +137,7 @@ public class Initializer {
         } catch (Throwable t) {
             initGaveUp = true;
             LOGGER.error("Vulkan initialization failed, falling back to OpenGL", t);
+            notifyFallback(t);
             // M20: release whatever init managed to create (device, surface, VMA,
             // instance) before handing the window back to the GL path. A cleanup
             // failure must not mask the original error.
@@ -143,6 +146,21 @@ public class Initializer {
             } catch (Throwable cleanupFailure) {
                 LOGGER.error("Vulkan cleanup after failed init also failed", cleanupFailure);
             }
+        }
+    }
+
+    /** Tells the player the game runs on OpenGL now (a toast on the main menu). */
+    private static void notifyFallback(Throwable cause) {
+        String reason = String.valueOf(cause.getMessage()).contains("suitable GPU")
+                ? "Needs Vulkan 1.3 (dynamic rendering, sync2)" : "Vulkan failed to start, see the log";
+        try {
+            Minecraft mc = Minecraft.getMinecraft();
+            mc.addScheduledTask(() -> mc.getToastGui().add(new net.minecraft.client.gui.toasts.SystemToast(
+                    net.minecraft.client.gui.toasts.SystemToast.Type.TUTORIAL_HINT,
+                    new net.minecraft.util.text.TextComponentString("VulkanMod: using OpenGL"),
+                    new net.minecraft.util.text.TextComponentString(reason))));
+        } catch (Throwable ignored) {
+            // The log line above already reports it.
         }
     }
 

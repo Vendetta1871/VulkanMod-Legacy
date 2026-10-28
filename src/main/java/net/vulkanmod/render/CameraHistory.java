@@ -84,6 +84,15 @@ public final class CameraHistory {
             camY = e.lastTickPosY + (e.posY - e.lastTickPosY) * pt;
             camZ = e.lastTickPosZ + (e.posZ - e.lastTickPosZ) * pt;
         }
+        // Teleport, respawn, world or dimension change, switched view entity: the previous
+        // frame shows something else, so temporal passes start over.
+        Object world = mc.world;
+        if (prevValid && (world != prevWorld.get() || e != prevEntity.get()
+                || Math.abs(camX - prevCamX) + Math.abs(camY - prevCamY) + Math.abs(camZ - prevCamZ) > 8.0)) {
+            prevValid = false;
+        }
+        if (world != prevWorld.get()) prevWorld = new java.lang.ref.WeakReference<>(world);
+        if (e != prevEntity.get()) prevEntity = new java.lang.ref.WeakReference<>(e);
         valid = true;
         if (!logged && prevValid) {
             logged = true;
@@ -94,6 +103,9 @@ public final class CameraHistory {
     }
 
     private static boolean logged;
+    /** Weak: a world left for the main menu must not stay reachable from here. */
+    private static java.lang.ref.WeakReference<Object> prevWorld = new java.lang.ref.WeakReference<>(null),
+            prevEntity = new java.lang.ref.WeakReference<>(null);
 
     /** Drops the history: teleport, dimension change, resize, respawn. */
     public static void reset() {

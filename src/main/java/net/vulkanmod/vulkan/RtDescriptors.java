@@ -29,6 +29,8 @@ final class RtDescriptors {
     static final int PASS_DEBUG = 0, PASS_LIGHTING = 1, PASS_REFLECTIONS = 2, PASS_REFLECTIONS_OPAQUE = 3;
 
     private static long layout, pool;
+    /** Bindings in the layout; every write call touches each at most once. */
+    private static int bindingCount;
     private static final long[][] sets = new long[PASSES][SLOTS];
 
     private RtDescriptors() {}
@@ -68,6 +70,7 @@ final class RtDescriptors {
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
         };
+        bindingCount = bindings.length;
         try (MemoryStack stack = stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(bindings.length, stack);
@@ -97,16 +100,26 @@ final class RtDescriptors {
      * use retired with the slot's fence). Views equal to 0 are left unwritten.
      */
     static long write(int pass, long storageView, long depthView, long opaqueView) {
-        return write(pass, storageView, depthView, opaqueView, null);
+        return write(pass, storageView, depthView, opaqueView, null, 0L);
+    }
+
+    /** As above, plus the lighting pass's normals at binding 12 (read by the reflections). */
+    static long write(int pass, long storageView, long depthView, long opaqueView, long normalsView) {
+        return write(pass, storageView, depthView, opaqueView, null, normalsView);
+    }
+
+    static long write(int pass, long storageView, long depthView, long opaqueView, long[] lightingViews) {
+        return write(pass, storageView, depthView, opaqueView, lightingViews, 0L);
     }
 
     /** As {@link #write(int, long, long, long)}, plus the lighting pass's lights and images 9-15. */
-    static long write(int pass, long storageView, long depthView, long opaqueView, long[] lightingViews) {
+    private static long write(int pass, long storageView, long depthView, long opaqueView, long[] lightingViews,
+                              long normalsView) {
         if (layout == 0L) create();
         long set = sets[pass][Drawer.getCurrentFrame() % SLOTS];
         VulkanImage atlas = net.vulkanmod.render.TextureBridge.getAtlasImage();
         try (MemoryStack stack = stackPush()) {
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(24, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(bindingCount, stack);
             int n = 0;
 
             VkWriteDescriptorSetAccelerationStructureKHR as = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
@@ -126,12 +139,14 @@ final class RtDescriptors {
                         atlas.getTextureImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
                 VulkanImage materials = net.vulkanmod.vulkan.rt.RtMaterials.image();
                 n = image(writes, n, set, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
-                        (materials != null ? materials : atlas).getTextureImageView(),
+                        // Without a material atlas every surface is plain (all-zero material).
+                        (materials != null ? materials : net.vulkanmod.vulkan.rt.RtMaterials.blank()).getTextureImageView(),
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
             }
             n = image(writes, n, set, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
                     depthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
             n = image(writes, n, set, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0L, opaqueView, VK_IMAGE_LAYOUT_GENERAL, stack);
+            n = image(writes, n, set, 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0L, normalsView, VK_IMAGE_LAYOUT_GENERAL, stack);
 
             if (lightingViews != null) {
                 long[][] buffers = {

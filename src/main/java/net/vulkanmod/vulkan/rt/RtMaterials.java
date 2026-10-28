@@ -148,6 +148,10 @@ public final class RtMaterials {
             return true;
         } catch (java.io.IOException e) {
             return false;
+        } catch (RuntimeException e) {
+            // A broken _s.png (unreadable, null image) only loses this sprite's material.
+            Initializer.LOGGER.warn("[rt] skipping material {}: {}", spec, e.toString());
+            return false;
         }
     }
 
@@ -174,7 +178,24 @@ public final class RtMaterials {
         return true;
     }
 
+    private static VulkanImage blank;
+
+    /** A 1x1 all-zero material: the fallback when the atlas could not be built. */
+    public static VulkanImage blank() {
+        if (blank == null) {
+            blank = new VulkanImage(1, 1, 1, 4, false, true);
+            ByteBuffer zero = MemoryUtil.memCalloc(4);
+            blank.uploadSubTextureAsync(0, 1, 1, 0, 0, 4, 0, 0, 1, zero);
+            MemoryUtil.memFree(zero);
+        }
+        return blank;
+    }
+
     public static void destroy() {
+        if (blank != null) {
+            blank.free();
+            blank = null;
+        }
         if (image != null) {
             image.free();
             image = null;

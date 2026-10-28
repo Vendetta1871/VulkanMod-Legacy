@@ -81,14 +81,16 @@ final class RtBuffer {
 
     // --- deferred destruction: objects the GPU may still use are released a few frames later ---
 
-    /** Frames to wait; more than any frames-in-flight count the renderer uses. */
-    private static final int DELAY = 4;
+    /** Frames to wait: one more than the frames that can be in flight (swapchain image count). */
+    private static int delay() {
+        return net.vulkanmod.vulkan.Drawer.framesInFlight() + 1;
+    }
     private static final ArrayDeque<Object[]> pending = new ArrayDeque<>();
     private static long frame;
 
     /** Queues {@code release} to run once no in-flight frame can use the object. */
     static void defer(Runnable release) {
-        pending.add(new Object[]{frame + DELAY, release});
+        pending.add(new Object[]{frame + delay(), release});
     }
 
     /** Called once per frame. */

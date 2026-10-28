@@ -55,12 +55,8 @@ final class Fsr3Upscaler {
 
     /** True when the native library is present and no context creation failed. */
     static boolean available() {
-        return !failed && FfxApi.load();
-    }
-
-    /** Called when the camera jumped (teleport, dimension change, respawn). */
-    static void requestReset() {
-        resetNext = true;
+        // ffx-api 1.1.4 describes depth only as R32_FLOAT: other depth formats are not supported.
+        return !failed && FrameTargets.depthFormat() == VK_FORMAT_D32_SFLOAT && FfxApi.load();
     }
 
     private static boolean ensureContext() {
