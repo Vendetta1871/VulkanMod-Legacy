@@ -381,6 +381,49 @@ public class AutoTest {
         }
     }
 
+    /**
+     * {@code VULKANMOD_AUTOTEST_DYNLIGHT=1}: a closed dark room without placed lights; the
+     * player holds a torch, a glowstone block and an iron block lie on the floor ahead;
+     * captures "dynLight". Run with VULKANMOD_DYNAMIC_LIGHTS=off|fast|on.
+     */
+    private static final boolean DYNLIGHT_MODE = System.getenv("VULKANMOD_AUTOTEST_DYNLIGHT") != null;
+    private static int dynLightTicks;
+
+    private static void dynLightStage(Minecraft mc) {
+        int t = ++dynLightTicks;
+        int bx = 440, by = 150, bz = 200;
+        if (t == 1) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server == null) return;
+            server.addScheduledTask(() -> {
+                net.minecraft.world.World world = server.getWorld(0);
+                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                for (int dx = 0; dx <= 12; dx++)
+                    for (int dy = 0; dy <= 6; dy++)
+                        for (int dz = 0; dz <= 12; dz++) {
+                            boolean shell = dx == 0 || dx == 12 || dy == 0 || dy == 6 || dz == 0 || dz == 12;
+                            world.setBlockState(c.setPos(bx + dx, by + dy, bz + dz),
+                                    shell ? Blocks.STONEBRICK.getDefaultState() : Blocks.AIR.getDefaultState());
+                        }
+                world.spawnEntity(new net.minecraft.entity.item.EntityItem(world, bx + 4.5, by + 1.2, bz + 5.5,
+                        new net.minecraft.item.ItemStack(Blocks.GLOWSTONE)));
+                world.spawnEntity(new net.minecraft.entity.item.EntityItem(world, bx + 7.5, by + 1.2, bz + 6.5,
+                        new net.minecraft.item.ItemStack(Blocks.IRON_BLOCK)));
+                net.minecraft.entity.player.EntityPlayer sp = world.getPlayerEntityByName(mc.player.getName());
+                if (sp != null) sp.setHeldItem(net.minecraft.util.EnumHand.MAIN_HAND, new net.minecraft.item.ItemStack(Blocks.TORCH));
+            });
+            mc.player.setHeldItem(net.minecraft.util.EnumHand.MAIN_HAND, new net.minecraft.item.ItemStack(Blocks.TORCH));
+            serverCommand(mc, "time set 18000");
+        } else if (t == 5) {
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 30", mc.player.getName(), bx + 6.5, by + 1.0, bz + 10.5));
+        } else if (t == 120) {
+            capture(mc, "dynLight");
+        } else if (t >= 130) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
         if (t == 20) {
@@ -602,6 +645,11 @@ public class AutoTest {
 
                 if (MATERIALS_MODE) {
                     materialsStage(mc);
+                    return;
+                }
+
+                if (DYNLIGHT_MODE) {
+                    dynLightStage(mc);
                     return;
                 }
 

@@ -76,6 +76,8 @@ public class Config {
     public float rtReflections = 1.0f;
     /** Ray-traced indirect light (bounces, occlusion), 0..1 (0 = off). */
     public float rtIndirect = 1.0f;
+    /** Dynamic lights (held / dropped light sources): off | fast (raster) | on (ray traced). */
+    public String rtDynamicLights = "on";
 
     // Environment overrides (tests and autotest runs) take precedence over the file.
 
@@ -112,6 +114,12 @@ public class Config {
         }
         for (int i = 0; i < 3; i++) d[i] = Math.max(0, Math.min(RT_DISTANCE_MAX, d[i]));
         return d;
+    }
+
+    public String effectiveDynamicLights() {
+        String env = System.getenv("VULKANMOD_DYNAMIC_LIGHTS");
+        String v = (env != null ? env : rtDynamicLights == null ? "on" : rtDynamicLights).toLowerCase();
+        return v.equals("off") || v.equals("fast") ? v : "on";
     }
 
     public float effectiveRtIndirect() {

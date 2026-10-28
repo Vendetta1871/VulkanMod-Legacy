@@ -21,13 +21,20 @@ void main() {
         float len2 = dot(cr, cr);
         vec3 en = len2 > 1e-20 ? cr * inversesqrt(len2) : -gl_WorldRayDirectionEXT;
         if (dot(en, gl_WorldRayDirectionEXT) > 0.0) en = -en;
-        payload.albedo = unpackUnorm4x8(face.x).rgb;
+        payload.material = vec4(0.0);
+        if ((face.y & 0x80000000u) != 0u) {
+            // Block-atlas face (dropped blocks, items): its texture and material.
+            vec2 uv = vec2(face.x & 0xFFFFu, face.x >> 16) / 65535.0;
+            payload.albedo = textureLod(blockAtlas, uv, 0.0).rgb;
+            payload.material = textureLod(materialAtlas, uv, 0.0);
+        } else {
+            payload.albedo = unpackUnorm4x8(face.x).rgb;
+        }
         payload.t = gl_HitTEXT;
         payload.normal = en;
         payload.skyLight = float(face.y & 0xFFu) / 15.0;
         payload.blockLight = float((face.y >> 8) & 0xFFu) / 15.0;
         payload.tinted = 0.0;
-        payload.material = vec4(0.0);
         return;
     }
     ChunkVertex a, b, c;

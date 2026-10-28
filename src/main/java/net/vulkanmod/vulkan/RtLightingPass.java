@@ -148,7 +148,8 @@ final class RtLightingPass {
         // Re-uploaded lights renumber: the previous reservoirs point at stale indices.
         boolean lightsStable = RtLights.generation() == lightGeneration;
         lightGeneration = RtLights.generation();
-        c.putFloat(208, lightsStable ? 1.0f : 0.0f).putFloat(212, nrd ? 1.0f : 0.0f);
+        c.putFloat(208, lightsStable ? 1.0f : 0.0f).putFloat(212, nrd ? 1.0f : 0.0f)
+                .putFloat(216, RtLights.dynamicCount());
         // View-space z of a camera-relative position: the view matrix's third row.
         org.joml.Matrix4f view = CameraHistory.view();
         c.putFloat(224, view.m02()).putFloat(228, view.m12()).putFloat(232, view.m22()).putFloat(236, view.m32());

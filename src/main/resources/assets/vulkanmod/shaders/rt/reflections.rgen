@@ -84,7 +84,8 @@ void main() {
         if (payload.t < 0.0) return;
     } else {
         // The opaque surface of the depth sample; only smooth materials reflect visibly.
-        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
+        // Entities too: dropped blocks carry their atlas material (an iron block on the ground).
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
         if (payload.t < 0.0 || payload.material.r < 0.5) return;
     }
 

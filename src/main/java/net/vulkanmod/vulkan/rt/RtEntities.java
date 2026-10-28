@@ -75,8 +75,20 @@ public final class RtEntities {
         }
         int light = Math.min(15, Math.max(0, sky)) | Math.min(15, Math.max(0, block)) << 8;
         for (int q = 0; q < count / 4; q++) {
-            int color = 0xFF999999;   // no CPU pixels (atlas items): neutral grey
-            if (texture != null && uvOffset >= 0) {
+            int color = 0xFF999999;   // no texture coordinates: neutral grey
+            int faceLight = light;
+            if (texture == null && uvOffset >= 0) {
+                // Block-atlas geometry (dropped blocks and items): the face's UV center, so the
+                // hit shader samples the atlas and the material atlas (flag in bit 31).
+                float u = 0, vv = 0;
+                for (int k = 0; k < 4; k++) {
+                    int o = base + (q * 4 + k) * stride + uvOffset;
+                    u += data.getFloat(o);
+                    vv += data.getFloat(o + 4);
+                }
+                color = (int) (Math.max(0, Math.min(1, u / 4)) * 65535) | (int) (Math.max(0, Math.min(1, vv / 4)) * 65535) << 16;
+                faceLight = light | 0x80000000;
+            } else if (texture != null && uvOffset >= 0) {
                 float u = 0, vv = 0;
                 for (int k = 0; k < 4; k++) {
                     int o = base + (q * 4 + k) * stride + uvOffset;
@@ -93,7 +105,7 @@ public final class RtEntities {
                         | 0xFF << 24;
             }
             int o = (vertexCount / 4 + q) * 8;
-            quadData.putInt(o, color).putInt(o + 4, light);
+            quadData.putInt(o, color).putInt(o + 4, faceLight);
         }
         vertexCount += count;
     }

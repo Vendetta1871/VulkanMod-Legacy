@@ -13,6 +13,8 @@ layout(binding = 0) uniform UniformBufferObject {
     mat4 MVP;
     mat4 ModelViewMat;
     int FogRadial;
+    // Dynamic lights ("fast" mode): view-space position, block light level (0 = unused).
+    vec4 DynLights[16];
 };
 
 struct ChunkMatrix {
@@ -39,6 +41,12 @@ void main() {
     vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
     vertexColor = Color;
     texCoord0 = UV0;
-    lightCoord = clamp(vec2(UV2) / 256.0, vec2(0.001953126), vec2(0.96875));
+    // Dynamic lights raise the block light like a placed light of their level would.
+    vec2 light = vec2(UV2);
+    for (int i = 0; i < 16; i++) {
+        vec4 dl = DynLights[i];
+        if (dl.w > 0.0) light.x = max(light.x, clamp(dl.w - distance(viewPos.xyz, dl.xyz), 0.0, 15.0) * 16.0);
+    }
+    lightCoord = clamp(light / 256.0, vec2(0.001953126), vec2(0.96875));
     slotOut = ChunkSlot;
 }

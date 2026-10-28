@@ -54,7 +54,9 @@ public final class RtLights {
         color(1.0f, 0.82f, 0.55f, "torch", "lit_pumpkin", "lit_furnace", "fire");
         color(1.0f, 0.18f, 0.10f, "redstone_torch", "lit_redstone_ore", "redstone_block", "powered_repeater", "powered_comparator");
         color(1.0f, 0.88f, 0.62f, "glowstone", "lit_redstone_lamp");
-        color(1.0f, 0.45f, 0.12f, "lava", "flowing_lava", "magma");
+        color(1.0f, 0.45f, 0.12f, "lava", "flowing_lava", "magma", "lava_bucket", "blaze_rod", "blaze_powder", "magma_cream");
+        color(1.0f, 0.88f, 0.62f, "glowstone_dust");
+        color(0.85f, 0.85f, 1.0f, "nether_star");
         color(0.78f, 0.92f, 1.0f, "sea_lantern", "beacon");
         color(0.95f, 0.92f, 1.0f, "end_rod");
         color(0.62f, 0.25f, 1.0f, "portal", "end_portal", "end_gateway", "ender_chest");
@@ -67,6 +69,11 @@ public final class RtLights {
         float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
         float k = Math.max(1.0f, 0.8f / lum);
         for (String block : blocks) COLORS.put(block, new float[]{r * k, g * k, b * k});
+    }
+
+    /** The light color of a block or item (registry path), also for dynamic lights. */
+    public static float[] colorFor(String path) {
+        return COLORS.getOrDefault(path, DEFAULT_COLOR);
     }
 
     /** Index into the color table (created on first use; stable for the session). */
@@ -111,6 +118,50 @@ public final class RtLights {
     }
 
     static void markDirty() { dirty = true; }
+
+    // --- dynamic lights (held / dropped light sources, DynamicLights in "on" mode) ---
+
+    private static RtBuffer dynamic;
+    private static int dynamicCount;
+    private static ByteBuffer dynamicCpu;
+
+    public static long dynamicBuffer() { return dynamic.buffer; }
+    public static long dynamicBytes() { return dynamic.size; }
+    public static int dynamicCount() { return dynamicCount; }
+
+    /** Uploads this frame's dynamic lights (same layout as the static list). Every frame. */
+    static void updateDynamic(VkCommandBuffer cmd, MemoryStack stack, double camX, double camY, double camZ) {
+        int max = net.vulkanmod.render.DynamicLights.MAX;
+        if (dynamic == null) {
+            dynamic = RtBuffer.create(max * 32L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+            dynamicCpu = MemoryUtil.memCalloc(max * 32);
+        }
+        java.util.List<net.vulkanmod.render.DynamicLights.Light> list =
+                net.vulkanmod.render.DynamicLights.mode().equals("on")
+                        ? net.vulkanmod.render.DynamicLights.lights() : java.util.List.of();
+        float ox = (float) (camX - originX), oy = (float) (camY - originY), oz = (float) (camZ - originZ);
+        int n = Math.min(max, list.size());
+        for (int i = 0; i < n; i++) {
+            net.vulkanmod.render.DynamicLights.Light l = list.get(i);
+            int o = i * 32;
+            dynamicCpu.putFloat(o, l.x() + ox).putFloat(o + 4, l.y() + oy).putFloat(o + 8, l.z() + oz)
+                    .putFloat(o + 12, l.level())
+                    .putFloat(o + 16, l.color()[0]).putFloat(o + 20, l.color()[1]).putFloat(o + 24, l.color()[2])
+                    .putFloat(o + 28, 0.0f);
+        }
+        dynamicCount = n;
+        if (n == 0) return;
+        org.lwjgl.vulkan.VkMemoryBarrier2.Buffer b = org.lwjgl.vulkan.VkMemoryBarrier2.calloc(1, stack);
+        // The previous frame's traces read the single buffer.
+        b.get(0).sType$Default()
+                .srcStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).srcAccessMask(VK_ACCESS_2_SHADER_STORAGE_READ_BIT)
+                .dstStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT).dstAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vkCmdPipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+        RtScene.updateBuffer(cmd, dynamic.buffer, dynamicCpu, n * 32);
+        b.get(0).srcStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT).srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
+                .dstStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).dstAccessMask(VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        vkCmdPipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+    }
 
     public static boolean ready() { return lights != null; }
     public static int count() { return lightCount; }
@@ -297,6 +348,13 @@ public final class RtLights {
     }
 
     static void destroy() {
+        if (dynamic != null) {
+            dynamic.destroyNow();
+            dynamic = null;
+            MemoryUtil.memFree(dynamicCpu);
+            dynamicCpu = null;
+        }
+        dynamicCount = 0;
         if (lights != null) lights.destroyNow();
         if (grid != null) grid.destroyNow();
         if (index != null) index.destroyNow();

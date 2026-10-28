@@ -25,6 +25,8 @@ public class RayTracingSettingsScreen extends GuiScreen {
     private static final String[] EFFECTS = {"Shadows", "Indirect light", "Reflections"};
 
     private static final int ID_PRESET = 1;
+    private static final int ID_DYNAMIC = 2;
+    private static final String[] DYNAMIC_MODES = {"off", "fast", "on"};
     private static final int ID_EFFECT = 10;   // + effect index
     private static final int ID_DONE = 200;
 
@@ -36,6 +38,8 @@ public class RayTracingSettingsScreen extends GuiScreen {
 
     private String preset;
     private final int[] distances = new int[3];
+    private String dynamicLights;
+    private GuiButton dynamicButton;
 
     private GuiButton presetButton;
     private final GuiSlider[] sliders = new GuiSlider[3];
@@ -53,6 +57,7 @@ public class RayTracingSettingsScreen extends GuiScreen {
 
         Config config = Initializer.CONFIG;
         this.preset = config.rtPreset == null ? "off" : config.rtPreset;
+        this.dynamicLights = config.rtDynamicLights == null ? "on" : config.rtDynamicLights;
         int[] d = Config.rtPresetDistances(this.preset);
         if (d == null) d = new int[]{config.rtShadowDistance, config.rtIndirectDistance, config.rtReflectionDistance};
         for (int i = 0; i < 3; i++) this.distances[i] = clamp(d[i]);
@@ -73,6 +78,11 @@ public class RayTracingSettingsScreen extends GuiScreen {
             this.buttonList.add(slider);
             y += CONTROL_HEIGHT + 6;
         }
+
+        // Independent of the preset; "fast" works without ray tracing.
+        y += 6;
+        this.dynamicButton = new GuiButton(ID_DYNAMIC, x, y, CONTROL_WIDTH, CONTROL_HEIGHT, dynamicLabel());
+        this.buttonList.add(this.dynamicButton);
 
         this.buttonList.add(new GuiButton(ID_DONE, this.width / 2 - 100, this.height - 27, I18n.format("gui.done")));
     }
@@ -99,6 +109,11 @@ public class RayTracingSettingsScreen extends GuiScreen {
                 this.sliders[i].setSliderValue(d[i], false);
             }
             this.presetButton.displayString = presetLabel();
+            this.commit(false);
+        } else if (button.id == ID_DYNAMIC) {
+            int i = java.util.Arrays.asList(DYNAMIC_MODES).indexOf(this.dynamicLights);
+            this.dynamicLights = DYNAMIC_MODES[(i + 1) % DYNAMIC_MODES.length];
+            this.dynamicButton.displayString = dynamicLabel();
             this.commit(false);
         } else if (button.id == ID_DONE) {
             this.done();
@@ -129,14 +144,27 @@ public class RayTracingSettingsScreen extends GuiScreen {
     }
 
     private void commit(boolean save) {
-        if (!this.supported) return;
         Config config = Initializer.CONFIG;
+        config.rtDynamicLights = this.dynamicLights;
+        if (!this.supported) {
+            if (save) Initializer.saveConfig();
+            return;
+        }
         config.rtPreset = this.preset;
         config.rtShadowDistance = this.distances[0];
         config.rtIndirectDistance = this.distances[1];
         config.rtReflectionDistance = this.distances[2];
         FrameTargets.applySettings();
         if (save) Initializer.saveConfig();
+    }
+
+    private String dynamicLabel() {
+        String name = switch (this.dynamicLights) {
+            case "off" -> "Off";
+            case "fast" -> "Fast";
+            default -> this.supported ? "On (ray traced)" : "On (fast: no RT)";
+        };
+        return "Dynamic lights: " + name;
     }
 
     private String presetLabel() {

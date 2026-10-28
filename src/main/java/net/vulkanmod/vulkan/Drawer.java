@@ -62,6 +62,10 @@ public class Drawer {
     private ArrayList<Long> inFlightFences;
 
     private static int currentFrame = 0;
+    /** Frames presented so far (monotonic). */
+    private static long frameCounter;
+
+    public static long frameCounter() { return frameCounter; }
     private final int commandBuffersCount = getSwapChainImages().size();
     private boolean[] activeCommandBuffers = new boolean[getSwapChainImages().size()];
 
@@ -807,6 +811,7 @@ public class Drawer {
             }
 
             currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+            frameCounter++;
         }
     }
 

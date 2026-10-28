@@ -50,6 +50,9 @@ public abstract class Field {
         else if(type.equals("int")) {
             return new Vec1i(name, ubo);
         }
+        else if(type.equals("vec4array")) {
+            return new Vec4Array(name, count, ubo);
+        }
         else {
             throw new RuntimeException("not admitted type..");
         }

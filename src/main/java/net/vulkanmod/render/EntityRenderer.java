@@ -757,6 +757,17 @@ public class EntityRenderer {
         if (currentEntity.isBurning()) {
             packed = 15728880; // full block and sky light while alight
         }
+        // Dynamic lights (held / dropped light sources) light entities near them.
+        if (CameraHistory.valid()) {
+            net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
+            float pt = mc.getRenderPartialTicks();
+            Entity e = currentEntity;
+            int dyn = DynamicLights.levelAt(
+                    e.lastTickPosX + (e.posX - e.lastTickPosX) * pt - CameraHistory.camX(),
+                    e.lastTickPosY + (e.posY - e.lastTickPosY) * pt + e.height * 0.5 - CameraHistory.camY(),
+                    e.lastTickPosZ + (e.posZ - e.lastTickPosZ) * pt - CameraHistory.camZ());
+            if (dyn * 16 > (packed & 0xFFFF)) packed = (packed & 0xFFFF0000) | dyn * 16;
+        }
         return packed;
     }
 

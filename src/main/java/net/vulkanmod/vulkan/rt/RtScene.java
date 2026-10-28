@@ -270,6 +270,7 @@ public final class RtScene {
         }
         buildTlas(cmd);
         RtLights.update(cmd, sections, CameraHistory.camX(), CameraHistory.camY(), CameraHistory.camZ());
+        RtLights.updateDynamic(cmd, stack, CameraHistory.camX(), CameraHistory.camY(), CameraHistory.camZ());
         breadcrumb(cmd, stack, 3);
         memoryBarrier(cmd, stack, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                 VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
