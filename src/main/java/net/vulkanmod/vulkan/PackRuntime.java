@@ -1060,9 +1060,18 @@ public final class PackRuntime {
         return false;
     }
 
-    /** Once per frame, before the first GPU read. Commands run after the submit, so geometry drawn earlier sees it too. */
+    /**
+     * Once per frame, before the submit. Commands run after the submit, so geometry drawn earlier
+     * sees it too. The block is written only from the DEFERRED point on: the prologue (SETUP, BEGIN,
+     * SHADOW_COMP) is recorded when the frame opens, before the camera and the frame block of this
+     * frame exist, and a copy taken there left every value a frame behind the geometry.
+     */
     private void uploadFrame(VkCommandBuffer cmd) {
-        if (frameUploaded) return;
+        if (timer != null && !timerStarted) {
+            timerStarted = true;
+            timer.begin(cmd);
+        }
+        if (frameUploaded || !deferredDone) return;
         frameUploaded = true;
         int frame = Drawer.getCurrentFrame() % frameUbo.length;
         FrameUniforms.ensureFilled();
@@ -1070,10 +1079,6 @@ public final class PackRuntime {
         if (uniforms != null) uniforms.write(frameUboAddress[frame] + FrameBlock.LAYOUT.offset("vkm_packUniforms"));
         if (centerDepth != null) {
             MemoryUtil.memPutFloat(frameUboAddress[frame] + FrameBlock.LAYOUT.offset("centerDepthSmooth"), smoothCenterDepth(frame));
-        }
-        if (timer != null && !timerStarted) {
-            timerStarted = true;
-            timer.begin(cmd);
         }
     }
 

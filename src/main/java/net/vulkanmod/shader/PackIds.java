@@ -50,6 +50,11 @@ public final class PackIds {
         }
         JsonObject map = loaded.raw.has("blockIds") ? loaded.raw.getAsJsonObject("blockIds") : null;
         if (map != null) {
+            // An Iris pack names blocks as a flattened game does. Translated tokens go last: they
+            // pick a variant out of a 1.12 block that a plain token of the pack tags as a whole.
+            boolean iris = noVanillaIds;
+            java.util.List<String> late = new java.util.ArrayList<>();
+            java.util.List<Integer> lateIds = new java.util.ArrayList<>();
             for (Map.Entry<String, JsonElement> e : map.entrySet()) {
                 int mapped;
                 try {
@@ -57,8 +62,19 @@ public final class PackIds {
                 } catch (NumberFormatException ex) {
                     continue;
                 }
-                for (String token : e.getValue().getAsString().trim().split("\\s+")) applyBlock(table, token, mapped);
+                for (String token : e.getValue().getAsString().trim().split("\\s+")) {
+                    String[] legacy = iris ? LegacyBlockNames.translate(token) : null;
+                    if (legacy == null) {
+                        applyBlock(table, token, mapped, iris);
+                        continue;
+                    }
+                    for (String t : legacy) {
+                        late.add(t);
+                        lateIds.add(mapped);
+                    }
+                }
             }
+            for (int i = 0; i < late.size(); i++) applyBlock(table, late.get(i), lateIds.get(i), true);
         }
         blockTable = table;
         JsonObject entityMap = loaded.raw.has("entityIds") ? loaded.raw.getAsJsonObject("entityIds") : null;
@@ -91,7 +107,7 @@ public final class PackIds {
     }
 
     /** {@code [domain:]name[:meta,meta...][:property=value,value...]} or a numeric id. */
-    private static void applyBlock(int[] table, String token, int mapped) {
+    private static void applyBlock(int[] table, String token, int mapped, boolean flattened) {
         String[] parts = token.split(":");
         Block block;
         int next;
@@ -113,7 +129,7 @@ public final class PackIds {
         boolean[] listed = new boolean[16];
         for (int i = next; i < parts.length; i++) {
             if (parts[i].contains("=")) {
-                if (!matchProperty(block, parts[i], metas)) return;
+                if (!matchProperty(block, parts[i], metas, flattened)) return;
                 continue;
             }
             for (String m : parts[i].split(",")) {
@@ -134,15 +150,19 @@ public final class PackIds {
     /**
      * {@code name=value,value}: clears the metas of other values. A property the block does not
      * have drops the whole entry, as in OptiFine, so {@code leaves:waterlogged=false} of a pack
-     * written for newer versions tags nothing here.
+     * written for newer versions tags nothing here. With {@code flattened} (Iris packs) a missing
+     * {@code waterlogged} reads as false, as nothing holds water on 1.12.
      */
-    private static boolean matchProperty(Block block, String selector, boolean[] metas) {
+    private static boolean matchProperty(Block block, String selector, boolean[] metas, boolean flattened) {
         String[] kv = selector.split("=", 2);
         net.minecraft.block.properties.IProperty<?> property = null;
         for (net.minecraft.block.properties.IProperty<?> p : block.getBlockState().getProperties()) {
             if (p.getName().equals(kv[0])) property = p;
         }
-        if (property == null) return false;
+        if (property == null) {
+            return flattened && kv[0].equals("waterlogged") && kv.length == 2
+                    && java.util.Arrays.asList(kv[1].split(",")).contains("false");
+        }
         java.util.Set<String> wanted = new java.util.HashSet<>(java.util.Arrays.asList(kv[1].split(",")));
         for (int meta = 0; meta < 16; meta++) {
             if (!metas[meta]) continue;
