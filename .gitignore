@@ -37,3 +37,5 @@ run/client/.mixin.out/
 run/*/*.png
 run/client/vm_mvp_dump.txt
 run/client/config/vesu/
+run/client/config/cleanroom_load_timings.dat
+run/client/config/splash.properties
