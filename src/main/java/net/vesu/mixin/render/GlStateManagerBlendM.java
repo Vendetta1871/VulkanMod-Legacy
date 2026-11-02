@@ -1,0 +1,161 @@
+package net.vesu.mixin.render;
+
+import net.minecraft.client.renderer.GlStateManager;
+import net.vesu.Initializer;
+import net.vesu.vulkan.VRenderSystem;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/**
+ * Tracks the blend enable bit and factors from the vanilla {@link GlStateManager}
+ * calls. The Kirino GL layer does not answer {@code glGetBooleanv(GL_BLEND)}
+ * (measured: false while the HUD was mid-blend), so the GUI pass cannot mirror
+ * blending by querying GL; every 1.12.2 render path toggles it through this class
+ * anyway. VRenderSystem already stores the state for {@code getBlendState()}.
+ */
+@Mixin(GlStateManager.class)
+public class GlStateManagerBlendM {
+
+    @Inject(method = "enableBlend", at = @At("HEAD"))
+    private static void vesu$enableBlend(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.enableBlend();
+        }
+    }
+
+    @Inject(method = "disableBlend", at = @At("HEAD"))
+    private static void vesu$disableBlend(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.disableBlend();
+        }
+    }
+
+    @Inject(method = "tryBlendFuncSeparate(IIII)V", at = @At("HEAD"))
+    private static void vesu$blendFunc(int srcRgb, int dstRgb, int srcAlpha, int dstAlpha, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.tryBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+        }
+    }
+
+    /**
+     * {@code blendFunc(II)} sets the RGB and alpha factors together and does not route
+     * through {@code tryBlendFuncSeparate}; the enderman eye pass (ONE, ONE) uses it.
+     */
+    @Inject(method = "blendFunc(II)V", at = @At("HEAD"))
+    private static void vesu$blendFunc2(int srcRgb, int dstRgb, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.tryBlendFuncSeparate(srcRgb, dstRgb, srcRgb, dstRgb);
+        }
+    }
+
+    /**
+     * Tracks the current vertex colour. Vanilla's {@code color(FFF)} is just
+     * {@code color(r, g, b, 1)} delegating here, so one hook covers both signatures (L14).
+     */
+    @Inject(method = "color(FFFF)V", at = @At("HEAD"))
+    private static void vesu$color4(float r, float g, float b, float a, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.trackedColorR = r;
+            VRenderSystem.trackedColorG = g;
+            VRenderSystem.trackedColorB = b;
+            VRenderSystem.trackedColorA = a;
+        }
+    }
+
+    /**
+     * Tracks the texture id bound to GL_TEXTURE_2D on unit 0. Every draw-time bind in
+     * 1.12.2 (entity skins, the block atlas, the font, GUI atlases) goes through this
+     * method, so the entity/GUI texture mirrors can resolve their Vulkan image from the
+     * tracked value instead of a {@code glGetInteger(GL_TEXTURE_BINDING_2D)} round-trip
+     * per draw. Binds on other units (the lightmap on unit 1) must not overwrite the
+     * unit-0 mirror (N8).
+     */
+    @Inject(method = "bindTexture(I)V", at = @At("HEAD"))
+    private static void vesu$bindTexture(int texture, CallbackInfo ci) {
+        if (Initializer.isVulkanActive() && VRenderSystem.activeTexUnit() == 0) {
+            VRenderSystem.trackedBoundTexture = texture;
+        }
+    }
+
+    /*
+     * GL texture enable is per-unit state; VRenderSystem.textureEnabled mirrors unit 0
+     * (the one the capture draws with). enableLightmap toggles it on unit 1 (N8).
+     */
+    @Inject(method = "enableTexture2D", at = @At("HEAD"))
+    private static void vesu$enableTexture2D(CallbackInfo ci) {
+        if (Initializer.isVulkanActive() && VRenderSystem.activeTexUnit() == 0) {
+            VRenderSystem.textureEnabled = true;
+        }
+    }
+
+    @Inject(method = "disableTexture2D", at = @At("HEAD"))
+    private static void vesu$disableTexture2D(CallbackInfo ci) {
+        if (Initializer.isVulkanActive() && VRenderSystem.activeTexUnit() == 0) {
+            VRenderSystem.textureEnabled = false;
+        }
+    }
+
+    /**
+     * The boat's {@code noWater} occluder is drawn with the colour mask fully off
+     * (depth only, to clip water inside the hull). The pipelines bake the mask into
+     * their state, so the capture needs the tracked value to recognise and skip such
+     * batches instead of painting them.
+     */
+    @Inject(method = "colorMask(ZZZZ)V", at = @At("HEAD"))
+    private static void vesu$colorMask(boolean red, boolean green, boolean blue, boolean alpha, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.colorMask(red, green, blue, alpha);
+        }
+    }
+
+    /*
+     * Colour logic op (R15): GuiTextField's selection box and mod GUIs toggle it; the
+     * state rides the pipeline key through Drawer.currentLogicOpState.
+     */
+    @Inject(method = "enableColorLogic()V", at = @At("HEAD"))
+    private static void vesu$enableColorLogic(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.enableColorLogicOp();
+        }
+    }
+
+    @Inject(method = "disableColorLogic()V", at = @At("HEAD"))
+    private static void vesu$disableColorLogic(CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.disableColorLogicOp();
+        }
+    }
+
+    // colorLogicOp(LogicOp) delegates here.
+    @Inject(method = "colorLogicOp(I)V", at = @At("HEAD"))
+    private static void vesu$colorLogicOp(int opcode, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.logicOp(opcode);
+        }
+    }
+
+    /*
+     * Texture matrix mirror. The matrix ops run for the modelview/projection stacks too,
+     * so each hook only acts while the texture mode is current (a static int compare);
+     * VRenderSystem keeps the stack in sync with the calls Kirino sees. The per-op hooks
+     * live in GlStateManagerMatrixM.
+     */
+    @Inject(method = "matrixMode(I)V", at = @At("HEAD"))
+    private static void vesu$matrixMode(int mode, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixMode(mode);
+        }
+    }
+
+    @Inject(method = "setActiveTexture(I)V", at = @At("HEAD"))
+    private static void vesu$setActiveTexture(int texture, CallbackInfo ci) {
+        if (Initializer.isVulkanActive()) {
+            VRenderSystem.texMatrixActiveTexture(texture);
+        }
+    }
+
+    // push/pop/loadIdentity/translate/rotate/scale of the texture-matrix mirror moved to
+    // GlStateManagerMatrixM (N28: one allocation-free redirect per method).
+}

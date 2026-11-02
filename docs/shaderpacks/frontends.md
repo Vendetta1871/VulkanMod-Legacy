@@ -6,7 +6,7 @@
 dependency. The mod shades it. The CLI is the same jar with a `Main`.
 
 ```
-pack-compiler/src/main/java/net/vulkanmod/pack/
+pack-compiler/src/main/java/net/vesu/pack/
   ir/        IrPack, Pass, Program, TextureDef, OptionDef, Validator, JSON codec
              (J/shader/ShaderPack.java moves here)
   source/    PackSource: Dir, Zip, Jar; includes with #line (J/shader/PackFiles.java moves here)
@@ -355,7 +355,7 @@ and its license forbids redistribution, so it has no reference pack here.
   `entity_outline` do not exist here: a chain that reads them fails to load with that target
   in its message.
 - Depth of a chain's own target does not exist either.
-- The profile comes from the manifest's default, or `VULKANMOD_PACK_PROFILE`; the GUI arrives
+- The profile comes from the manifest's default, or `VESU_PACK_PROFILE`; the GUI arrives
   with options (M5).
 
 ---

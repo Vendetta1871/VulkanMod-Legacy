@@ -3,8 +3,8 @@
 # joins a generated creative world, saves Vulkan swapchain captures as
 # run/client/vm_autotest_*.png and quits.
 #   tools/autotest.sh                       - default run
-#   VULKANMOD_AUTOTEST_WARMUP=240 tools/autotest.sh
-#   VULKANMOD_AUTOTEST_STAY=1 tools/autotest.sh   - keep the game open after captures
+#   VESU_AUTOTEST_WARMUP=240 tools/autotest.sh
+#   VESU_AUTOTEST_STAY=1 tools/autotest.sh   - keep the game open after captures
 cd "$(dirname "$0")/.." || exit 1
 if [ "${XDG_SESSION_TYPE:-tty}" = tty ]; then
     echo "warning: no desktop session (XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unset}); over ssh GL can land on the wrong GPU and crash." >&2
@@ -12,6 +12,6 @@ if [ "${XDG_SESSION_TYPE:-tty}" = tty ]; then
 fi
 rm -f run/client/vm_autotest_*.png
 mkdir -p build
-VULKANMOD_AUTOTEST=1 ./gradlew runClient "$@" 2>&1 | tee build/autotest.log
+VESU_AUTOTEST=1 ./gradlew runClient "$@" 2>&1 | tee build/autotest.log
 echo "--- captures ---"
 ls -la run/client/vm_autotest_*.png 2>/dev/null || echo "none produced"

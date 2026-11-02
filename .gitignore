@@ -36,4 +36,4 @@ AUDIT-drafts/
 run/client/.mixin.out/
 run/*/*.png
 run/client/vm_mvp_dump.txt
-run/client/config/vulkanmod/
+run/client/config/vesu/

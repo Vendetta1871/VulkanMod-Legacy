@@ -1,9 +1,9 @@
 [{
-	"modid": "vulkanmod",
-	"name": "VulkanMod",
+	"modid": "vesu",
+	"name": "Vesu",
 	"version": "${version}",
 	"mcversion": "1.12.2",
-	"description": "Vulkan renderer for Minecraft 1.12.2, ported from VulkanMod (xCollateral).",
+	"description": "Vulkan renderer for Minecraft 1.12.2 with shader packs, ray tracing and upscaling. Began as a port of VulkanMod (xCollateral).",
 	"authorList": ["CelestialD"],
 	"credits": "Original mod: VulkanMod by xCollateral",
 	"url": "https://github.com/Vendetta1871/vulkanmod-legacy",

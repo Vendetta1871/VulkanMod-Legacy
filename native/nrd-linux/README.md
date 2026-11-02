@@ -1,8 +1,8 @@
-# NRD for VulkanMod (Linux)
+# NRD for Vesu (Linux)
 
-Builds `libvulkanmod_nrd.so`: NVIDIA's NRD denoiser (with its NRI integration layer)
+Builds `libvesu_nrd.so`: NVIDIA's NRD denoiser (with its NRI integration layer)
 behind a small C API (`shim/vm_nrd.cpp`) that the RT lighting pass calls
-(`net.vulkanmod.vulkan.NrdDenoiser`).
+(`net.vesu.vulkan.NrdDenoiser`).
 
 ```
 native/nrd-linux/build.sh native/nrd-linux/nrd-sdk <natives-dir>

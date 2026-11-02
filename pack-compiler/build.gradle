@@ -33,6 +33,6 @@ test {
 // vkpack check over one pack, see CheckMain: gradlew :pack-compiler:packCheck --args="<pack> <shaders> <out>"
 tasks.register('packCheck', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'net.vulkanmod.pack.cli.CheckMain'
+    mainClass = 'net.vesu.pack.cli.CheckMain'
     workingDir = rootDir
 }

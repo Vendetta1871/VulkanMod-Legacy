@@ -29,8 +29,8 @@ mkdir -p natives/linux-x64 && cp -L build/libamd_fidelityfx_vk.so natives/linux-
 ../../gradlew -p ../.. build -PffxNatives=$PWD/natives
 ```
 
-The jar extracts it to `config/vulkanmod/natives/` at runtime;
-`VULKANMOD_FFX_LIB=<path>` overrides the location during development.
+The jar extracts it to `config/vesu/natives/` at runtime;
+`VESU_FFX_LIB=<path>` overrides the location during development.
 The Windows DLL ships prebuilt and signed in the SDK (`PrebuiltSignedDLL/`)
 and goes to `natives/windows-x64/`.
 

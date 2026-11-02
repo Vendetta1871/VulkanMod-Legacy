@@ -2,7 +2,7 @@
 
 Status: 2026-10-31, updated after the OptiFine reference run. M0 to M7 have code; see "Implementation status" for what each milestone
 reached and which exit criteria are still open. Paths use the AUDIT conventions:
-`J/` = `src/main/java/net/vulkanmod/`, `S/` = `src/main/resources/assets/vulkanmod/shaders/`.
+`J/` = `src/main/java/net/vesu/`, `S/` = `src/main/resources/assets/vesu/shaders/`.
 
 ## Goals
 
@@ -83,13 +83,13 @@ format-agnostic, and each frontend is a translator that can be tested offline.
 
 ## Roadmap
 
-Each milestone ends with: `./gradlew build`, then a `VULKANMOD_VALIDATION=1 VULKANMOD_AUTOTEST=1`
+Each milestone ends with: `./gradlew build`, then a `VESU_VALIDATION=1 VESU_AUTOTEST=1`
 run clean, and the README benchmark for the no-pack path within ±1 % of the previous release.
 
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Foundations, no visible change: `pack-compiler` subproject (moves `ShaderPack` and `PackFiles` into it), PackManager, pack list GUI, `#line` mapping for errors, the `Frame` block, a pack-space (GL-layout) render mode in `FrameTargets` | No-pack FPS unchanged, autotest clean |
-| M1 | Native post packs: `POST_SCENE` and `combination`, host textures `sceneColor`, `sceneDepth`, `motion`, an opt-in HDR scene target | Sample pack (bloom, tonemap, grading) runs. GPU cost per pass is reported under `VULKANMOD_PROFILE=1`. |
+| M1 | Native post packs: `POST_SCENE` and `combination`, host textures `sceneColor`, `sceneDepth`, `motion`, an opt-in HDR scene target | Sample pack (bloom, tonemap, grading) runs. GPU cost per pass is reported under `VESU_PROFILE=1`. |
 | M2 | 26.2 `post_effect` frontend | Vulcade-style chains render the same on Vulkan 26.2 and here (screenshots) |
 | M3 | Geometry stages: program routing per draw category, MRT union, the `DEFERRED` hook at `snapshotOpaque`, the hand inside the scene, chunk format variants with ID attributes | Feature test packs `testpacks/gbuffers-*` pass |
 | M4 | Shadow pass (D8): light-frustum culling over the arena, captured entities, `SHADOW_COMP` (native packs; G5 has no `shadowcomp`) | Shadow test pack; shadow cost lower than OptiFine on the same pack |
@@ -110,15 +110,15 @@ M2 is placed early on purpose: it is cheap once M1 exists, and it gives users pa
 | Pack sources (directory, zip, classpath) and include expansion with `#line` + `GL_GOOGLE_cpp_style_line_directive` (`PackFiles` → `PackSource`, `IncludeExpander`) | `pack-compiler/.../pack/source/` |
 | Format detection: native / OptiFine / post_effect / Bedrock | `pack-compiler/.../pack/PackKind.java` |
 | std140 layout builder and the `Frame` block (one source for the GLSL declaration and the host offsets) | `pack-compiler/.../pack/host/` |
-| Filling the `Frame` block, only with a selected pack or `VULKANMOD_FRAME_DUMP=1` | `J/shader/FrameUniforms.java` |
+| Filling the `Frame` block, only with a selected pack or `VESU_FRAME_DUMP=1` | `J/shader/FrameUniforms.java` |
 | PackManager (scan of `shaderpacks/`, selection in `config.shaderPack`, full parse and program existence check of native packs) | `J/shader/PackManager.java` |
-| Pack list screen (video settings → "Shader Packs...") | `J/config/gui/ShaderPackScreen.java` |
+| Pack list screen (Video Settings → "Shader Packs..." tab) | `J/config/gui/ShaderPackScreen.java` |
 | Pack-space render mode: positive scene viewport, clockwise front face (pipeline key bit 37), one flipping blit into the display | `J/vulkan/FrameTargets.java`, `Pipeline.java`, `Drawer.java` |
 
 Debug knobs:
-- `VULKANMOD_PACK_SPACE=1` renders the SCENE phase in pack space (D4). The picture must be
+- `VESU_PACK_SPACE=1` renders the SCENE phase in pack space (D4). The picture must be
   identical to a normal run. The knob forces the blit upscaler and is ignored with RT on.
-- `VULKANMOD_FRAME_DUMP=1` fills the `Frame` block every frame and logs it every 120 frames.
+- `VESU_FRAME_DUMP=1` fills the `Frame` block every frame and logs it every 120 frames.
 
 **M1 (2026-10-30): native post packs render.**
 
@@ -130,10 +130,10 @@ Debug knobs:
 | Hooks: the pack runs between the scene and the upscale; the scene renders in pack space while a pack runs; the combination writes the scene color in Vulkan row order | `J/vulkan/FrameTargets.java` |
 | `motion` in pack texcoords (`PACK_SPACE` variant of the motion-vector shader) | `J/vulkan/MotionVectorPass.java`, `motion_vectors.comp` |
 | `Frame` block filled at the head of the terrain pass (world fog and camera), uploaded per frame in flight | `J/shader/FrameUniforms.java`, `TerrainRenderer` |
-| Built-in sample pack `builtin:sample_post`: bright pass with mips, ping-ponged blur (fragment + compute), eye adaptation over a history texture, combination with bloom, exposure, shoulder, grading, rain haze from depth, vignette | `src/main/resources/assets/vulkanmod/shaderpacks/sample_post/` |
+| Built-in sample pack `builtin:sample_post`: bright pass with mips, ping-ponged blur (fragment + compute), eye adaptation over a history texture, combination with bloom, exposure, shoulder, grading, rain haze from depth, vignette | `src/main/resources/assets/vesu/shaderpacks/sample_post/` |
 
-Debug knobs: `VULKANMOD_SHADERPACK=<id>` (or `off`) overrides the selection for one run
-without saving; with `VULKANMOD_PROFILE=1` the log gets `[gpu] pack <id>: <pass>=<ms> ...`
+Debug knobs: `VESU_SHADERPACK=<id>` (or `off`) overrides the selection for one run
+without saving; with `VESU_PROFILE=1` the log gets `[gpu] pack <id>: <pass>=<ms> ...`
 every 120 frames, and `[gpu] ms/frame` has a `pack` column.
 
 An opt-in HDR scene: `renderer.hdr: true` renders the scene to RGBA16F, with pipeline
@@ -158,7 +158,7 @@ also holds other uncommitted changes, and the baseline is a commit, not a releas
 Autotests with validation are clean for: RGBA16F and RGBA8 scenes, render scale 0.5 with
 FSR 1, 0.8 with the blit, 1 with the shared scene and display image, the `motion` input,
 a pack paused by RT, switching packs at runtime (HDR, LDR, off, HDR) and resizing with a
-pack active. `VULKANMOD_AUTOTEST_RESIZE=1` with `VULKANMOD_AUTOTEST_PACKSWITCH=<id>` runs
+pack active. `VESU_AUTOTEST_RESIZE=1` with `VESU_AUTOTEST_PACKSWITCH=<id>` runs
 the last two.
 
 Limits of this part:
@@ -180,8 +180,8 @@ profiles and scenes.
 | IR additions, usable by native packs: `scenes`, per-pass `filters`, a pass's own `vertex` program, `file` textures (PNG), `renderer.frameInstance` | `IrPack`, `Prelude`, `FramePlan`, `PackRuntime` |
 | One runtime per scene variant, all compiled at load; only the running one holds images | `J/vulkan/PackRuntime.java` |
 
-Debug knobs: `VULKANMOD_PACK_PROFILE=<name>`, `VULKANMOD_PACK_SCENE=<scene>|cycle`, and
-`VULKANMOD_AUTOTEST_PACKSCENES=1`, which puts water at eye level and goes to the Nether and
+Debug knobs: `VESU_PACK_PROFILE=<name>`, `VESU_PACK_SCENE=<scene>|cycle`, and
+`VESU_AUTOTEST_PACKSCENES=1`, which puts water at eye level and goes to the Nether and
 the End.
 
 Checked on the V100, with validation clean in every run:
@@ -228,7 +228,7 @@ sources of the corpus compile offline with glslang.
 
 Checked against OptiFine HD U G5 on 2026-11-02, with every feature of this document in: the Prism
 instance `optifine-1.12.2-ref` runs the same packs, world copy and scenes as `local/ref` (a small Forge
-mod on that side, `VULKANMOD_AUTOTEST_SCENES` here). V100, 2560x1440, render distance 20, one headless
+mod on that side, `VESU_AUTOTEST_SCENES` here). V100, 2560x1440, render distance 20, one headless
 gamescope display for both sides, with nothing crossing to the iGPU. FPS is the mean of five scenes;
 "worst" is the scene where the lead is smallest. "Diff" is the mean absolute difference of the frames,
 0 to 255. The figures of 2026-10-31 used a window through Xwayland and are not comparable.

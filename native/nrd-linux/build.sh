@@ -1,7 +1,7 @@
 #!/bin/bash
 # Usage: build.sh <sdk-dir> <natives-dir>
-# Fetches NRD (with NRI) into <sdk-dir>, builds it and the VulkanMod shim, and puts
-# libvulkanmod_nrd.so into <natives-dir>/linux-x64 (pass that dir to gradle as -PffxNatives).
+# Fetches NRD (with NRI) into <sdk-dir>, builds it and the Vesu shim, and puts
+# libvesu_nrd.so into <natives-dir>/linux-x64 (pass that dir to gradle as -PffxNatives).
 set -euo pipefail
 NRD_TAG=v4.17.3
 SDK=$(realpath -m "${1:?sdk dir}")
@@ -27,6 +27,6 @@ cmake -S "$HERE/shim" -B "$SDK/shim-build" -G Ninja -DCMAKE_BUILD_TYPE=Release -
 cmake --build "$SDK/shim-build"
 
 mkdir -p "$OUT/linux-x64"
-cp "$SDK/shim-build/libvulkanmod_nrd.so" "$OUT/linux-x64/"
+cp "$SDK/shim-build/libvesu_nrd.so" "$OUT/linux-x64/"
 cp "$SDK/NRD/LICENSE.txt" "$OUT/linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt"
-echo "built $OUT/linux-x64/libvulkanmod_nrd.so"
+echo "built $OUT/linux-x64/libvesu_nrd.so"

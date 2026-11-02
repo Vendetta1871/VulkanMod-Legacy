@@ -1,0 +1,19 @@
+{
+  "frameQueueSize": 3,
+  "configVersion": 1,
+  "guiOptimizations": true,
+  "renderScale": 0.8,
+  "upscaler": "fsr1",
+  "fsr1Sharpness": 0.3,
+  "fsr3Sharpness": 0.3,
+  "shaderPack": "complementary-reimagined",
+  "rtPreset": "off",
+  "rtShadowDistance": 0,
+  "rtIndirectDistance": 0,
+  "rtReflectionDistance": 0,
+  "rtShadowStrength": 0.45,
+  "rtBlockLight": 1.0,
+  "rtReflections": 1.0,
+  "rtIndirect": 1.0,
+  "rtDynamicLights": "off"
+}

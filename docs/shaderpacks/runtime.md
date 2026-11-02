@@ -258,7 +258,7 @@ target also keeps a NaN from a shader, so a blur can spread it: passes that read
 ## Resource-pack overrides of our own shaders
 
 This is the vanilla 26.2 model, and independent of shader packs. `S/` shaders are read
-through the 1.12.2 `IResourceManager` (`assets/vulkanmod/shaders/...`) instead of
+through the 1.12.2 `IResourceManager` (`assets/vesu/shaders/...`) instead of
 `getResourceAsStream`, and recompiled on F3+T. Two preconditions:
 
 - the `Frame` block and named blocks also on the vanilla path;
@@ -288,7 +288,7 @@ These are review criteria for every shader-pack change:
    but later launches hit the SPIR-V cache, the pipeline cache and the warm-up sidecar.
 
 **Measurement:**
-- `VULKANMOD_PROFILE=1` `[gpu]` lines per pack pass (`GpuTimer` gets one mark per command
+- `VESU_PROFILE=1` `[gpu]` lines per pack pass (`GpuTimer` gets one mark per command
   list).
 - The README benchmark path for us versus OptiFine HD U G5 on the Forge install, same pack,
   same options.

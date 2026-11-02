@@ -1,8 +1,8 @@
-// VulkanMod <-> NRD bridge: a C API over NRD's NRI integration layer, recording into the
+// Vesu <-> NRD bridge: a C API over NRD's NRI integration layer, recording into the
 // renderer's own VkCommandBuffer. Two RELAX_DIFFUSE integrations: block light and indirect
 // light. Separate integrations, not two denoisers in one: NRD sizes its descriptor pools by
 // unique pass names, so a second identical denoiser per frame would overflow them.
-// Struct layouts are mirrored by net.vulkanmod.vulkan.NrdDenoiser.
+// Struct layouts are mirrored by net.vesu.vulkan.NrdDenoiser.
 
 #include <cstddef>
 #include <cstdint>
@@ -106,7 +106,7 @@ VM_EXPORT int vmnrd_create(const VmNrdCreate* d) {
     instance.denoisersNum = 1;
 
     nrd::IntegrationCreationDesc desc = {};
-    std::strncpy(desc.name, "VulkanMod", sizeof(desc.name) - 1);
+    std::strncpy(desc.name, "Vesu", sizeof(desc.name) - 1);
     desc.resourceWidth = g_width = (uint16_t)d->width;
     desc.resourceHeight = g_height = (uint16_t)d->height;
     desc.queuedFrameNum = (uint8_t)d->queuedFrames;

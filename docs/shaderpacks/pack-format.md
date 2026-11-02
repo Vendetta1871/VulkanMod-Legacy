@@ -9,7 +9,7 @@ custom uniforms and requirements.
 
 ```
 <pack>/                      directory or .zip in shaderpacks/, or built in under
-  pack.json                  /assets/vulkanmod/shaderpacks/<id>/
+  pack.json                  /assets/vesu/shaderpacks/<id>/
   lang/en_us.json            option and screen labels (optional)
   programs/**/*.vsh|gsh|fsh|csh
   lib/**/*.glsl              #include targets
@@ -240,7 +240,7 @@ stages are required together. Patches have three control points, whatever the do
 - Options may appear in `enabled`, `uniforms` and `shadow.*` expressions.
 - A change only recompiles programs whose preprocessed text changed. The cache key is the
   preprocessed source hash, so an option a program does not use costs nothing.
-- Values are stored per pack in `config/vulkanmod/shaderpacks/<id>.json`.
+- Values are stored per pack in `config/vesu/shaderpacks/<id>.json`.
 - `profiles` assign a set of values. `screens` define the GUI pages: option names,
   `"<empty>"` and `"[page]"` links. Labels come from `lang/<locale>.json`
   (`option.<NAME>`, `option.<NAME>.comment`, `value.<NAME>.<value>`, `screen.<page>`).

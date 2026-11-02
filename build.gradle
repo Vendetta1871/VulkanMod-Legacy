@@ -3,11 +3,11 @@ plugins {
     id 'com.cleanroommc.cleanroomgradle'
 }
 
-group = 'net.vulkanmod'
+group = 'net.vesu'
 version = mod_version
 
 base {
-    archivesName = 'VulkanMod_1.12.2'
+    archivesName = 'Vesu_1.12.2'
 }
 
 java {
@@ -78,7 +78,7 @@ cleanroom {
                 // property or the literal 'false' keeps the mod enabled.
                 def noMod = project.findProperty('noMod') in [null, 'false'] ? false : true
                 if (!noMod) {
-                    jvmArgs '-Dfml.coreMods.load=net.vulkanmod.coremod.VulkanModCore'
+                    jvmArgs '-Dfml.coreMods.load=net.vesu.coremod.VesuCore'
                 }
                 if (extra_jvm_args) {
                     jvmArgs extra_jvm_args.tokenize()
@@ -128,7 +128,7 @@ processResources {
         from(ffxNatives) {
             include 'linux-x64/libamd_fidelityfx_vk.so', 'windows-x64/amd_fidelityfx_vk.dll',
                     // NRD (native/nrd-linux) and the license it must ship with
-                    'linux-x64/libvulkanmod_nrd.so', 'linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt'
+                    'linux-x64/libvesu_nrd.so', 'linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt'
             into 'natives'
         }
     }
@@ -139,10 +139,10 @@ def generateVersionSource = tasks.register('generateVersionSource') {
     inputs.property 'version', modVersion
     outputs.dir generatedVersionDir
     doLast {
-        def pkg = generatedVersionDir.get().file('net/vulkanmod').asFile
+        def pkg = generatedVersionDir.get().file('net/vesu').asFile
         pkg.mkdirs()
         new File(pkg, 'BuildConfig.java').text = """\
-package net.vulkanmod;
+package net.vesu;
 
 /** Generated from gradle.properties by the generateVersionSource task (L15). Do not edit. */
 public final class BuildConfig {
