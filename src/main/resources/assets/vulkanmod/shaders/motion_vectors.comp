@@ -16,8 +16,13 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 vec2 clipToUv(vec4 clip) {
     vec2 ndc = clip.xy / clip.w;
+#ifdef PACK_SPACE
+    // Shader-pack scene (GL row order): row 0 is NDC -1, the vectors are in pack texcoords.
+    return ndc * 0.5 + 0.5;
+#else
     // The viewport flips Y: NDC +1 is the top row.
     return vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+#endif
 }
 
 void main() {
@@ -27,7 +32,11 @@ void main() {
 
     vec2 uv = (vec2(p) + 0.5) / vec2(size);
     float depth = texelFetch(sceneDepth, p, 0).r;
+#ifdef PACK_SPACE
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
+#else
     vec4 clip = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+#endif
 
     vec2 mv = clipToUv(pc.toPrevClip * clip) - clipToUv(pc.toCurClip * clip);
 #ifdef DEBUG_VIEW

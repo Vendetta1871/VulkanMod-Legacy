@@ -5,7 +5,7 @@ behind a small C API (`shim/vm_nrd.cpp`) that the RT lighting pass calls
 (`net.vulkanmod.vulkan.NrdDenoiser`).
 
 ```
-native/nrd-linux/build.sh /storage/Projects/nrd-sdk <natives-dir>
+native/nrd-linux/build.sh native/nrd-linux/nrd-sdk <natives-dir>
 ./gradlew build -PffxNatives=<natives-dir>
 ```
 

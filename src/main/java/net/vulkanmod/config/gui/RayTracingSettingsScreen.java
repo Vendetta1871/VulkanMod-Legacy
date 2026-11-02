@@ -7,6 +7,7 @@ import net.minecraft.client.gui.GuiSlider;
 import net.minecraft.client.resources.I18n;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.config.Config;
+import net.vulkanmod.shader.PackManager;
 import net.vulkanmod.vulkan.FrameTargets;
 import net.vulkanmod.vulkan.rt.RtScene;
 
@@ -96,6 +97,10 @@ public class RayTracingSettingsScreen extends GuiScreen {
                 ? "Distances in chunks around the camera; farther stays vanilla."
                 : "Not supported: needs a GPU with Vulkan ray tracing.";
         this.drawCenteredString(this.fontRenderer, note, this.width / 2, 30, 0xA0A0A0);
+        if (PackManager.pausedByRt(PackManager.active())) {
+            this.drawCenteredString(this.fontRenderer, "The shader pack is paused while ray tracing is on.",
+                    this.width / 2, this.height - 40, 0xFFD080);
+        }
     }
 
     @Override

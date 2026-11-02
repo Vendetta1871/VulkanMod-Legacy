@@ -26,10 +26,52 @@ public abstract class RenderGlobalM {
     @Accessor("cloudTickCounter")
     abstract int vulkanmod$getCloudTickCounter();
 
+    @Inject(method = "renderBlockLayer(Lnet/minecraft/util/BlockRenderLayer;DILnet/minecraft/entity/Entity;)I",
+            at = @At("HEAD"))
+    private void vulkanmod$beforeLayer(net.minecraft.util.BlockRenderLayer layer, double partialTicks, int pass,
+                                       net.minecraft.entity.Entity entity,
+                                       org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> ci) {
+        if (layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT && Initializer.isVulkanActive()
+                && net.vulkanmod.vulkan.FrameTargets.handInScene()) {
+            net.vulkanmod.vulkan.Drawer.beforeHand();
+            if (!net.vulkanmod.render.EntityRenderer.heldTranslucent()) vulkanmod$drawHand();
+        }
+    }
+
+    /** A translucent held block goes after the layer, OptiFine's {@code renderHand1}. */
+    @Inject(method = "renderBlockLayer(Lnet/minecraft/util/BlockRenderLayer;DILnet/minecraft/entity/Entity;)I", at = @At("RETURN"), remap = true)
+    private void vulkanmod$afterLayer(net.minecraft.util.BlockRenderLayer layer, double partialTicks, int pass,
+                                      net.minecraft.entity.Entity entity,
+                                      org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> ci) {
+        if (layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT && Initializer.isVulkanActive()
+                && net.vulkanmod.vulkan.FrameTargets.handInScene() && net.vulkanmod.render.EntityRenderer.heldTranslucent()) {
+            vulkanmod$drawHand();
+        }
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static void vulkanmod$drawHand() {
+        ((net.vulkanmod.render.IHandInScene) net.minecraft.client.Minecraft.getMinecraft().entityRenderer)
+                .vulkanmod$renderHandInScene();
+    }
+
+    @Inject(method = "drawBlockDamageTexture", at = @At("HEAD"), remap = true)
+    private void vulkanmod$damageBegin(CallbackInfo ci) {
+        net.vulkanmod.render.EntityRenderer.setDamagePass(true);
+    }
+
+    @Inject(method = "drawBlockDamageTexture", at = @At("RETURN"), remap = true)
+    private void vulkanmod$damageEnd(CallbackInfo ci) {
+        net.vulkanmod.render.EntityRenderer.setDamagePass(false);
+    }
+
     @Inject(method = "renderSky(FI)V", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$renderSky(float partialTicks, int pass, CallbackInfo ci) {
         FrameProfiler.skyBegin();
-        if (Initializer.isVulkanActive() && SkyRenderer.render(partialTicks, pass)) {
+        net.vulkanmod.vulkan.Drawer.tintFromShaderColor = true;
+        boolean drawn = Initializer.isVulkanActive() && SkyRenderer.render(partialTicks, pass);
+        net.vulkanmod.vulkan.Drawer.tintFromShaderColor = false;
+        if (drawn) {
             // The TAIL hook below never runs for a cancelled method; close the profile span here.
             FrameProfiler.skyEnd();
             ci.cancel();
@@ -45,6 +87,11 @@ public abstract class RenderGlobalM {
     private void vulkanmod$renderClouds(float partialTicks, int pass, double x, double y, double z,
                                         CallbackInfo ci) {
         FrameProfiler.cloudsBegin();
+        if (Initializer.isVulkanActive() && net.vulkanmod.shader.PackManager.cloudsOff()) {
+            FrameProfiler.cloudsEnd();
+            ci.cancel();
+            return;
+        }
         if (Initializer.isVulkanActive()
                 && CloudRenderer.render(partialTicks, pass, this.vulkanmod$getCloudTickCounter(), x, y, z)) {
             FrameProfiler.cloudsEnd();
@@ -98,6 +145,26 @@ public abstract class RenderGlobalM {
         }
     }
 
+    // See VisibleSections. The tile entity loop comes second; entities are drawn per section.
+    @org.spongepowered.asm.mixin.injection.Redirect(method = "renderEntities", at = @At(value = "FIELD",
+            target = "Lnet/minecraft/client/renderer/RenderGlobal;renderInfos:Ljava/util/List;", ordinal = 0))
+    private java.util.List<?> vulkanmod$sectionsWithEntities(net.minecraft.client.renderer.RenderGlobal self) {
+        return net.vulkanmod.render.VisibleSections.withEntities(((RenderGlobalAccessor) (Object) self).vulkanmod$getRenderInfos());
+    }
+
+    @org.spongepowered.asm.mixin.injection.Redirect(method = "renderEntities", at = @At(value = "FIELD",
+            target = "Lnet/minecraft/client/renderer/RenderGlobal;renderInfos:Ljava/util/List;", ordinal = 1))
+    private java.util.List<?> vulkanmod$sectionsWithTiles(net.minecraft.client.renderer.RenderGlobal self) {
+        return net.vulkanmod.render.VisibleSections.withTileEntities(((RenderGlobalAccessor) (Object) self).vulkanmod$getRenderInfos());
+    }
+
+    @org.spongepowered.asm.mixin.injection.Redirect(method = "renderBlockLayer(Lnet/minecraft/util/BlockRenderLayer;DILnet/minecraft/entity/Entity;)I",
+            at = @At(value = "FIELD", target = "Lnet/minecraft/client/renderer/RenderGlobal;renderInfos:Ljava/util/List;"))
+    private java.util.List<?> vulkanmod$sectionsOfLayer(net.minecraft.client.renderer.RenderGlobal self, net.minecraft.util.BlockRenderLayer layer,
+                                                        double partialTicks, int pass, net.minecraft.entity.Entity entity) {
+        return net.vulkanmod.render.VisibleSections.forLayer(((RenderGlobalAccessor) (Object) self).vulkanmod$getRenderInfos(), layer);
+    }
+
     @Inject(method = "renderEntities", at = @At("RETURN"))
     private void vulkanmod$renderEntitiesEnd(net.minecraft.entity.Entity renderViewEntity,
                                              net.minecraft.client.renderer.culling.ICamera camera, float partialTicks,
@@ -105,6 +172,9 @@ public abstract class RenderGlobalM {
         FrameProfiler.entitiesEnd();
         if (Initializer.isVulkanActive()) {
             renderFirstPersonPlayerForRt(renderViewEntity, partialTicks);
+            if (net.vulkanmod.vulkan.ShadowPass.active()) {
+                net.vulkanmod.vulkan.ShadowPass.recording().renderUnseenEntities(renderViewEntity, partialTicks);
+            }
             net.vulkanmod.render.EntityRenderer.setEntityPass(false);
         }
     }

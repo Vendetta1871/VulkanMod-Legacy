@@ -20,10 +20,10 @@ public final class GpuTimer {
 
     /** Marks in frame order; a frame may skip some (no RT, no upscale). */
     public static final int FRAME_START = 0, RT_SCENE = 1, LIGHT_TRACE = 2, LIGHT_DENOISE = 3, RT_LIGHTING = 4,
-            RT_REFLECT_OPAQUE = 5, SCENE_END = 6, RT_REFLECT_TRANSLUCENT = 7, UPSCALE = 8, FRAME_END = 9;
+            RT_REFLECT_OPAQUE = 5, SCENE_END = 6, RT_REFLECT_TRANSLUCENT = 7, PACK = 8, UPSCALE = 9, FRAME_END = 10;
     /** Each entry names the work between the previous written mark and this one. */
     private static final String[] NAMES = {"start", "opaque+tlas", "lightTrace", "nrd+mv", "composite",
-            "reflOpaque", "translucent", "reflTransl", "upscale", "hud+copy"};
+            "reflOpaque", "translucent", "reflTransl", "pack", "upscale", "hud+copy"};
     private static final int MARKS = NAMES.length, LOG_EVERY = 120;
 
     private static long pool;

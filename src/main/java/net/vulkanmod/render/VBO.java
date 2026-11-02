@@ -38,19 +38,22 @@ public class VBO {
     private net.vulkanmod.vulkan.rt.RtScene.Section rt;
     private static ByteBuffer scratch = org.lwjgl.system.MemoryUtil.memAlloc(1 << 16);
 
-    // Section being uploaded (ChunkRenderDispatcher.uploadChunk, client thread), for the RT scene.
-    private static net.minecraft.util.math.BlockPos uploadOrigin;
-    private static net.minecraft.util.BlockRenderLayer uploadLayer;
-
-    public static void beginSectionUpload(net.minecraft.util.math.BlockPos origin,
-                                          net.minecraft.util.BlockRenderLayer layer) {
-        uploadOrigin = origin;
-        uploadLayer = layer;
+    /** This layer's geometry is in the arena of the current world. */
+    public boolean inArena() {
+        return arenaOffset >= 0 && vertexCount > 0 && arenaGeneration == ChunkBatcher.arena().generation();
     }
 
-    public static void endSectionUpload() {
-        uploadOrigin = null;
-        uploadLayer = null;
+    public int slot() {
+        return slot;
+    }
+
+    public int vertexCount() {
+        return vertexCount;
+    }
+
+    /** First vertex in the arena. */
+    public int arenaVertex() {
+        return arenaOffset / ChunkBatcher.STRIDE;
     }
 
     private static int rtMask(net.minecraft.util.BlockRenderLayer layer) {
@@ -70,6 +73,13 @@ public class VBO {
         if (rt == null) rt = new net.vulkanmod.vulkan.rt.RtScene.Section();
         net.vulkanmod.vulkan.rt.RtScene.onUpload(rt, arenaOffset, vertexCount);
         net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, origin.getX(), origin.getY(), origin.getZ(), rtMask(layer));
+    }
+
+    /** Places this layer's uploaded geometry in the RT scene at the render chunk's origin. */
+    public void placeRt(net.minecraft.util.math.BlockPos origin, net.minecraft.util.BlockRenderLayer layer) {
+        if (rt != null && rt.isRegistered()) {
+            net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, origin.getX(), origin.getY(), origin.getZ(), rtMask(layer));
+        }
     }
 
     /** The render chunk moved: its old geometry leaves the RT scene until the rebuild. */
@@ -165,11 +175,9 @@ public class VBO {
             arena.upload(arenaOffset, interleaved, bytes);
             if (net.vulkanmod.vulkan.rt.RtScene.enabled()) {
                 if (rt == null) rt = new net.vulkanmod.vulkan.rt.RtScene.Section();
+                // Placed when vanilla accepts the compiled chunk (RenderChunkM.setCompiledChunk):
+                // an upload of a cancelled task must not enter the scene at the moved chunk's spot.
                 net.vulkanmod.vulkan.rt.RtScene.onUpload(rt, arenaOffset, vertexCount);
-                if (uploadOrigin != null) {
-                    net.vulkanmod.vulkan.rt.RtScene.onDraw(rt, uploadOrigin.getX(), uploadOrigin.getY(),
-                            uploadOrigin.getZ(), rtMask(uploadLayer));
-                }
             }
         } catch (Throwable t) {
             if (arenaOffset >= 0) {
@@ -205,7 +213,113 @@ public class VBO {
             scratch.putFloat(slot);
         }
         scratch.flip();
-        return scratch;
+        return ChunkBatcher.vertexFlags() != 0 ? extend(data, vertexCount) : scratch;
+    }
+
+    private static ByteBuffer extended = org.lwjgl.system.MemoryUtil.memAlloc(1 << 20);
+
+    /**
+     * Adds a pack's extended attributes to the interleaved vertices (runtime.md, "Vertex
+     * data"). Vanilla quads are planar, so normal and tangent are per quad: from the diagonals
+     * and from the positions and texcoords.
+     */
+    private static ByteBuffer extend(ByteBuffer data, int vertexCount) {
+        int flags = ChunkBatcher.vertexFlags();
+        int stride = ChunkBatcher.STRIDE, base = ChunkBatcher.BLOCK_STRIDE + 4;
+        if (extended.capacity() < stride * vertexCount) {
+            org.lwjgl.system.MemoryUtil.memFree(extended);
+            extended = org.lwjgl.system.MemoryUtil.memAlloc(stride * vertexCount);
+        }
+        extended.clear();
+        float[] p = new float[12], t = new float[8];
+        byte[] n = new byte[4], tangent = new byte[4];
+        for (int q = 0; q + 3 < vertexCount; q += 4) {
+            for (int v = 0; v < 4; v++) {
+                int at = (q + v) * ChunkBatcher.BLOCK_STRIDE;
+                for (int c = 0; c < 3; c++) p[v * 3 + c] = data.getFloat(at + c * 4);
+                t[v * 2] = data.getFloat(at + 16);
+                t[v * 2 + 1] = data.getFloat(at + 20);
+            }
+            float d0x = p[6] - p[0], d0y = p[7] - p[1], d0z = p[8] - p[2];
+            float d1x = p[9] - p[3], d1y = p[10] - p[4], d1z = p[11] - p[5];
+            float nx = d0y * d1z - d0z * d1y, ny = d0z * d1x - d0x * d1z, nz = d0x * d1y - d0y * d1x;
+            float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 0.0f) {
+                nx /= len;
+                ny /= len;
+                nz /= len;
+            }
+            n[0] = snorm8(nx);
+            n[1] = snorm8(ny);
+            n[2] = snorm8(nz);
+
+            // Tangent: the position direction along which u grows.
+            float e1x = p[3] - p[0], e1y = p[4] - p[1], e1z = p[5] - p[2];
+            float e2x = p[9] - p[0], e2y = p[10] - p[1], e2z = p[11] - p[2];
+            float u1 = t[2] - t[0], v1 = t[3] - t[1], u2 = t[6] - t[0], v2 = t[7] - t[1];
+            float sign = u1 * v2 - u2 * v1 < 0.0f ? -1.0f : 1.0f;
+            float tx = (e1x * v2 - e2x * v1) * sign, ty = (e1y * v2 - e2y * v1) * sign, tz = (e1z * v2 - e2z * v1) * sign;
+            float tl = (float) Math.sqrt(tx * tx + ty * ty + tz * tz);
+            if (tl > 0.0f) {
+                tx /= tl;
+                ty /= tl;
+                tz /= tl;
+            }
+            tangent[0] = snorm8(tx);
+            tangent[1] = snorm8(ty);
+            tangent[2] = snorm8(tz);
+            tangent[3] = snorm8(sign);
+
+            short midU = (short) ((t[0] + t[2] + t[4] + t[6]) * 0.25f * 65535.0f);
+            short midV = (short) ((t[1] + t[3] + t[5] + t[7]) * 0.25f * 65535.0f);
+            float cx = (p[0] + p[3] + p[6] + p[9]) * 0.25f, cy = (p[1] + p[4] + p[7] + p[10]) * 0.25f,
+                    cz = (p[2] + p[5] + p[8] + p[11]) * 0.25f;
+
+            for (int v = 0; v < 4; v++) {
+                int at = (q + v) * base;
+                scratch.limit(at + base).position(at);
+                int start = extended.position();
+                extended.put(scratch);
+                if ((flags & net.vulkanmod.pack.plan.FramePlan.VERTEX_NORMAL) != 0) extended.put(n[0]).put(n[1]).put(n[2]).put((byte) 0);
+                if ((flags & net.vulkanmod.pack.plan.FramePlan.VERTEX_TANGENT) != 0) extended.put(tangent);
+                if ((flags & net.vulkanmod.pack.plan.FramePlan.VERTEX_MID_TEX) != 0) extended.putShort(midU).putShort(midV);
+                if ((flags & BLOCK_TAG) != 0) {
+                    // BlockRendererDispatcherM packed them over the unused high bytes of UV2.
+                    short lu = extended.getShort(start + 24), lv = extended.getShort(start + 26);
+                    extended.putShort(start + 24, (short) (lu & 0xFF)).putShort(start + 26, (short) (lv & 0xFF));
+                    int tag = (lu >> 8 & 0xFF) | (lv >> 8 & 0xFF) << 8;
+                    if ((flags & net.vulkanmod.pack.plan.FramePlan.VERTEX_BLOCK) != 0) {
+                        int attribute = net.vulkanmod.shader.PackIds.block(tag);
+                        extended.putShort((short) attribute).putShort((short) (attribute >>> 16));
+                    }
+                    if ((flags & net.vulkanmod.pack.plan.FramePlan.VERTEX_MID_BLOCK) != 0) {
+                        // The center of the quad, just behind its face, is inside the block.
+                        extended.put(midOffset(cx - nx * 0.001f, p[v * 3])).put(midOffset(cy - ny * 0.001f, p[v * 3 + 1]))
+                                .put(midOffset(cz - nz * 0.001f, p[v * 3 + 2])).put((byte) blockLight(tag));
+                    }
+                }
+            }
+        }
+        extended.flip();
+        return extended;
+    }
+
+    private static final int BLOCK_TAG = net.vulkanmod.pack.plan.FramePlan.VERTEX_BLOCK | net.vulkanmod.pack.plan.FramePlan.VERTEX_MID_BLOCK;
+
+    /** From {@code vertex} to the middle of the block at {@code inside}, in 1/64 of a block. */
+    private static byte midOffset(float inside, float vertex) {
+        float offset = ((float) Math.floor(inside) + 0.5f - vertex) * 64.0f;
+        return (byte) Math.round(Math.max(-127.0f, Math.min(127.0f, offset)));
+    }
+
+    /** {@code tag} is the block's id and, from bit 12, its metadata. */
+    @SuppressWarnings("deprecation")
+    private static int blockLight(int tag) {
+        return net.minecraft.block.Block.getBlockById(tag & 0xFFF).getStateFromMeta(tag >>> 12 & 0xF).getLightValue();
+    }
+
+    private static byte snorm8(float v) {
+        return (byte) Math.round(v * 127.0f);
     }
 
     /** Draws the buffer as indexed quads with the currently bound pipeline. */
@@ -265,7 +379,7 @@ public class VBO {
             if (TerrainRenderer.NOQUERY) {
                 VRenderSystem.updateProjectionMatrix();
                 VRenderSystem.updateModelViewMatrix();
-            } else {
+            } else if (TerrainRenderer.DUMP_MVP) {
                 TerrainRenderer.applyCurrentSectionMatrix();
             }
 

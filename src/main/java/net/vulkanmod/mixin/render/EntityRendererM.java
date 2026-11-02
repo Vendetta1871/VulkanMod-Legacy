@@ -3,6 +3,7 @@ package net.vulkanmod.mixin.render;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.debug.FrameProfiler;
 import net.vulkanmod.render.GuiRenderer;
+import net.minecraft.client.renderer.GlStateManager;
 import net.vulkanmod.vulkan.VRenderSystem;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
@@ -26,7 +27,82 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * GUI. The next frame's HEAD closes the pass again.</p>
  */
 @Mixin(net.minecraft.client.renderer.EntityRenderer.class)
-public abstract class EntityRendererM {
+public abstract class EntityRendererM implements net.vulkanmod.render.IHandInScene {
+
+    @org.spongepowered.asm.mixin.Unique private float vulkanmod$partialTicks;
+    @org.spongepowered.asm.mixin.Unique private int vulkanmod$pass;
+    /** The hand drew before the translucent layer this frame: vanilla's call only adds the overlays. */
+    @org.spongepowered.asm.mixin.Unique private boolean vulkanmod$handDrawn;
+    /** Inside the early call, which leaves the overlays to vanilla's. */
+    @org.spongepowered.asm.mixin.Unique private boolean vulkanmod$drawingHand;
+
+    @org.spongepowered.asm.mixin.gen.Invoker("renderHand")
+    abstract void vulkanmod$invokeRenderHand(float partialTicks, int pass);
+
+    @Inject(method = "renderWorldPass(IFJ)V", at = @At("HEAD"))
+    private void vulkanmod$worldPassBegin(int pass, float partialTicks, long finishTimeNano, CallbackInfo ci) {
+        vulkanmod$pass = pass;
+        vulkanmod$partialTicks = partialTicks;
+        vulkanmod$handDrawn = false;
+    }
+
+    /**
+     * OptiFine's renderHand0: with a pack, the arm and held items draw before the translucent
+     * layer, so {@code DEFERRED} sees them. Called at the head of that layer (RenderGlobalM),
+     * before it enables the chunk vertex arrays, which a display list compile would read.
+     * The matrices and state are the world's: both are put back for the layer.
+     */
+    @Override
+    public void vulkanmod$renderHandInScene() {
+        if (vulkanmod$handDrawn) return;
+        vulkanmod$handDrawn = true;
+        GlStateManager.matrixMode(5889);
+        GlStateManager.pushMatrix();
+        GlStateManager.matrixMode(5888);
+        GlStateManager.pushMatrix();
+        // The state of the translucent layer, not the one vanilla's renderHand runs in: without
+        // the alpha test the empty outer layer of the skin covers the arm.
+        boolean alphaTest = net.vulkanmod.vulkan.VRenderSystem.alphaTest;
+        GlStateManager.enableAlpha();
+        GlStateManager.alphaFunc(516, 0.1F);
+        GlStateManager.disableBlend();
+        GlStateManager.depthMask(true);
+        vulkanmod$drawingHand = true;
+        vulkanmod$invokeRenderHand(vulkanmod$partialTicks, vulkanmod$pass);
+        vulkanmod$drawingHand = false;
+        if (!alphaTest) GlStateManager.disableAlpha();
+        GlStateManager.matrixMode(5889);
+        GlStateManager.popMatrix();
+        GlStateManager.matrixMode(5888);
+        GlStateManager.popMatrix();
+
+        net.minecraft.client.renderer.RenderHelper.disableStandardItemLighting();
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+        GlStateManager.enableDepth();
+        GlStateManager.depthFunc(515);
+        GlStateManager.enableCull();
+        GlStateManager.tryBlendFuncSeparate(GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA,
+                GlStateManager.SourceFactor.ONE, GlStateManager.DestFactor.ZERO);
+        GlStateManager.alphaFunc(516, 0.1F);
+        GlStateManager.enableBlend();
+        GlStateManager.depthMask(false);
+        net.minecraft.client.Minecraft.getMinecraft().getTextureManager()
+                .bindTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+        GlStateManager.shadeModel(7425);
+        net.vulkanmod.render.EntityRenderer.invalidateFrameState();
+    }
+
+    @Redirect(method = "renderHand(FI)V", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/ItemRenderer;renderItemInFirstPerson(F)V"))
+    private void vulkanmod$handItems(net.minecraft.client.renderer.ItemRenderer self, float partialTicks) {
+        if (vulkanmod$drawingHand || !vulkanmod$handDrawn) self.renderItemInFirstPerson(partialTicks);
+    }
+
+    @Redirect(method = "renderHand(FI)V", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/ItemRenderer;renderOverlays(F)V"))
+    private void vulkanmod$handOverlays(net.minecraft.client.renderer.ItemRenderer self, float partialTicks) {
+        if (!vulkanmod$drawingHand) self.renderOverlays(partialTicks);
+    }
 
     // Accessors instead of @Shadow: shadowed fields never reach the refmap and would
     // not bind under the SRG runtime names.
@@ -62,6 +138,7 @@ public abstract class EntityRendererM {
         GuiRenderer.recordFrameBegin();
         GuiRenderer.setGuiPass(false);
         net.vulkanmod.render.EntityRenderer.onFrameBegin();
+        net.vulkanmod.render.ChunkBatcher.applyVertexFlags();
         FrameProfiler.syncBegin();
         Initializer.beginFrame();
         FrameProfiler.syncEnd();
@@ -70,8 +147,10 @@ public abstract class EntityRendererM {
     @Inject(method = "renderHand(FI)V", at = @At("HEAD"))
     private void vulkanmod$beginHand(float partialTicks, int pass, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
-            // B3: the hand draws at display resolution over the upscaled world.
-            net.vulkanmod.vulkan.Drawer.enterDisplayPhase();
+            // B3: the hand draws at display resolution over the upscaled world. A pack's
+            // passes see it instead, so there it stays in the scene.
+            if (net.vulkanmod.vulkan.FrameTargets.handInScene()) net.vulkanmod.vulkan.Drawer.setHandDepth(true);
+            else net.vulkanmod.vulkan.Drawer.enterDisplayPhase();
             net.vulkanmod.render.EntityRenderer.setHandPass(true);
         }
     }
@@ -80,6 +159,7 @@ public abstract class EntityRendererM {
     private void vulkanmod$endHand(float partialTicks, int pass, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
             net.vulkanmod.render.EntityRenderer.setHandPass(false);
+            net.vulkanmod.vulkan.Drawer.setHandDepth(false);
         }
     }
 
@@ -96,6 +176,10 @@ public abstract class EntityRendererM {
     @Inject(method = "renderWorld", at = @At("TAIL"))
     private void vulkanmod$worldEnd(float partialTicks, long finishTimeNano, CallbackInfo ci) {
         FrameProfiler.worldEnd();
+        if (Initializer.isVulkanActive()) {
+            // A no-op without a selected shader pack (or VULKANMOD_FRAME_DUMP).
+            net.vulkanmod.shader.FrameUniforms.onWorldRendered(partialTicks);
+        }
     }
 
     @Redirect(method = "updateCameraAndRender",

@@ -1,0 +1,15 @@
+#version 400 compatibility
+layout(triangles, equal_spacing, ccw) in;
+in vec2 uvC[];
+in vec4 colorC[];
+patch in float level;
+out vec2 uv;
+out vec4 color;
+out vec3 tess;
+void main() {
+    vec3 b = gl_TessCoord;
+    tess = b;
+    gl_Position = b.x * gl_in[0].gl_Position + b.y * gl_in[1].gl_Position + b.z * gl_in[2].gl_Position;
+    uv = b.x * uvC[0] + b.y * uvC[1] + b.z * uvC[2];
+    color = (b.x * colorC[0] + b.y * colorC[1] + b.z * colorC[2]) * (level / 3.0);
+}

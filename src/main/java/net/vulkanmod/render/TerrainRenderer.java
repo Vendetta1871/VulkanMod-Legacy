@@ -103,8 +103,14 @@ public class TerrainRenderer {
     }
 
     /** Builds the current section's model-view/MVP from the stashed origin (camera-relative). */
+    /** MVP and modelview of the section into the chunk matrix buffer. */
+    public static void writeCurrentSectionMatrices(long address) {
+        VRenderSystem.writeSectionMatrices(address, (float) (pendingX - batchCamX), (float) (pendingY - batchCamY),
+                (float) (pendingZ - batchCamZ));
+    }
+
     public static void applyCurrentSectionMatrix() {
-        VRenderSystem.applySectionModelView(batchCameraMV, batchProjRemap,
+        VRenderSystem.applySectionModelView(
                 (float) (pendingX - batchCamX),
                 (float) (pendingY - batchCamY),
                 (float) (pendingZ - batchCamZ));
@@ -353,6 +359,7 @@ public class TerrainRenderer {
         if (layer == BlockRenderLayer.TRANSLUCENT) {
             // F2: no-op when the particle pass already took the copy this frame.
             net.vulkanmod.vulkan.Drawer.snapshotOpaque();
+            net.vulkanmod.vulkan.Drawer.enterTranslucent();
         }
         currentLayer = layer;
         logStats();
@@ -383,7 +390,10 @@ public class TerrainRenderer {
                 // (e.g. solid dirt vs cutout_mipped grass sides).
                 if (lastCaptureFrame != frameCounter) {
                     VRenderSystem.captureCameraMatrices(batchCameraMV, batchProjRemap);
+                    VRenderSystem.prepareSectionMatrices(batchCameraMV, batchProjRemap);
                     lastCaptureFrame = frameCounter;
+                    // Camera and world fog are current here (shader packs, a no-op without one).
+                    net.vulkanmod.shader.FrameUniforms.onTerrainBegin();
                     if (DUMP_MVP && dumpFramesLeft > 0) {
                         float[] mv = new float[16];
                         org.lwjgl.opengl.GL11.glGetFloatv(org.lwjgl.opengl.GL11.GL_MODELVIEW_MATRIX, mv);

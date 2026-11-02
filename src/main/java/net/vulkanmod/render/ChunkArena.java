@@ -32,7 +32,7 @@ import static org.lwjgl.vulkan.VK10.*;
 public class ChunkArena {
 
     /** Vertex stride in bytes; also the allocation granularity (keeps vertexOffset integral). */
-    private final int stride;
+    private int stride;
 
     /** Growth cap: offsets are ints, and 1 GiB of section geometry is far past any world. */
     private static final int MAX_CAPACITY = 1024 * 1024 * 1024;
@@ -189,6 +189,12 @@ public class ChunkArena {
         pendingHead = 0;
         pendingCount = 0;
         highWater = 0;
+    }
+
+    /** As {@link #reset()}, for vertices of another size. */
+    public void reset(int newStride) {
+        reset();
+        stride = newStride;
     }
 
     /** Inserts a mature range into the free list, coalescing with adjacent free blocks. */

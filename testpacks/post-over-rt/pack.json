@@ -1,0 +1,2 @@
+{ "format": 1, "id": "post-over-rt", "name": "M7 post over RT", "version": "1", "renderer": { "rt": true },
+  "combination": { "fragment": "programs/final.fsh", "inputs": ["sceneColor"] } }

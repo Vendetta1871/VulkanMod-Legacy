@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "id": "sample_post",
+  "name": "Sample Post (built-in)",
+  "version": "1.0.0",
+  "renderer": { "hdr": true },
+  "textures": [
+    { "name": "bright",   "format": "RGBA16F", "scale": 0.5,  "mipmaps": true, "clear": false },
+    { "name": "bloom",    "format": "RGBA16F", "scale": 0.25, "clear": false },
+    { "name": "exposure", "format": "R32F",    "size": [1, 1], "history": true, "filter": "nearest" }
+  ],
+  "commandLists": [
+    { "stage": "POST_SCENE", "passes": [
+      { "name": "bright", "fragment": "programs/bright.fsh", "inputs": ["sceneColor"], "targets": ["bright"],
+        "mipmaps": ["bright"] },
+      { "name": "down",   "fragment": "programs/down.fsh",   "inputs": ["bright"], "targets": ["bloom"] },
+      { "name": "blurH",  "fragment": "programs/blur_h.fsh", "inputs": ["bloom"],  "targets": ["bloom"] },
+      { "name": "blurV",  "compute":  "programs/blur_v.csh", "inputs": ["bloom"],  "writes": ["bloom"],
+        "workGroups": { "scale": 0.25, "local": [8, 8] } },
+      { "name": "adapt",  "compute":  "programs/adapt.csh",  "inputs": ["bright", "exposurePrev"], "writes": ["exposure"],
+        "workGroups": { "fixed": [1, 1, 1], "local": [1, 1, 1] } }
+    ] }
+  ],
+  "combination": { "fragment": "programs/final.fsh", "inputs": ["sceneColor", "bloom", "exposure", "sceneDepth"] }
+}

@@ -28,6 +28,7 @@ public class TileEntityRendererDispatcherM {
                                      CallbackInfo ci) {
         if (Initializer.isVulkanActive() && te.getWorld() != null) {
             EntityRenderer.setTesrLight(te.getWorld().getCombinedLight(te.getPos(), 0));
+            EntityRenderer.setCurrentTile(te);
         }
     }
 }

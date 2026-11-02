@@ -23,10 +23,12 @@ import static org.lwjgl.vulkan.VK13.*;
 public final class FrameTargets {
 
     /**
-     * LDR for now: a float target would skip the [0,1] clamp vanilla blending relies on.
-     * The scene moves to RGBA16F with a tonemapping step once HDR lighting exists.
+     * The display and, by default, the scene: a float target would skip the [0,1] clamp
+     * vanilla blending relies on, so only a pack that tonemaps opts out (see {@link #sceneFormat}).
      */
     public static final int COLOR_FORMAT = VK_FORMAT_R8G8B8A8_UNORM;
+    /** Scene color of a pack with {@code renderer.hdr}; its combination writes display-referred values. */
+    public static final int HDR_SCENE_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 
     public enum Phase { NONE, SCENE, DISPLAY }
 
@@ -48,10 +50,62 @@ public final class FrameTargets {
     private static boolean blitOnly;
     private static boolean temporal;
 
+    /**
+     * Debug knob for the shader-pack coordinate convention (docs/shaderpacks, D4):
+     * VULKANMOD_PACK_SPACE=1 renders the whole SCENE phase in pack space - positive
+     * viewport, so image row 0 is the bottom row as in GL, and clockwise front faces - and
+     * flips once when the scene is copied into the display. The picture must not change.
+     * Forces the blit upscaler; ignored while ray tracing is on (its passes read the scene
+     * in Vulkan row order).
+     */
+    private static final boolean PACK_SPACE_DEBUG = System.getenv("VULKANMOD_PACK_SPACE") != null;
+    /** The current frame's SCENE phase renders in pack space. */
+    private static boolean packSpaceFrame;
+    private static boolean packSpaceRtWarned;
+    /** The shader pack run this frame (docs/shaderpacks, M1), or null: the only per-frame pack check. */
+    private static PackRuntime pack;
+    /** {@link #pack} has geometry programs: the scene phase attaches their targets. */
+    private static boolean geometry;
+    private static boolean translucentEntered;
+    /** Format of {@link #scene}: {@link #COLOR_FORMAT} or, for the pack run this frame, {@link #HDR_SCENE_FORMAT}. */
+    private static int sceneFormat = COLOR_FORMAT;
+
+    /** True when this frame's scene is in GL row order (a pack runs, or the debug knob). */
+    static boolean packSpaceFrame() { return packSpaceFrame; }
+
     private FrameTargets() {}
 
     public static int depthFormat() { return depthFormat; }
     public static Phase phase() { return phase; }
+
+    /**
+     * True while draws go to the scene in pack space (GL row order): the viewport is
+     * positive and pipelines use a clockwise front face (Pipeline.packStateKey bit 37).
+     */
+    public static boolean packSpace() { return packSpaceFrame && phase == Phase.SCENE; }
+
+    /** The pack whose geometry programs the next draw goes through, or null. */
+    static PackRuntime geometry() {
+        return geometry && phase == Phase.SCENE ? pack : null;
+    }
+
+    /** The pack run this frame, or null. */
+    static PackRuntime packRuntime() {
+        return pack;
+    }
+
+    /** With a pack the hand stays in the scene, so the post passes see it. */
+    public static boolean handInScene() {
+        return pack != null && packSpaceFrame && phase == Phase.SCENE;
+    }
+
+    /** True once the world's depth must survive a depth clear (the one vanilla issues for the hand). */
+    static boolean keepsDepth() {
+        return pack != null && packSpaceFrame && phase == Phase.SCENE && translucentEntered;
+    }
+
+    /** True while draws go to an RGBA16F scene (Pipeline.packStateKey bit 38). */
+    public static boolean hdrScene() { return sceneFormat == HDR_SCENE_FORMAT && phase == Phase.SCENE; }
     public static float renderScale() { return renderScale; }
     private static long recording;
 
@@ -71,7 +125,7 @@ public final class FrameTargets {
      */
     public static void applySettings() {
         net.vulkanmod.config.Config config = net.vulkanmod.Initializer.CONFIG;
-        upscaler = config.effectiveUpscaler();
+        upscaler = PACK_SPACE_DEBUG ? "blit" : config.effectiveUpscaler();
         blitOnly = upscaler.equals("blit");
         float scale = config.effectiveRenderScale();
         boolean share = scale == 1.0f && shareColorAllowed();
@@ -117,7 +171,7 @@ public final class FrameTargets {
                         | VK_IMAGE_USAGE_STORAGE_BIT,
                 depthFormat);
         sharedColor = sw == displayW && sh == displayH && shareColorAllowed();
-        scene.create(sw, sh, COLOR_FORMAT,
+        scene.create(sw, sh, sceneFormat,
                 // STORAGE: RT passes modify the scene color in place.
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
                         | (net.vulkanmod.vulkan.rt.RtScene.enabled() ? VK_IMAGE_USAGE_STORAGE_BIT : 0), depthFormat,
@@ -133,11 +187,16 @@ public final class FrameTargets {
     private static boolean sharedColor;
 
     private static boolean shareColorAllowed() {
-        return !upscaler.equals("fsr3") && !RtDebugView.ACTIVE && !MotionVectorPass.DEBUG_VIEW;
+        // Pack space needs the flipping copy into the display; an HDR scene has another format.
+        return !upscaler.equals("fsr3") && !RtDebugView.ACTIVE && !MotionVectorPass.DEBUG_VIEW && !PACK_SPACE_DEBUG
+                && sceneFormat == COLOR_FORMAT;
     }
 
     static void destroy() {
         GpuTimer.destroy();
+        PackRuntime.destroy();
+        pack = null;
+        sceneFormat = COLOR_FORMAT;
         releaseRtPasses();
         if (net.vulkanmod.vulkan.rt.RtScene.enabled()) net.vulkanmod.vulkan.rt.RtScene.destroy();
         Fsr3Upscaler.destroy();
@@ -209,14 +268,114 @@ public final class FrameTargets {
         if (!depthReadable) return;
         VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
         imageBarrier(b.get(0), scene.depthImage(), depthAspect(),
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                        | org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                        | rtStage(),
                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         pipelineBarrier(cmd, b, stack);
         depthReadable = false;
+    }
+
+    /**
+     * Before the translucent layer of a pack frame: leaves rendering when the pack has a
+     * reason to (depth copy, {@code DEFERRED}), and resumes with everything loaded.
+     */
+    static void enterTranslucent(VkCommandBuffer cmd, MemoryStack stack) {
+        if (phase != Phase.SCENE || pack == null || translucentEntered) return;
+        translucentEntered = true;
+        pack.shadowTranslucent(stack);
+        if (!pack.usesTranslucentHook()) return;
+        vkCmdEndRendering(cmd);
+        pack.recordDeferred(cmd, stack);
+        depthBackToAttachment(cmd, stack);
+        Drawer.invalidateBoundPipeline(cmd);
+        pack.resumeGeometry(cmd, stack);
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+    }
+
+    /** Before the hand: the copy behind depthtex2 leaves rendering and comes back with everything loaded. */
+    static void beforeHand(VkCommandBuffer cmd, MemoryStack stack) {
+        if (phase != Phase.SCENE || pack == null || !pack.wantsHandDepth()) return;
+        vkCmdEndRendering(cmd);
+        pack.copyHandDepth(cmd, stack);
+        Drawer.invalidateBoundPipeline(cmd);
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+    }
+
+    /**
+     * OptiFine scales the hand's projection z by MC_HAND_DEPTH, which puts the hand in
+     * [0.4375, 0.5625] of the depth range. Packs test for that range and undo it to rebuild
+     * the hand's position, so the numbers matter and not only that it draws in front.
+     */
+    static void setHandDepth(VkCommandBuffer cmd, boolean hand, MemoryStack stack) {
+        if (!handInScene()) return;
+        VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+        viewport.x(0.0f).y(0.0f).width(scene.width()).height(scene.height());
+        float half = pack.handDepth() * 0.5f;
+        viewport.minDepth(hand ? 0.5f - half : 0.0f).maxDepth(hand ? 0.5f + half : 1.0f);
+        vkCmdSetViewport(cmd, 0, viewport);
+    }
+
+    /** Copies the scene depth into {@code dst} (DEPTH format); the scene depth stays an attachment. */
+    static void copySceneDepth(VkCommandBuffer cmd, long dst, MemoryStack stack) {
+        VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
+        imageBarrier(pre.get(0), scene.depthImage(), depthAspect(),
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        imageBarrier(pre.get(1), dst, depthAspect(),
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        pipelineBarrier(cmd, pre, stack);
+
+        VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
+        region.srcSubresource().set(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1);
+        region.dstSubresource().set(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1);
+        region.extent().set(scene.width(), scene.height(), 1);
+        vkCmdCopyImage(cmd, scene.depthImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+
+        VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(2, stack);
+        imageBarrier(post.get(0), scene.depthImage(), depthAspect(),
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        imageBarrier(post.get(1), dst, depthAspect(),
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        pipelineBarrier(cmd, post, stack);
+    }
+
+    /** The depth texel at the screen center into {@code buffer}, as a float or a packed D24. */
+    static void copyCenterDepth(VkCommandBuffer cmd, long buffer, MemoryStack stack) {
+        VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(1, stack);
+        imageBarrier(pre.get(0), scene.depthImage(), depthAspect(),
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        pipelineBarrier(cmd, pre, stack);
+
+        VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+        region.imageSubresource().set(VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1);
+        region.imageOffset().set(scene.width() / 2, scene.height() / 2, 0);
+        region.imageExtent().set(1, 1, 1);
+        vkCmdCopyImageToBuffer(cmd, scene.depthImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, region);
+
+        VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(1, stack);
+        imageBarrier(post.get(0), scene.depthImage(), depthAspect(),
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, 0,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        pipelineBarrier(cmd, post, stack);
     }
 
     private static void copyOpaque(VkCommandBuffer cmd, MemoryStack stack) {
@@ -234,8 +393,8 @@ public final class FrameTargets {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         pipelineBarrier(cmd, pre, stack);
 
-        copyOrBlit(cmd, scene.colorImage(), scene.width(), scene.height(), COLOR_FORMAT,
-                opaqueColor.image, opaqueColor.width, opaqueColor.height, COLOR_FORMAT, stack);
+        copyOrBlit(cmd, scene.colorImage(), scene.width(), scene.height(), sceneFormat,
+                opaqueColor.image, opaqueColor.width, opaqueColor.height, COLOR_FORMAT, false, stack);
 
         VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(2, stack);
         imageBarrier(post.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
@@ -263,8 +422,8 @@ public final class FrameTargets {
         imageBarrier(b.get(0), scene.depthImage(), depthAspect(),
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                        | org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                        | rtStage(),
                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         pipelineBarrier(cmd, b, stack);
@@ -310,16 +469,27 @@ public final class FrameTargets {
     static void beginFrame(VkCommandBuffer cmd, float[] clearColor, MemoryStack stack) {
         recording++;
         GpuTimer.beginFrame(cmd);
-        temporal = wantTemporal();
+        pack = PackRuntime.forFrame();
+        net.vulkanmod.render.ChunkBatcher.requestVertexFlags(pack != null ? pack.vertexFlags() : 0);
+        int wantedFormat = pack != null && pack.hdrScene() ? HDR_SCENE_FORMAT : COLOR_FORMAT;
+        if (wantedFormat != sceneFormat) {
+            // Only when the pack changes: nothing of this frame touched the targets yet.
+            sceneFormat = wantedFormat;
+            recreateIfCreated();
+        }
+        // A pack replaces the temporal upscaler: FSR 3 reads the scene in Vulkan row order.
+        boolean rtPack = pack != null && net.vulkanmod.vulkan.rt.RtScene.enabled();
+        temporal = (pack == null || rtPack) && wantTemporal();
         updateLodBias();
         net.vulkanmod.render.CameraHistory.setJitterEnabled(temporal);
-        MotionVectorPass.setEnabled(temporal);
+        MotionVectorPass.setEnabled(temporal || (pack != null && pack.needsMotion()));
 
         // Contents of the previous frame are discarded (UNDEFINED). The source stages
         // cover the previous frame's upscale read (blit or FSR compute) and depth writes.
         VkImageMemoryBarrier2.Buffer barriers = VkImageMemoryBarrier2.calloc(2, stack);
         imageBarrier(barriers.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
-                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
+                VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                        | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -330,6 +500,19 @@ public final class FrameTargets {
         net.vulkanmod.vulkan.rt.RtEntities.beginFrame();
         depthReadable = false;
         net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 0);
+        // RT keeps Vulkan row order: a pack on top of it samples through vkm_hostUV.
+        packSpaceFrame = (pack != null || PACK_SPACE_DEBUG) && !net.vulkanmod.vulkan.rt.RtScene.enabled();
+        if (PACK_SPACE_DEBUG && !packSpaceFrame && !packSpaceRtWarned) {
+            packSpaceRtWarned = true;
+            net.vulkanmod.Initializer.LOGGER.warn("[frame] VULKANMOD_PACK_SPACE is ignored while ray tracing is on");
+        }
+        geometry = pack != null && pack.hasGeometry();
+        translucentEntered = false;
+        if (pack != null) {
+            pack.beginShadow(stack);
+            pack.recordPrologue(cmd, stack);
+        }
+        if (geometry) pack.beginGeometry(cmd, stack);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_CLEAR, clearColor, VK_ATTACHMENT_LOAD_OP_CLEAR, stack);
         phase = Phase.SCENE;
     }
@@ -358,11 +541,19 @@ public final class FrameTargets {
             net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 4);
         }
 
+        if (pack != null) {
+            // POST_SCENE + combination; the combination writes the scene color back in
+            // Vulkan row order, so nothing below flips it again.
+            pack.record(cmd, stack);
+            Drawer.invalidateBoundPipeline(cmd);
+            GpuTimer.mark(cmd, GpuTimer.PACK);
+        }
+
         if (RtDebugView.ACTIVE && net.vulkanmod.vulkan.rt.RtScene.enabled() && RtDebugView.record(cmd, stack)) {
             StorageImage rt = RtDebugView.output;
             blitIntoDisplay(cmd, rt.image, rt.width, rt.height, rt.format,
                     VK_IMAGE_LAYOUT_GENERAL, org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, stack);
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, false, stack);
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
             depthToAttachment(depth.get(0), display);
             pipelineBarrier(cmd, depth, stack);
@@ -370,7 +561,7 @@ public final class FrameTargets {
             StorageImage mv = MotionVectorPass.motionVectors;
             blitIntoDisplay(cmd, mv.image, mv.width, mv.height, mv.format,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, stack);
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, false, stack);
         } else if (temporal && Fsr3Upscaler.record(cmd, stack)) {
             // F5: FSR 3 upscale; leaves the display color ready as an attachment.
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
@@ -394,9 +585,11 @@ public final class FrameTargets {
             depthToAttachment(b.get(1), display);
             pipelineBarrier(cmd, b, stack);
         } else {
-            blitIntoDisplay(cmd, scene.colorImage(), scene.width(), scene.height(), COLOR_FORMAT,
+            // A pack-space scene without a pack (the debug knob) is in GL row order: this
+            // copy is the one flip (D4). A pack's combination already flipped it.
+            blitIntoDisplay(cmd, scene.colorImage(), scene.width(), scene.height(), sceneFormat,
                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, stack);
+                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, packSpaceFrame && pack == null, stack);
         }
 
         net.vulkanmod.vulkan.rt.RtScene.breadcrumb(cmd, stack, 6);
@@ -407,7 +600,8 @@ public final class FrameTargets {
 
     /** Copies or linearly blits {@code src} into the display color and readies it as an attachment. */
     private static void blitIntoDisplay(VkCommandBuffer cmd, long src, int srcW, int srcH, int srcFormat,
-                                        int srcLayout, long srcStage, long srcAccess, MemoryStack stack) {
+                                        int srcLayout, long srcStage, long srcAccess, boolean flipY,
+                                        MemoryStack stack) {
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
         imageBarrier(pre.get(0), src, VK_IMAGE_ASPECT_COLOR_BIT,
                 srcStage, srcAccess,
@@ -421,7 +615,7 @@ public final class FrameTargets {
         pipelineBarrier(cmd, pre, stack);
 
         copyOrBlit(cmd, src, srcW, srcH, srcFormat,
-                display.colorImage(), display.width(), display.height(), COLOR_FORMAT, stack);
+                display.colorImage(), display.width(), display.height(), COLOR_FORMAT, flipY, stack);
 
         VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(2, stack);
         imageBarrier(post.get(0), display.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
@@ -457,7 +651,7 @@ public final class FrameTargets {
         pipelineBarrier(cmd, pre, stack);
 
         copyOrBlit(cmd, display.colorImage(), display.width(), display.height(), COLOR_FORMAT,
-                swapchainImage, swapW, swapH, swapchainFormat, stack);
+                swapchainImage, swapW, swapH, swapchainFormat, false, stack);
 
         VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(1, stack);
         imageBarrier(post.get(0), swapchainImage, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -471,15 +665,20 @@ public final class FrameTargets {
 
     private static void beginRendering(VkCommandBuffer cmd, RenderTarget target, int colorLoadOp,
                                        float[] clearColor, int depthLoadOp, MemoryStack stack) {
-        VkRenderingAttachmentInfo.Buffer color = VkRenderingAttachmentInfo.calloc(1, stack);
-        color.get(0).sType$Default()
-                .imageView(target.colorView())
-                .imageLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                .loadOp(colorLoadOp)
-                .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
-        if (clearColor != null) {
-            color.get(0).clearValue().color().float32(0, clearColor[0]).float32(1, clearColor[1])
-                    .float32(2, clearColor[2]).float32(3, clearColor[3]);
+        PackRuntime extra = target == scene && geometry ? pack : null;
+        VkRenderingAttachmentInfo.Buffer color = VkRenderingAttachmentInfo.calloc(
+                extra != null ? extra.colorAttachments() : 1, stack);
+        if (extra != null) extra.writeAttachments(color);
+        if (extra == null || !extra.replacesSceneColor()) {
+            color.get(0).sType$Default()
+                    .imageView(target.colorView())
+                    .imageLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                    .loadOp(colorLoadOp)
+                    .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
+            if (clearColor != null) {
+                color.get(0).clearValue().color().float32(0, clearColor[0]).float32(1, clearColor[1])
+                        .float32(2, clearColor[2]).float32(3, clearColor[3]);
+            }
         }
 
         VkRenderingAttachmentInfo depth = VkRenderingAttachmentInfo.calloc(stack).sType$Default()
@@ -499,10 +698,16 @@ public final class FrameTargets {
 
         vkCmdBeginRendering(cmd, info);
 
-        // Viewport and scissor follow the target; the viewport flips Y like GL.
+        // Viewport and scissor follow the target; the viewport flips Y like GL, so images
+        // are stored upright. In pack space the scene keeps GL row order instead (positive
+        // viewport, row 0 at the bottom); the copy into the display flips it back.
         VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
-        viewport.x(0.0f).y(target.height()).width(target.width()).height(-target.height())
-                .minDepth(0.0f).maxDepth(1.0f);
+        if (target == scene && packSpaceFrame) {
+            viewport.x(0.0f).y(0.0f).width(target.width()).height(target.height());
+        } else {
+            viewport.x(0.0f).y(target.height()).width(target.width()).height(-target.height());
+        }
+        viewport.minDepth(0.0f).maxDepth(1.0f);
         vkCmdSetViewport(cmd, 0, viewport);
 
         VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
@@ -514,18 +719,27 @@ public final class FrameTargets {
         // Source stages also cover the previous frame's compute and RT reads.
         imageBarrier(b, target.depthImage(), depthAspect(),
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT
-                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                        | org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                        | rtStage(),
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
 
+    /** The RT shader stage for barriers; zero on a device without the feature. */
+    private static long rtStage() {
+        DeviceInfo info = Vulkan.getDeviceInfo();
+        return info != null && info.features != null && info.features.rayTracingPipeline
+                ? org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR : 0L;
+    }
+
     /** Raw copy when format and extent match, otherwise a linear blit (converts and scales). */
+    /** {@code flipY}: mirror vertically (a blit with swapped destination rows). */
     private static void copyOrBlit(VkCommandBuffer cmd, long src, int srcW, int srcH, int srcFormat,
-                                   long dst, int dstW, int dstH, int dstFormat, MemoryStack stack) {
-        if (srcFormat == dstFormat && srcW == dstW && srcH == dstH) {
+                                   long dst, int dstW, int dstH, int dstFormat, boolean flipY, MemoryStack stack) {
+        boolean sameSize = srcW == dstW && srcH == dstH;
+        if (srcFormat == dstFormat && sameSize && !flipY) {
             VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
             region.srcSubresource().set(VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
             region.dstSubresource().set(VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
@@ -537,9 +751,15 @@ public final class FrameTargets {
             region.srcSubresource().set(VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
             region.dstSubresource().set(VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
             region.srcOffsets(1).set(srcW, srcH, 1);
-            region.dstOffsets(1).set(dstW, dstH, 1);
+            if (flipY) {
+                region.dstOffsets(0).set(0, dstH, 0);
+                region.dstOffsets(1).set(dstW, 0, 1);
+            } else {
+                region.dstOffsets(1).set(dstW, dstH, 1);
+            }
+            // Same size: nearest keeps the flipped copy exact.
             vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, VK_FILTER_LINEAR);
+                    dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, sameSize ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
         }
     }
 

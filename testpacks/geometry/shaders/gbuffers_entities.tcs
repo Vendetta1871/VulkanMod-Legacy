@@ -1,0 +1,14 @@
+#version 400 compatibility
+layout(vertices = 3) out;
+in vec2 uvV[];
+in vec4 colorV[];
+out vec2 uvC[];
+out vec4 colorC[];
+patch out float level;
+void main() {
+    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+    uvC[gl_InvocationID] = uvV[gl_InvocationID];
+    colorC[gl_InvocationID] = colorV[gl_InvocationID];
+    level = 3.0;
+    gl_TessLevelOuter[0] = gl_TessLevelOuter[1] = gl_TessLevelOuter[2] = gl_TessLevelInner[0] = 3.0;
+}

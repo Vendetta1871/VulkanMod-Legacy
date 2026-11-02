@@ -640,7 +640,7 @@ public class Vulkan {
             graphicsQueue = queueSetup.graphics;
             presentQueue = queueSetup.present;
 
-            Initializer.LOGGER.info("Device features: {}", features);
+            Initializer.LOGGER.info("Device: {}, features: {}", deviceInfo.deviceName, features);
             Initializer.LOGGER.info("Queues: {}", queueSetup);
         }
     }

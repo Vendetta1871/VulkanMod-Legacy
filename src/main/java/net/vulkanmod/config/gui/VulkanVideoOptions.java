@@ -7,8 +7,9 @@ import net.minecraftforge.client.EnumHelperClient;
 import java.util.Arrays;
 
 /**
- * VulkanMod's rows in the vanilla video settings list: "Upscaling..." and "Ray Tracing...",
- * buttons that open {@link UpscalingSettingsScreen} and {@link RayTracingSettingsScreen}.
+ * VulkanMod's rows in the vanilla video settings list: "Upscaling...", "Ray Tracing..." and
+ * "Shader Packs...", buttons that open {@link UpscalingSettingsScreen},
+ * {@link RayTracingSettingsScreen} and {@link ShaderPackScreen}.
  *
  * <p>They are not part of {@link GameSettings.Options} at compile time: Forge's enum helper
  * appends them to the enum once, on first use. The {@code GuiVideoSettingsM} mixin appends
@@ -17,7 +18,7 @@ import java.util.Arrays;
  */
 public final class VulkanVideoOptions {
 
-    private static GameSettings.Options upscaling, rayTracing;
+    private static GameSettings.Options upscaling, rayTracing, shaderPacks;
 
     private static GameSettings.Options upscaling() {
         if (upscaling == null) {
@@ -34,15 +35,23 @@ public final class VulkanVideoOptions {
         return rayTracing;
     }
 
+    private static GameSettings.Options shaderPacks() {
+        if (shaderPacks == null) {
+            shaderPacks = EnumHelperClient.addOptions("VULKANMOD_SHADER_PACKS", "options.vulkanmod.shaderPacks", false, false);
+        }
+        return shaderPacks;
+    }
+
     /** Returns {@code options} with the VulkanMod rows appended. */
     public static GameSettings.Options[] appendTo(GameSettings.Options[] options) {
-        GameSettings.Options a = upscaling(), b = rayTracing();
-        if (a == null || b == null) {
+        GameSettings.Options a = upscaling(), b = rayTracing(), c = shaderPacks();
+        if (a == null || b == null || c == null) {
             return options;
         }
-        GameSettings.Options[] extended = Arrays.copyOf(options, options.length + 2);
+        GameSettings.Options[] extended = Arrays.copyOf(options, options.length + 3);
         extended[options.length] = a;
         extended[options.length + 1] = b;
+        extended[options.length + 2] = c;
         return extended;
     }
 
@@ -51,16 +60,17 @@ public final class VulkanVideoOptions {
         if (option == null) return null;
         if (option == upscaling) return "Upscaling...";
         if (option == rayTracing) return "Ray Tracing...";
+        if (option == shaderPacks) return "Shader Packs...";
         return null;
     }
 
     /** Opens the row's screen; false for options that are not VulkanMod's. */
     public static boolean click(GameSettings.Options option) {
-        if (option == null || (option != upscaling && option != rayTracing)) return false;
+        if (option == null || (option != upscaling && option != rayTracing && option != shaderPacks)) return false;
         Minecraft mc = Minecraft.getMinecraft();
-        mc.displayGuiScreen(option == upscaling
-                ? new UpscalingSettingsScreen(mc.currentScreen)
-                : new RayTracingSettingsScreen(mc.currentScreen));
+        mc.displayGuiScreen(option == upscaling ? new UpscalingSettingsScreen(mc.currentScreen)
+                : option == rayTracing ? new RayTracingSettingsScreen(mc.currentScreen)
+                : new ShaderPackScreen(mc.currentScreen));
         return true;
     }
 

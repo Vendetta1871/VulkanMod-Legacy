@@ -227,8 +227,10 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
     }
 
     float W = r.light >= 0 && r.target > 0.0 && r.M > 0.0 ? r.wsum / (r.M * r.target) : 0.0;
-    imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), W, r.M, 0.0));
-    if (W <= 0.0) return vec3(0.0);
+    if (W <= 0.0) {
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), W, r.M, 0.0));
+        return vec3(0.0);
+    }
 
     // A random point inside the emitter's block: soft shadows over the accumulated frames.
     vec3 center = lightAt(r.light).xyz - pc.cam.xyz;
@@ -250,6 +252,11 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
         if (payload.t >= 0.0 && emissionOf(payload.material) > 0.5) vis = vec3(1.0);
     }
     lightDistance = len;
+    // Visibility reuse: a light found occluded here is not handed on to the next frame or
+    // the neighbours. Reusing it (the target ignores visibility) made a still camera settle
+    // darker than a moving one, whose reuse is invalidated.
+    bool occluded = max(vis.r, max(vis.g, vis.b)) <= 0.0;
+    imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), occluded ? 0.0 : W, r.M, 0.0));
     return vis * lightColor(r.light) * (r.target * W);
 }
 

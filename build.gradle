@@ -28,6 +28,10 @@ configurations {
 dependencies {
     implementation cleanroom.userdev(cleanroom_version)
 
+    // Shader pack compiler (docs/shaderpacks): pure Java, merged into the mod jar below.
+    implementation project(':pack-compiler')
+    vulkanBundle project(':pack-compiler')
+
     // Vulkan bindings (pure Java, libvulkan is loaded from the system),
     // Vulkan Memory Allocator and shaderc (GLSL -> SPIR-V at runtime).
     // The Java side resolves against the LWJGL BOM shipped by Cleanroom.
@@ -83,13 +87,16 @@ cleanroom {
                         ([sourceSets.main.output.resourcesDir] as Set)) as List
                 def ownSet = ownDirs as Set
                 doFirst {
+                    // The pack compiler is part of the mod: it goes to the LaunchClassLoader
+                    // with the mod's own classes, never to the app classpath (it will use LWJGL).
+                    def pcJars = classpath.files.findAll { it.name ==~ /pack-compiler.*\.jar/ }
                     if (!noMod) {
                         def vulkanJars = classpath.files.findAll {
                             it.name ==~ /lwjgl-(vulkan|vma|shaderc).*\.jar/ && !it.name.contains('windows')
                         }
-                        jvmArgs "-Dcrl.dev.extrapath=${(ownDirs + vulkanJars).join(File.pathSeparator)}"
+                        jvmArgs "-Dcrl.dev.extrapath=${(ownDirs + vulkanJars + pcJars).join(File.pathSeparator)}"
                     }
-                    classpath = classpath.filter { !ownSet.contains(it) }
+                    classpath = classpath.filter { !ownSet.contains(it) && !pcJars.contains(it) }
                 }
             }
         }
@@ -158,6 +165,8 @@ sourceSets.main.java.srcDir(generateVersionSource)
 // which runs after the plugin's.
 afterEvaluate {
     jar {
+        // .files drops the task dependency on the bundled project jar (pack-compiler).
+        dependsOn configurations.vulkanBundle
         from(configurations.vulkanBundle.files.collect { zipTree(it) }) {
             exclude 'META-INF/**'
             exclude 'module-info.class'

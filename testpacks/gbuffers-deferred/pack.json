@@ -1,0 +1,19 @@
+{
+  "format": 1, "id": "gbuffers-deferred", "name": "M3 G-buffer test", "version": "1",
+  "textures": [
+    { "name": "albedo", "format": "RGBA8", "clear": [0, 0, 0, 0] },
+    { "name": "normal", "format": "RGBA16F", "clear": [0, 0, 0, 0] },
+    { "name": "lit", "format": "RGBA16F", "clear": [0, 0, 0, 1] }
+  ],
+  "gbuffers": {
+    "terrain": { "vertex": "programs/geo.vsh", "fragment": "programs/geo.fsh", "targets": ["albedo", "normal"] },
+    "entities": { "vertex": "programs/geo.vsh", "fragment": "programs/geo.fsh", "targets": ["albedo", "normal"] },
+    "water": { "vertex": "programs/forward.vsh", "fragment": "programs/forward.fsh", "targets": ["lit"], "inputs": ["depthtex1"] },
+    "hand": { "vertex": "programs/geo.vsh", "fragment": "programs/geo.fsh", "targets": ["albedo", "normal"] }
+  },
+  "commandLists": [
+    { "stage": "DEFERRED", "passes": [ { "name": "lighting", "fragment": "programs/lighting.fsh",
+      "inputs": ["albedo", "normal", "sceneColor", "sceneDepth"], "targets": ["lit"] } ] }
+  ],
+  "combination": { "fragment": "programs/final.fsh", "inputs": ["lit"] }
+}

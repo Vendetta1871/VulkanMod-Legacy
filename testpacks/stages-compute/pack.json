@@ -1,0 +1,10 @@
+{ "format": 1, "id": "stages-compute", "name": "M7 stages", "version": "1",
+  "textures": [
+    { "name": "seed", "format": "RGBA16F", "size": [8, 8], "clear": false },
+    { "name": "pulse", "format": "RGBA16F", "size": [8, 8], "clear": [0, 0, 0, 1] }
+  ],
+  "commandLists": [
+    { "stage": "SETUP", "passes": [ { "name": "seed", "compute": "programs/seed.csh", "writes": ["seed"], "workGroups": { "fixed": [1, 1, 1], "local": [8, 8, 1] } } ] },
+    { "stage": "BEGIN", "passes": [ { "name": "pulse", "fragment": "programs/pulse.fsh", "inputs": ["seed"], "targets": ["pulse"] } ] }
+  ],
+  "combination": { "fragment": "programs/final.fsh", "inputs": ["sceneColor", "pulse"] } }

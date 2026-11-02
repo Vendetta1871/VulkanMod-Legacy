@@ -68,6 +68,7 @@ public class Initializer {
         }
         // Also persists what Config.load migrated.
         CONFIG.write(configPath);
+        net.vulkanmod.shader.PackManager.init();
     }
 
     /**
@@ -183,6 +184,7 @@ public class Initializer {
             net.vulkanmod.render.TerrainRenderer.onFrameBegin();
             Drawer.getInstance().initiateRenderPass();
             net.vulkanmod.render.CameraHistory.beginFrame();
+            net.vulkanmod.shader.FrameUniforms.beginFrame();
         } catch (Throwable t) {
             reportFrameError("begin", t);
         }

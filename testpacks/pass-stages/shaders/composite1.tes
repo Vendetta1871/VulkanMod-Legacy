@@ -1,0 +1,11 @@
+#version 400 compatibility
+layout(triangles, equal_spacing, ccw) in;
+in Carry { vec2 uv; vec3 mark; } vs[];
+in float weight[];
+out Carried { vec2 uv; vec3 mark; } te;
+void main() {
+    vec3 b = gl_TessCoord;
+    gl_Position = b.x * gl_in[0].gl_Position + b.y * gl_in[1].gl_Position + b.z * gl_in[2].gl_Position;
+    te.uv = b.x * vs[0].uv + b.y * vs[1].uv + b.z * vs[2].uv;
+    te.mark = vs[0].mark * weight[0];
+}

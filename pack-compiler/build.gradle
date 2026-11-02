@@ -1,0 +1,38 @@
+// Shader pack compiler: the native pack format (IR), pack sources, include expansion and
+// the host interface layouts (docs/shaderpacks). No Minecraft, Cleanroom or LWJGL
+// dependency, so it builds and tests on its own and can back a standalone CLI later.
+// The mod merges its classes into the shipped jar (see the root build.gradle).
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Provided at runtime by Cleanroom; the version matches the one it ships.
+    compileOnly "com.google.code.gson:gson:${gson_version}"
+
+    testImplementation "com.google.code.gson:gson:${gson_version}"
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// vkpack check over one pack, see CheckMain: gradlew :pack-compiler:packCheck --args="<pack> <shaders> <out>"
+tasks.register('packCheck', JavaExec) {
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'net.vulkanmod.pack.cli.CheckMain'
+    workingDir = rootDir
+}

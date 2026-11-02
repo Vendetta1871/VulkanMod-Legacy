@@ -41,6 +41,12 @@ public class Config {
     public float fsr3Sharpness = 0.3f;
 
     /**
+     * Selected shader pack: a folder or zip name in {@code shaderpacks/}, or null for none
+     * (docs/shaderpacks). See {@link net.vulkanmod.shader.PackManager}.
+     */
+    public String shaderPack;
+
+    /**
      * Ray tracing preset: off | low | medium | high | custom. The named presets set the three
      * distances below; custom keeps them as edited. Needs ray-tracing pipeline support.
      */

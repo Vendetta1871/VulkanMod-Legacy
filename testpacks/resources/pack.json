@@ -1,0 +1,80 @@
+{
+  "format": 1,
+  "id": "resources",
+  "name": "Resources test",
+  "version": "1",
+  "textures": [],
+  "resources": {
+    "images": [
+      {
+        "name": "vox",
+        "sampler": "voxTex",
+        "format": "RGBA16F",
+        "size": [
+          4,
+          4,
+          4
+        ]
+      },
+      {
+        "name": "line",
+        "sampler": "lineTex",
+        "format": "R32UI",
+        "size": [
+          8
+        ]
+      },
+      {
+        "name": "raw",
+        "sampler": "rawTex",
+        "format": "RGBA8",
+        "size": [
+          2,
+          2
+        ],
+        "file": "raw.dat",
+        "pixels": {
+          "components": 3,
+          "bytes": 1,
+          "bgra": true,
+          "type": "UNSIGNED_BYTE"
+        }
+      }
+    ],
+    "buffers": [
+      {
+        "binding": 0,
+        "size": 64
+      }
+    ]
+  },
+  "commandLists": [
+    {
+      "stage": "BEGIN",
+      "passes": [
+        {
+          "name": "fill",
+          "compute": "programs/fill.csh",
+          "workGroups": {
+            "fixed": [
+              1,
+              1,
+              1
+            ],
+            "local": [
+              4,
+              4,
+              4
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "combination": {
+    "fragment": "programs/final.fsh",
+    "inputs": [
+      "sceneColor"
+    ]
+  }
+}

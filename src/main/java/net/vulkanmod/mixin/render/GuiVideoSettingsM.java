@@ -9,7 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
 
 /**
- * Appends VulkanMod's rows ("Upscaling...", "Ray Tracing...", see VulkanVideoOptions) to the
+ * Appends VulkanMod's rows ("Upscaling...", "Ray Tracing...", "Shader Packs...", see VulkanVideoOptions) to the
  * option array {@code initGui} passes to the {@code GuiOptionsRowList} constructor, only while
  * the Vulkan renderer is active. Both branches of that constructor call (with and without the
  * USE_VBO filtering) get the extended array, so the rows show on either path.

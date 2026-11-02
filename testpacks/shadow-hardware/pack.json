@@ -1,0 +1,18 @@
+{
+  "format": 1, "id": "shadow-hardware", "name": "M4 hw", "version": "1",
+  "textures": [
+    { "name": "albedo", "format": "RGBA8", "clear": [0, 0, 0, 0] },
+    { "name": "lit", "format": "RGBA16F", "clear": [0, 0, 0, 1] }
+  ],
+  "shadow": { "resolution": 2048, "distance": 90, "sunPathRotation": 25, "intervalSize": 2, "hardwareFiltering": true, "colorMipmaps": [true, false] },
+  "gbuffers": {
+    "terrain": { "vertex": "programs/geo.vsh", "fragment": "programs/geo.fsh", "targets": ["albedo"] },
+    "entities": { "vertex": "programs/geo.vsh", "fragment": "programs/geo.fsh", "targets": ["albedo"] },
+    "shadow": { "vertex": "programs/shadow.vsh", "fragment": "programs/shadow.fsh", "targets": ["shadowcolor0"] }
+  },
+  "commandLists": [
+    { "stage": "DEFERRED", "passes": [ { "name": "lighting", "fragment": "programs/lighting.fsh",
+      "inputs": ["albedo", "sceneColor", "sceneDepth", "shadowtex0", "shadowtex1", "shadowcolor0"], "targets": ["lit"] } ] }
+  ],
+  "combination": { "fragment": "programs/final.fsh", "inputs": ["lit"] }
+}

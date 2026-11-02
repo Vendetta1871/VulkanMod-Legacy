@@ -43,6 +43,12 @@ public class Drawer {
     private static List<VkCommandBuffer> transferCommandBuffers;
     private boolean frameTransferRecording;
 
+    /** Per-frame-slot shadow pass of a pack, submitted before the frame's render buffer; allocated on first use. */
+    private static VkCommandBuffer[] shadowCommandBuffers;
+    private static boolean shadowSubmit;
+    /** The entity draw goes to the shadow map only, see ShadowPass.renderUnseenEntities. */
+    public static boolean shadowOnly;
+
     /**
      * Per frame slot: pipelines that allocated descriptor sets from that slot's pools since
      * it was last reset (N4). Sets come from descriptorPools[currentFrame] only, so a slot's
@@ -391,7 +397,7 @@ public class Drawer {
                     // and submitDraw() bail out on skipRendering.
                     skipRendering = true;
                     return;
-                } else if(vkResult != VK_SUCCESS) {
+                } else if(vkResult != VK_SUCCESS && vkResult != VK_SUBOPTIMAL_KHR) {
                     throw new RuntimeException("Cannot get image: " + vkResult);
                 }
 
@@ -660,6 +666,30 @@ public class Drawer {
         }
     }
 
+    /** The pack's depth copy and {@code DEFERRED} passes, before the translucent layer; once per frame. */
+    public static void enterTranslucent() {
+        if(!isActive() || FrameTargets.phase() != FrameTargets.Phase.SCENE) return;
+        try(MemoryStack stack = stackPush()) {
+            FrameTargets.enterTranslucent(commandBuffers.get(currentFrame), stack);
+        }
+    }
+
+    /** A pack that reads depthtex2 gets the depth without the hand. */
+    public static void beforeHand() {
+        if(!isActive()) return;
+        try(MemoryStack stack = stackPush()) {
+            FrameTargets.beforeHand(commandBuffers.get(currentFrame), stack);
+        }
+    }
+
+    /** A pack keeps the hand in the scene, around the middle of the depth range. */
+    public static void setHandDepth(boolean hand) {
+        if(!isActive()) return;
+        try(MemoryStack stack = stackPush()) {
+            FrameTargets.setHandDepth(commandBuffers.get(currentFrame), hand, stack);
+        }
+    }
+
     /**
      * Switches the frame from the scene target to the display target (B3). Called where
      * vanilla starts the hand and the GUI; a no-op once switched or outside a frame.
@@ -823,9 +853,11 @@ public class Drawer {
             // it renders into the framebuffer of the acquired imageIndex. The frame's
             // transfer copies (if any) precede it in the same submit.
             VkCommandBuffer frameCmd = commandBuffers.get(currentFrame);
-            submitInfo.pCommandBuffers(transferCmd != null
-                    ? stack.pointers(transferCmd.address(), frameCmd.address())
-                    : stack.pointers(frameCmd));
+            PointerBuffer submitted = stack.mallocPointer(3);
+            if(transferCmd != null) submitted.put(transferCmd);
+            if(shadowSubmit) submitted.put(shadowCommandBuffers[currentFrame]);
+            shadowSubmit = false;
+            submitInfo.pCommandBuffers(submitted.put(frameCmd).flip());
 
             vkResetFences(device, stackGet().longs(inFlightFences.get(currentFrame)));
 
@@ -988,21 +1020,132 @@ public class Drawer {
         vertexBuffer.copyToVertexBuffer(vertexFormat.getSize(), vertexCount, buffer);
 
         Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
-        bindPipeline(boundPipeline);
-
-        uploadAndBindUBOs(boundPipeline);
 
         int indexCount;
         if(drawMode == 7) indexCount = vertexCount * 3 / 2;
         else if(drawMode == 6 || drawMode == 5) indexCount = (vertexCount - 2) * 3;
         else throw new RuntimeException("unknown drawMode: " + drawMode);
 
-        drawIndexed(vertexBuffer, indexBuffer, indexCount);
+        if (!shadowOnly) {
+            bindPipeline(boundPipeline);
+            uploadAndBindUBOs(boundPipeline);
+            drawIndexed(vertexBuffer, indexBuffer, indexCount);
+        }
+        if (ShadowPass.active() && net.vulkanmod.render.EntityRenderer.isEntityPass()) {
+            mirrorToShadow(boundPipeline, vertexBuffer, indexBuffer, indexCount);
+        }
+    }
+
+    /** An entity draw again, with the vertices already in the ring and the light's matrices. */
+    private void mirrorToShadow(Pipeline pipeline, VertexBuffer vertexBuffer, IndexBuffer indexBuffer, int indexCount) {
+        ShadowPass shadow = ShadowPass.recording();
+        if (!shadow.drawsEntity(pipeline)) return;
+        shadow.enter();
+        shadow.applyEntityMatrices();
+        try {
+            bindPipeline(pipeline);
+            uploadAndBindUBOs(pipeline);
+            drawIndexed(vertexBuffer, indexBuffer, indexCount);
+        } finally {
+            shadow.restoreEntityMatrices();
+            shadow.leave();
+        }
+    }
+
+    /** Begins this slot's shadow command buffer. The slot's fence has been waited on. */
+    static VkCommandBuffer beginShadowCommands() {
+        if (shadowCommandBuffers == null) {
+            try(MemoryStack stack = stackPush()) {
+                int count = commandBuffers.size();
+                PointerBuffer p = stack.mallocPointer(count);
+                VkCommandBufferAllocateInfo info = VkCommandBufferAllocateInfo.calloc(stack).sType$Default()
+                        .commandPool(getCommandPool()).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(count);
+                if (vkAllocateCommandBuffers(Vulkan.getDevice(), info, p) != VK_SUCCESS) {
+                    throw new RuntimeException("Failed to allocate shadow command buffers");
+                }
+                shadowCommandBuffers = new VkCommandBuffer[count];
+                for (int i = 0; i < count; i++) shadowCommandBuffers[i] = new VkCommandBuffer(p.get(i), Vulkan.getDevice());
+            }
+        }
+        VkCommandBuffer cmd = shadowCommandBuffers[currentFrame];
+        shadowSubmit = false;
+        vkResetCommandBuffer(cmd, 0);
+        try(MemoryStack stack = stackPush()) {
+            if (vkBeginCommandBuffer(cmd, VkCommandBufferBeginInfo.calloc(stack).sType$Default()
+                    .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)) != VK_SUCCESS) {
+                throw new RuntimeException("Failed to begin the shadow command buffer");
+            }
+        }
+        return cmd;
+    }
+
+    static void endShadowCommands() {
+        if (vkEndCommandBuffer(shadowCommandBuffers[currentFrame]) != VK_SUCCESS) {
+            throw new RuntimeException("Failed to end the shadow command buffer");
+        }
+        shadowSubmit = true;
+    }
+
+    /** Makes {@code next} the frame's buffer, returning the old one. The bind cache belongs to a buffer. */
+    static VkCommandBuffer swapCommandBuffer(VkCommandBuffer next) {
+        VkCommandBuffer old = commandBuffers.get(currentFrame);
+        commandBuffers.set(currentFrame, next);
+        lastBindKey = Long.MIN_VALUE;
+        lastBindPipeline = null;
+        lastBindProgram = null;
+        packSetBound = false;
+        return old;
     }
 
     public void uploadAndBindUBOs(Pipeline pipeline) {
 
         pipeline.bindDescriptorSets(commandBuffers.get(currentFrame), currentFrame, uniformBuffers);
+        Pipeline.Program program = pipeline.boundProgram();
+        if (program != null) {
+            if (!drawBlockSet) {
+                // The GL color: the shader color is whatever the last entity left there. The
+                // sky is the exception, it sets the shader color itself and never the GL one.
+                float[] sky = tintFromShaderColor ? VRenderSystem.shaderColor : null;
+                DRAW_BLOCK.putFloat(0, sky != null ? sky[0] : VRenderSystem.trackedColorR)
+                        .putFloat(4, sky != null ? sky[1] : VRenderSystem.trackedColorG)
+                        .putFloat(8, sky != null ? sky[2] : VRenderSystem.trackedColorB)
+                        .putFloat(12, sky != null ? sky[3] : VRenderSystem.trackedColorA);
+            }
+            // Set 1 was just rebound; with another pipeline's set layout that disturbs set 2.
+            FrameTargets.packRuntime().bindResources(commandBuffers.get(currentFrame), VK_PIPELINE_BIND_POINT_GRAPHICS, program.layout());
+            DRAW_BLOCK.putInt(48, PackRuntime.renderStage(pipeline));
+            float[] material = net.vulkanmod.shader.PbrAtlases.materialRect();
+            DRAW_BLOCK.putFloat(64, material[0]).putFloat(68, material[1]).putFloat(72, material[2]).putFloat(76, material[3]);
+            vkCmdPushConstants(commandBuffers.get(currentFrame), program.layout(), VK_SHADER_STAGE_ALL_GRAPHICS, 0, DRAW_BLOCK);
+        }
+    }
+
+    /** True while the sky draws. */
+    public static boolean tintFromShaderColor;
+
+    /** {@code Draw} push constants of pack programs (host-interface.md): tint, entityColor, light, entityId, blockEntityId, renderStage, currentRenderedItemId, material rectangle. */
+    public static final int DRAW_BLOCK_SIZE = 80;
+    private static final ByteBuffer DRAW_BLOCK = org.lwjgl.system.MemoryUtil.memCalloc(DRAW_BLOCK_SIZE)
+            .putInt(36, 240).putInt(40, -1).putInt(44, -1);
+    private static boolean drawBlockSet;
+
+    /** The item the next draws belong to, 0 when none. */
+    public static void setRenderedItem(int id) {
+        DRAW_BLOCK.putInt(52, id);
+    }
+
+    /** The next draws are an entity's: its tint before the lightmap, overlay color, lightmap coordinates and ids. */
+    public static void setDrawBlock(float r, float g, float b, float a, float overlayAlpha, int blockLight, int skyLight,
+                                    int entityId, int blockEntityId) {
+        DRAW_BLOCK.putFloat(0, r).putFloat(4, g).putFloat(8, b).putFloat(12, a);
+        DRAW_BLOCK.putFloat(16, 1.0f).putFloat(20, 0.0f).putFloat(24, 0.0f).putFloat(28, overlayAlpha);
+        DRAW_BLOCK.putInt(32, blockLight).putInt(36, skyLight).putInt(40, entityId).putInt(44, blockEntityId);
+        drawBlockSet = true;
+    }
+
+    public static void clearDrawBlock() {
+        DRAW_BLOCK.putFloat(28, 0.0f).putInt(32, 0).putInt(36, 240).putInt(40, -1).putInt(44, -1);
+        drawBlockSet = false;
     }
 
     public void drawIndexed(VertexBuffer vertexBuffer, IndexBuffer indexBuffer, int indexCount) {
@@ -1054,6 +1197,9 @@ public class Drawer {
     // draws with an identical (pipeline, state) pair skip the vkCmdBindPipeline call.
     private static long lastBindKey = Long.MIN_VALUE;
     private static Pipeline lastBindPipeline;
+    private static Pipeline.Program lastBindProgram;
+    /** The pack's shared set is bound in this command buffer, see {@link #bindPipeline}. */
+    private static boolean packSetBound;
     private static int lastBindFrame = -1;
 
     /**
@@ -1062,6 +1208,7 @@ public class Drawer {
      */
     public static void invalidateBindState() {
         lastBindFrame = -1;
+        packSetBound = false;
     }
 
     public void bindPipeline(Pipeline pipeline) {
@@ -1071,16 +1218,40 @@ public class Drawer {
                 VRenderSystem.depthTest, VRenderSystem.depthMask,
                 Pipeline.DepthState.depthFuncToVulkan(VRenderSystem.depthFun),
                 currentLogicOpState, VRenderSystem.getColorMask(),
-                VRenderSystem.cull, VRenderSystem.topology);
-        long handle = pipeline.getHandle(stateKey);
+                VRenderSystem.cull, VRenderSystem.topology, FrameTargets.packSpace(), FrameTargets.hdrScene());
+        ShadowPass shadow = ShadowPass.drawing();
+        PackRuntime geometry = FrameTargets.geometry();
+        Pipeline.Program program = null;
+        if (shadow != null) {
+            stateKey = shadow.stateKey(VRenderSystem.topology);
+            program = ShadowPass.program(pipeline);
+            geometry = FrameTargets.packRuntime();
+        } else if (geometry != null) {
+            stateKey |= geometry.mrtBits();
+            program = geometry.program(pipeline);
+        }
+        long handle = pipeline.getHandle(stateKey, program);
+        // A program can turn a draw away, a line under a geometry shader; it stays vanilla then.
+        program = pipeline.boundProgram();
 
         // The command buffer is reset at each frame start, so a bind recorded in an
         // earlier use of this frame slot does not carry over.
-        if (stateKey != lastBindKey || pipeline != lastBindPipeline || currentFrame != lastBindFrame) {
+        if (stateKey != lastBindKey || pipeline != lastBindPipeline || program != lastBindProgram
+                || currentFrame != lastBindFrame) {
             vkCmdBindPipeline(commandBuffers.get(currentFrame), VK_PIPELINE_BIND_POINT_GRAPHICS, handle);
             lastBindKey = stateKey;
             lastBindPipeline = pipeline;
+            lastBindProgram = program;
             lastBindFrame = currentFrame;
+            // A vanilla pipeline's set 0 replaces the pack's; programs share theirs.
+            if (program == null) packSetBound = false;
+        }
+        if (program != null && !packSetBound) {
+            try (MemoryStack stack = stackPush()) {
+                vkCmdBindDescriptorSets(commandBuffers.get(currentFrame), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        program.layout(), 0, stack.longs(shadow != null ? geometry.opaqueSet() : geometry.geometrySet()), null);
+            }
+            packSetBound = true;
         }
 
         usedPipelines.get(currentFrame).add(pipeline);
@@ -1094,6 +1265,18 @@ public class Drawer {
         vkCmdPushConstants(commandBuffer, pipeline.getLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, pushConstant.getBuffer());
     }
 
+    /**
+     * Other code bound its own graphics pipelines (the shader pack passes): forget the
+     * cached bind, and set the depth bias again, which binding a pipeline without that
+     * dynamic state invalidated.
+     */
+    static void invalidateBoundPipeline(VkCommandBuffer commandBuffer) {
+        lastBindKey = Long.MIN_VALUE;
+        lastBindPipeline = null;
+        packSetBound = false;
+        vkCmdSetDepthBias(commandBuffer, 0.0F, 0.0F, 0.0F);
+    }
+
     public static void setDepthBias(float units, float factor) {
         VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
 
@@ -1102,6 +1285,9 @@ public class Drawer {
 
     public static void clearAttachments(int v) {
         if(skipRendering) return;
+        // Vanilla clears the depth for the hand; a pack's post passes need it, and the
+        // hand has its own depth range (FrameTargets.setHandDepth).
+        if(v == 0x100 && FrameTargets.keepsDepth()) return;
 
         VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
 

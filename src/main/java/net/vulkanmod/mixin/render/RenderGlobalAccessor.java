@@ -11,4 +11,10 @@ public interface RenderGlobalAccessor {
 
     @Accessor("viewFrustum")
     ViewFrustum vulkanmod$getViewFrustum();
+
+    @Accessor("renderDispatcher")
+    net.minecraft.client.renderer.chunk.ChunkRenderDispatcher vulkanmod$getRenderDispatcher();
+
+    @Accessor("renderInfos")
+    java.util.List<?> vulkanmod$getRenderInfos();
 }

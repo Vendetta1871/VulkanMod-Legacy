@@ -73,6 +73,56 @@ public class EntityRenderer {
      */
     private static int tesrLight = -1;
 
+    /** The draw category of a model draw in the current window (runtime.md, "Draw categories"). */
+    public static net.vulkanmod.pack.plan.GeometryCategory category() {
+        if (damagePass) return net.vulkanmod.pack.plan.GeometryCategory.DAMAGED_BLOCK;
+        if (handPass) {
+            return heldTranslucent() ? net.vulkanmod.pack.plan.GeometryCategory.HAND_WATER : net.vulkanmod.pack.plan.GeometryCategory.HAND;
+        }
+        if (isTesr()) {
+            return currentTile instanceof net.minecraft.tileentity.TileEntityBeacon
+                    ? net.vulkanmod.pack.plan.GeometryCategory.BEACON_BEAM : net.vulkanmod.pack.plan.GeometryCategory.BLOCK;
+        }
+        // Spider and enderman eyes are the additive layer over a mob.
+        Pipeline.BlendState blend = Drawer.currentBlendState;
+        if (blend.enabled && blend.srcRgbFactor == org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE
+                && blend.dstRgbFactor == org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE) {
+            return net.vulkanmod.pack.plan.GeometryCategory.SPIDER_EYES;
+        }
+        if (blend.enabled && currentEntity != null) return net.vulkanmod.pack.plan.GeometryCategory.ENTITIES_TRANSLUCENT;
+        return currentEntity != null && currentEntity.isGlowing()
+                ? net.vulkanmod.pack.plan.GeometryCategory.ENTITIES_GLOWING : net.vulkanmod.pack.plan.GeometryCategory.ENTITIES;
+    }
+
+    private static boolean damagePass;
+    private static net.minecraft.tileentity.TileEntity currentTile;
+
+    public static void setDamagePass(boolean value) {
+        damagePass = value;
+    }
+
+    public static void setCurrentTile(net.minecraft.tileentity.TileEntity tile) {
+        currentTile = tile;
+    }
+
+    /** The hand holds a block of the translucent layer: OptiFine's {@code gbuffers_hand_water}. */
+    public static boolean heldTranslucent() {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
+        if (mc.player == null) return false;
+        net.minecraft.item.Item item = mc.player.getHeldItemMainhand().getItem();
+        return item instanceof net.minecraft.item.ItemBlock b && b.getBlock().getRenderLayer() == net.minecraft.util.BlockRenderLayer.TRANSLUCENT;
+    }
+
+    /** True inside a block entity's renderer. */
+    public static boolean isTesr() {
+        return tesrLight >= 0;
+    }
+
+    /** True between the particle pass's head and return; the rest of the rain window is the weather. */
+    public static boolean isParticlePass() {
+        return particlePass;
+    }
+
     public static void setTesrLight(int packed) {
         tesrLight = packed;
     }
@@ -228,6 +278,9 @@ public class EntityRenderer {
 
     public static void setCurrentEntity(Entity entity) {
         currentEntity = entity;
+        if (entity != null && net.vulkanmod.vulkan.ShadowPass.active()) {
+            net.vulkanmod.vulkan.ShadowPass.recording().markSeen(entity);
+        }
         cachedEntityTexture = null;
         cachedTextureId = -1;
     }
@@ -549,7 +602,7 @@ public class EntityRenderer {
                         float4.get(0), float4.get(1), float4.get(2), light / 65536 / 16, light % 65536 / 16);
             }
         }
-        if (rtOnly) {
+        if (rtOnly && !net.vulkanmod.vulkan.ShadowPass.active()) {
             net.vulkanmod.debug.FrameProfiler.entityDrawEnd();
             return;
         }
@@ -576,7 +629,16 @@ public class EntityRenderer {
             return;
         }
 
+        Drawer.shadowOnly = rtOnly;
+        if (net.vulkanmod.shader.PackManager.active() != null) {
+            int light = packed >= 0 ? packed : packedLight();
+            Drawer.setDrawBlock(float4.get(0), float4.get(1), float4.get(2), float4.get(3), redOverlayActive ? 0.3f : 0.0f,
+                    light % 65536, light / 65536, net.vulkanmod.shader.PackIds.entityId(currentEntity),
+                    net.vulkanmod.shader.PackIds.blockEntityId(currentTile));
+        }
         drawer.draw(data, 7, format, vertexCount);
+        Drawer.clearDrawBlock();
+        Drawer.shadowOnly = false;
 
         if (!loggedFirst) {
             loggedFirst = true;
@@ -608,6 +670,7 @@ public class EntityRenderer {
      * constant across the weather, so it is snapshotted once from the first batch.
      */
     private static void deferWeather(ByteBuffer data, int vertexCount, VulkanImage texture) {
+        if (net.vulkanmod.shader.PackManager.rendererIsFalse("weather")) return;
         int stride = PARTICLE_FORMAT.getSize();
         int bytes = vertexCount * stride;
         int off = weatherVerts * stride;
@@ -648,7 +711,7 @@ public class EntityRenderer {
             weatherTint[2] = VRenderSystem.trackedColorB;
             weatherTint[3] = VRenderSystem.trackedColorA;
             weatherBlend = VRenderSystem.getBlendState();
-            weatherDepthMask = VRenderSystem.depthMask;
+            weatherDepthMask = VRenderSystem.depthMask || net.vulkanmod.shader.PackManager.rendererIsTrue("rain.depth");
             weatherDepthTest = VRenderSystem.depthTest;
             weatherDepthFunc = VRenderSystem.depthFun;
             weatherCull = VRenderSystem.cull;

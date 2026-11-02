@@ -148,15 +148,20 @@ public abstract class MemoryManager {
 
     public static void createImage(int width, int height, int mipLevel, int format, int tiling, int usage, int memProperties,
                                    LongBuffer pTextureImage, PointerBuffer pTextureImageMemory) {
+        createImage(VK_IMAGE_TYPE_2D, width, height, 1, mipLevel, format, tiling, usage, memProperties, pTextureImage, pTextureImageMemory);
+    }
+
+    public static void createImage(int imageType, int width, int height, int depth, int mipLevel, int format, int tiling, int usage,
+                                   int memProperties, LongBuffer pTextureImage, PointerBuffer pTextureImageMemory) {
 
         try(MemoryStack stack = stackPush()) {
 
             VkImageCreateInfo imageInfo = VkImageCreateInfo.create();
             imageInfo.sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
-            imageInfo.imageType(VK_IMAGE_TYPE_2D);
+            imageInfo.imageType(imageType);
             imageInfo.extent().width(width);
             imageInfo.extent().height(height);
-            imageInfo.extent().depth(1);
+            imageInfo.extent().depth(depth);
             imageInfo.mipLevels(mipLevel);
             imageInfo.arrayLayers(1);
             imageInfo.format(format);

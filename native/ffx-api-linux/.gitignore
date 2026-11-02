@@ -4,3 +4,4 @@ generated/
 build/
 build-*/
 wineprefix/
+standalone/

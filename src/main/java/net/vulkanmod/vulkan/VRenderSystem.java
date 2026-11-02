@@ -82,6 +82,7 @@ public class VRenderSystem {
     public static int logicOpMode = 0x1503; // GL_COPY, the GL default
 
     public static float clearDepth = 1.0f;
+    private static final float[] SECTION_MV = new float[16], SECTION_MVP = new float[16];
     public static FloatBuffer clearColor = MemoryUtil.memAllocFloat(4);
 
     static {
@@ -307,15 +308,27 @@ public class VRenderSystem {
      * Equivalent to vanilla's {@code translate(origin - camera)} applied over the camera matrix
      * (the negligible scale-about-8 z-fighting nudge is omitted).
      */
-    public static void applySectionModelView(org.joml.Matrix4f cameraModelView, org.joml.Matrix4f projRemap,
-                                             float dx, float dy, float dz) {
-        SCRATCH_MV.set(cameraModelView).translate(dx, dy, dz);
-        modelViewMatrix.position(0);
-        SCRATCH_MV.get(modelViewMatrix);
+    public static void applySectionModelView(float dx, float dy, float dz) {
+        writeTranslated(MemoryUtil.memAddress0(modelViewMatrix), SECTION_MV, dx, dy, dz);
+        writeTranslated(MemoryUtil.memAddress0(MVP), SECTION_MVP, dx, dy, dz);
+    }
 
-        projRemap.mul(SCRATCH_MV, SCRATCH_T2);
-        MVP.position(0);
-        SCRATCH_T2.get(MVP);
+    public static void writeSectionMatrices(long address, float dx, float dy, float dz) {
+        writeTranslated(address, SECTION_MVP, dx, dy, dz);
+        writeTranslated(address + 64, SECTION_MV, dx, dy, dz);
+    }
+
+    /** The camera matrices of the layer: sections differ by their translation column only. */
+    public static void prepareSectionMatrices(org.joml.Matrix4f cameraModelView, org.joml.Matrix4f projRemap) {
+        cameraModelView.get(SECTION_MV);
+        projRemap.mul(cameraModelView, SCRATCH_T2).get(SECTION_MVP);
+    }
+
+    private static void writeTranslated(long address, float[] m, float dx, float dy, float dz) {
+        for (int i = 0; i < 12; i++) MemoryUtil.memPutFloat(address + i * 4L, m[i]);
+        for (int i = 0; i < 4; i++) {
+            MemoryUtil.memPutFloat(address + 48L + i * 4L, m[i] * dx + m[4 + i] * dy + m[8 + i] * dz + m[12 + i]);
+        }
     }
 
     /*

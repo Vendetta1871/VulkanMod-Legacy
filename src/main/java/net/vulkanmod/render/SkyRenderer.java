@@ -46,6 +46,10 @@ import java.util.Random;
  */
 public class SkyRenderer {
 
+    private static final int STAGE_SKY = 1, STAGE_SUNSET = 2, STAGE_SUN = 4, STAGE_MOON = 5, STAGE_STARS = 6, STAGE_VOID = 7;
+    /** {@code MC_RENDER_STAGE_*} of the sky draw in progress; custom skies are 3. */
+    public static int stage = 3;
+
     private static Pipeline skyPipeline;      // POSITION: flat color + fog (plane, stars)
     private static Pipeline skyTexPipeline;   // POSITION_TEX: color * texture (sun, moon)
     private static Pipeline skyVcolPipeline;  // POSITION_COLOR: glow fan
@@ -79,6 +83,8 @@ public class SkyRenderer {
     private static ByteBuffer endSkyBuffer;
 
     private static final VertexFormat POSITION = DefaultVertexFormats.POSITION;
+    private static final int HORIZON_VERTS = 36;
+    private static ByteBuffer horizonBuffer;
     private static final VertexFormat POSITION_TEX = DefaultVertexFormats.POSITION_TEX;
     private static final VertexFormat POSITION_COLOR = DefaultVertexFormats.POSITION_COLOR;
 
@@ -120,6 +126,7 @@ public class SkyRenderer {
      *         path has to run (custom sky renderer, inactive renderer, load failure).
      */
     public static boolean render(float partialTicks, int pass) {
+        stage = 3;
         Minecraft mc = Minecraft.getMinecraft();
         World world = mc.world;
         if (world == null || !Drawer.isActive() || Drawer.skipRendering) {
@@ -236,7 +243,13 @@ public class SkyRenderer {
             buildSkyPlane();
             skyPlaneVbo = uploadStatic(skyPlaneBuffer, SKY_PLANE_VERTS, POSITION);
         }
-        drawStaticQuads(drawer, skyPlaneVbo, SKY_PLANE_VERTS);
+        stage = STAGE_SKY;
+        boolean skyVisible = !net.vulkanmod.shader.PackManager.rendererIsFalse("sky");
+        if (skyVisible) drawStaticQuads(drawer, skyPlaneVbo, SKY_PLANE_VERTS);
+        if (skyVisible && net.vulkanmod.shader.PackManager.active() != null) {
+            buildHorizon();
+            drawer.draw(horizonBuffer, 7, POSITION, HORIZON_VERTS);
+        }
 
         // From here on the GL sky disables fog.
         VRenderSystem.setFogState(VRenderSystem.FOG_NONE);
@@ -244,7 +257,7 @@ public class SkyRenderer {
         // --- sunrise/sunset glow fan ---
         float[] glow = world.provider.calcSunriseSunsetColors(
                 world.getCelestialAngle(partialTicks), partialTicks);
-        if (glow != null) {
+        if (glow != null && skyVisible) {
             float cr = glow[0], cg = glow[1], cb = glow[2];
             if (pass != 2) {
                 float[] desat = desaturate(cr, cg, cb);
@@ -262,6 +275,7 @@ public class SkyRenderer {
             Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE; // SRC_ALPHA / ONE_MINUS_SRC_ALPHA
             VRenderSystem.applyModelViewMatrix(mv);
             VRenderSystem.calculateMVP();
+            stage = STAGE_SUNSET;
             drawer.draw(fanBuffer, 6, POSITION_COLOR, 18);
         }
 
@@ -269,6 +283,7 @@ public class SkyRenderer {
         // rotate(-90, y) * rotate(celestialAngle * 2PI, x)
         Matrix4f celestial = new Matrix4f(headMV)
                 .rotate(-HALF_PI, 0.0f, 1.0f, 0.0f)
+                .rotate((float) Math.toRadians(net.vulkanmod.shader.FrameUniforms.sunPathRotation()), 0.0f, 0.0f, 1.0f)
                 .rotate(world.getCelestialAngle(partialTicks) * (TWO_PI), 1.0f, 0.0f, 0.0f);
         VRenderSystem.applyModelViewMatrix(celestial);
         VRenderSystem.calculateMVP();
@@ -301,30 +316,39 @@ public class SkyRenderer {
             // GL_SRC_ALPHA, GL_ONE: additive, like the GL sky
             Drawer.currentBlendState = ADDITIVE_BLEND;
 
-            VTextureSelector.bindTexture(sunTexture);
-            drawer.draw(sunBuffer, 7, POSITION_TEX, 4);
+            if (!net.vulkanmod.shader.PackManager.rendererIsFalse("sun")) {
+                VTextureSelector.bindTexture(sunTexture);
+                stage = STAGE_SUN;
+                drawer.draw(sunBuffer, 7, POSITION_TEX, 4);
+            }
 
-            buildMoon(world.getMoonPhase());
-            VTextureSelector.bindTexture(moonTexture);
-            drawer.draw(moonBuffer, 7, POSITION_TEX, 4);
+            if (!net.vulkanmod.shader.PackManager.rendererIsFalse("moon")) {
+                buildMoon(world.getMoonPhase());
+                VTextureSelector.bindTexture(moonTexture);
+                stage = STAGE_MOON;
+                drawer.draw(moonBuffer, 7, POSITION_TEX, 4);
+            }
         }
 
         float starBrightness = world.getStarBrightness(partialTicks) * rainFade;
-        if (starBrightness > 0.0f) {
+        if (starBrightness > 0.0f && !net.vulkanmod.shader.PackManager.rendererIsFalse("stars")) {
             VRenderSystem.setShaderColor(starBrightness, starBrightness, starBrightness, starBrightness);
             VRenderSystem.setShaderPipeline(skyPipeline);
             if (starsVbo == null) {
                 starsVbo = uploadStatic(starBuffer, starVertexCount, POSITION);
             }
+            stage = STAGE_STARS;
             drawStaticQuads(drawer, starsVbo, starVertexCount);
         }
 
+        stage = STAGE_VOID;
         // --- lower sky plane (vanilla glSkyList2, y=-16) ---
         // Vanilla draws it here - after the stars - with fog re-enabled and blend
         // disabled, so the opaque plane overwrites any star that bled below the horizon
         // instead of adding to it (L7). Drawing both planes up front made additive
         // stars visible through the lower sky.
         VRenderSystem.setFogState(fogState);
+        if (!skyVisible) return;
         VRenderSystem.setShaderPipeline(skyPipeline);
         Drawer.currentBlendState = Pipeline.NO_BLEND_STATE;
         if (skyPlane2Vbo == null) {
@@ -596,6 +620,33 @@ public class SkyRenderer {
     }
 
     /** The moon quad: 20x20 at y=-100, UVs picking the current phase cell. */
+    /**
+     * The sky plane stops 2 degrees above the horizon. OptiFine closes the gap under shaders
+     * with an octagon around the camera down to y = 0, drawn with the sky color: packs paint
+     * their sky through gbuffers_skybasic and rely on it reaching the terrain.
+     */
+    private static void buildHorizon() {
+        if (horizonBuffer == null) horizonBuffer = MemoryUtil.memAlloc(HORIZON_VERTS * POSITION.getSize());
+        Minecraft mc = Minecraft.getMinecraft();
+        float far = mc.gameSettings.renderDistanceChunks * 16.0f;
+        float q = far * 0.9238f, p = far * 0.3826f, top = 16.0f;
+        float bottom = (float) -net.vulkanmod.shader.FrameUniforms.cameraY();
+        float[][] ring = {{-p, -q}, {-q, -p}, {-q, p}, {-p, q}, {p, q}, {q, p}, {q, -p}, {p, -q}};
+        horizonBuffer.clear();
+        for (int i = 0; i < ring.length; i++) {
+            float[] a = ring[i], b = ring[(i + 1) % ring.length];
+            horizonBuffer.putFloat(a[0]).putFloat(bottom).putFloat(a[1]);
+            horizonBuffer.putFloat(a[0]).putFloat(top).putFloat(a[1]);
+            horizonBuffer.putFloat(b[0]).putFloat(top).putFloat(b[1]);
+            horizonBuffer.putFloat(b[0]).putFloat(bottom).putFloat(b[1]);
+        }
+        horizonBuffer.putFloat(-q).putFloat(bottom).putFloat(-q);
+        horizonBuffer.putFloat(-q).putFloat(bottom).putFloat(q);
+        horizonBuffer.putFloat(q).putFloat(bottom).putFloat(q);
+        horizonBuffer.putFloat(q).putFloat(bottom).putFloat(-q);
+        horizonBuffer.flip();
+    }
+
     private static void buildMoon(int moonPhase) {
         if (moonPhase == builtMoonPhase) {
             return;

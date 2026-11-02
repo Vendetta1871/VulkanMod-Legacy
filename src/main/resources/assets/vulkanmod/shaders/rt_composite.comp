@@ -44,8 +44,9 @@ void main() {
     if (a.x > 0.5) {
         // A light source's own surface: fully lit in its own colors (vanilla leaves blocks
         // that glow only for RT, like redstone, dark).
+        // Faded with the RT range like the rest: no hard edge against vanilla's emitters.
         vec4 c = imageLoad(sceneColor, p);
-        imageStore(sceneColor, p, vec4(max(c.rgb, imageLoad(albedo, p).rgb), c.a));
+        imageStore(sceneColor, p, vec4(mix(c.rgb, max(c.rgb, imageLoad(albedo, p).rgb), a.w), c.a));
         return;
     }
     if (a.w == 0.0) {

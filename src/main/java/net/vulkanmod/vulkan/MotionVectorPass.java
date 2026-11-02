@@ -27,6 +27,8 @@ public final class MotionVectorPass {
 
     private static ComputeSets sets;
     private static ComputePipeline pipeline;
+    /** Variant for a pack-space scene (GL row order), whose vectors are in pack texcoords. */
+    private static ComputePipeline packSpacePipeline;
     private static int boundGeneration = -1;
     private static long recordedFrame = -1;
 
@@ -41,14 +43,14 @@ public final class MotionVectorPass {
     public static void setEnabled(boolean on) { enabled = on || DEBUG_VIEW; }
 
     private static void prepare() {
+        if (sets == null) sets = new ComputeSets(1);
         if (pipeline == null) {
-            sets = new ComputeSets(1);
             java.util.Map<String, String> defines = DEBUG_VIEW
                     ? java.util.Map.of("DEBUG_VIEW", "1") : java.util.Map.of();
-            ShaderSPIRVUtils.SPIRV spv = ShaderSPIRVUtils.compileShaderFile("motion_vectors.comp",
-                    ShaderSPIRVUtils.ShaderKind.COMPUTE_SHADER, defines);
-            pipeline = new ComputePipeline(spv, new long[]{sets.layout}, 128);
-            spv.free();
+            pipeline = createPipeline(defines);
+        }
+        if (FrameTargets.packSpaceFrame() && packSpacePipeline == null) {
+            packSpacePipeline = createPipeline(java.util.Map.of("PACK_SPACE", "1"));
         }
         if (boundGeneration == FrameTargets.generation()) return;
         RenderTarget scene = FrameTargets.scene;
@@ -56,6 +58,14 @@ public final class MotionVectorPass {
         sets.write(0, ComputeSets.nearestClampSampler(), scene.depthView(),
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, motionVectors.view);
         boundGeneration = FrameTargets.generation();
+    }
+
+    private static ComputePipeline createPipeline(java.util.Map<String, String> defines) {
+        ShaderSPIRVUtils.SPIRV spv = ShaderSPIRVUtils.compileShaderFile("motion_vectors.comp",
+                ShaderSPIRVUtils.ShaderKind.COMPUTE_SHADER, defines);
+        ComputePipeline p = new ComputePipeline(spv, new long[]{sets.layout}, 128);
+        spv.free();
+        return p;
     }
 
     /**
@@ -86,10 +96,11 @@ public final class MotionVectorPass {
         toPrev.get(0, constants);
         toCur.get(64, constants);
 
-        pipeline.bind(cmd);
-        sets.bind(cmd, pipeline.layout(), 0);
-        vkCmdPushConstants(cmd, pipeline.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, constants);
-        pipeline.dispatch(cmd, (scene.width() + 7) / 8, (scene.height() + 7) / 8, 1);
+        ComputePipeline p = FrameTargets.packSpaceFrame() ? packSpacePipeline : pipeline;
+        p.bind(cmd);
+        sets.bind(cmd, p.layout(), 0);
+        vkCmdPushConstants(cmd, p.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, constants);
+        p.dispatch(cmd, (scene.width() + 7) / 8, (scene.height() + 7) / 8, 1);
 
         VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(1, stack);
         FrameTargets.imageBarrier(post.get(0), motionVectors.image, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -127,6 +138,7 @@ public final class MotionVectorPass {
     static void destroy() {
         motionVectors.destroy();
         if (pipeline != null) { pipeline.cleanUp(); pipeline = null; }
+        if (packSpacePipeline != null) { packSpacePipeline.cleanUp(); packSpacePipeline = null; }
         if (sets != null) { sets.destroy(); sets = null; }
         boundGeneration = -1;
         recordedFrame = -1;

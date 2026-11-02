@@ -25,9 +25,12 @@ public class ShaderSPIRVUtils {
     /** Root of every shader resource; include paths are relative to it. */
     private static final String SHADER_ROOT = "/assets/vulkanmod/shaders/";
 
-    /** Matches {@code #include "x.glsl"} and {@code #include <x.glsl>}. */
+    /**
+     * Matches {@code #include "x.glsl"} and {@code #include <x.glsl>}. Blanks only: {@code \\s}
+     * also takes newlines, and the empty lines a preprocessed pack is full of make that quadratic.
+     */
     private static final Pattern INCLUDE_PATTERN =
-            Pattern.compile("^\\s*#\\s*include\\s*([<\"])([^>\"]+)[>\"]", Pattern.MULTILINE);
+            Pattern.compile("^[ \\t]*#[ \\t]*include[ \\t]*([<\"])([^>\"]+)[>\"]", Pattern.MULTILINE);
 
     /** Guards against a cyclic or absurdly deep include chain. */
     private static final int MAX_INCLUDE_DEPTH = 32;
@@ -50,6 +53,18 @@ public class ShaderSPIRVUtils {
             e.printStackTrace();
         }
         return null;
+    }
+
+    /** Define (also in the SPIR-V cache key) that skips the optimizer, see {@link #compilePackShader}. */
+    private static final String UNOPTIMIZED = "VKM_UNOPTIMIZED";
+
+    /**
+     * A shader pack's program. shaderc's optimizer can emit invalid SPIR-V from them (an
+     * OpSelect with a scalar condition on a vector, seen from plain if-chains), and every
+     * driver optimizes again anyway.
+     */
+    public static SPIRV compilePackShader(String filename, String source, ShaderKind shaderKind) {
+        return compileShader(filename, source, shaderKind, Map.of(UNOPTIMIZED, "1"));
     }
 
     public static SPIRV compileShader(String filename, String source, ShaderKind shaderKind) {
@@ -82,7 +97,8 @@ public class ShaderSPIRVUtils {
             throw new RuntimeException("Failed to create compiler options");
         }
 
-        shaderc_compile_options_set_optimization_level(options, shaderc_optimization_level_performance);
+        shaderc_compile_options_set_optimization_level(options, defines.containsKey(UNOPTIMIZED)
+                ? shaderc_optimization_level_zero : shaderc_optimization_level_performance);
 
         // Raster shaders keep the shaderc default target so their output is unchanged;
         // compute and ray tracing need Vulkan 1.2 / SPIR-V 1.4.
@@ -102,7 +118,13 @@ public class ShaderSPIRVUtils {
 
         long result;
         try {
-            result = shaderc_compile_into_spv(compiler, source, shaderKind.kind, filename, "main", options);
+            // On the heap: a pack's expanded program does not fit on the thread's stack.
+            java.nio.ByteBuffer text = org.lwjgl.system.MemoryUtil.memUTF8(source, false);
+            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                result = shaderc_compile_into_spv(compiler, text, shaderKind.kind, stack.UTF8(filename), stack.UTF8("main"), options);
+            } finally {
+                org.lwjgl.system.MemoryUtil.memFree(text);
+            }
         } finally {
             // The options are not referenced by the result; releasing them here kept
             // leaking one options object per compiled shader before.
@@ -356,6 +378,8 @@ public class ShaderSPIRVUtils {
 
         VERTEX_SHADER(shaderc_glsl_vertex_shader, false),
         GEOMETRY_SHADER(shaderc_glsl_geometry_shader, false),
+        TESS_CONTROL_SHADER(shaderc_glsl_tess_control_shader, false),
+        TESS_EVAL_SHADER(shaderc_glsl_tess_evaluation_shader, false),
         FRAGMENT_SHADER(shaderc_glsl_fragment_shader, false),
         COMPUTE_SHADER(shaderc_glsl_compute_shader, true),
         RAYGEN_SHADER(shaderc_glsl_raygen_shader, true),

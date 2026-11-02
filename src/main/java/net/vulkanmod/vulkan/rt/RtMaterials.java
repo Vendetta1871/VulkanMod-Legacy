@@ -98,7 +98,10 @@ public final class RtMaterials {
 
     @net.minecraftforge.fml.common.eventhandler.SubscribeEvent
     public static void onStitch(net.minecraftforge.client.event.TextureStitchEvent.Post event) {
-        if (event.getMap() == Minecraft.getMinecraft().getTextureMapBlocks()) markDirty();
+        if (event.getMap() == Minecraft.getMinecraft().getTextureMapBlocks()) {
+            markDirty();
+            net.vulkanmod.shader.PbrAtlases.markDirty();
+        }
     }
 
     /** The material atlas matching the current block atlas, or null before the atlas exists. */

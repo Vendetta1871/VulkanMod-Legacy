@@ -82,6 +82,27 @@ public class AutoTest {
     private static final boolean RESIZE_MODE = System.getenv("VULKANMOD_AUTOTEST_RESIZE") != null;
 
     /**
+     * Shader-pack switch test, on top of {@link #RESIZE_MODE}: with
+     * {@code VULKANMOD_AUTOTEST_PACKSWITCH=<other pack id>} the run switches between
+     * {@code builtin:sample_post} (RGBA16F scene), the given pack and no pack around the
+     * resizes, capturing each state, and restores the configured selection at the end.
+     */
+    private static final String PACK_SWITCH = System.getenv("VULKANMOD_AUTOTEST_PACKSWITCH");
+    /** {@code <pack or off>:<tick>,...}: selects packs as the menu does, with their background compile. Ends 1400 ticks after the last. */
+    private static final String PACK_CHAIN = System.getenv("VULKANMOD_AUTOTEST_PACKCHAIN");
+    /** Packs compile in the background, as they do in play. */
+    public static final boolean BACKGROUND_PACKS = PACK_CHAIN != null;
+
+    /**
+     * Pack scene test: with {@code VULKANMOD_AUTOTEST_PACKSCENES=1} the player gets water at
+     * eye level, then goes to the Nether and the End, with a capture in each, so the scene
+     * variants are chosen by the real conditions.
+     */
+    private static final boolean PACK_SCENES = System.getenv("VULKANMOD_AUTOTEST_PACKSCENES") != null;
+    /** With {@code VULKANMOD_AUTOTEST_POOL=1} a stone basin of water appears below the camera. */
+    private static final boolean POOL = System.getenv("VULKANMOD_AUTOTEST_POOL") != null;
+
+    /**
      * GUI regression repro: with {@code VULKANMOD_AUTOTEST_GUI=1} the title screen is
      * captured, then the Options screen (tiled dirt background) and the Language screen
      * (a scrolling list with a scrollbar) are opened and captured, then the game quits -
@@ -157,6 +178,24 @@ public class AutoTest {
      * sample, default 150).</p>
      */
     private static final boolean FPS_MODE = System.getenv("VULKANMOD_AUTOTEST_FPS") != null;
+
+    /**
+     * Reference comparison: {@code VULKANMOD_AUTOTEST_SCENES=<file>} walks the scenes listed
+     * there ({@code name x y z yaw pitch time weather}), captures each one and measures the
+     * framerate. {@code local/ref} runs the same file under OptiFine; settle and measure
+     * lengths match its probe. {@code VULKANMOD_AUTOTEST_SIZE="w h"} sets the window size.
+     */
+    private static final String SCENES_FILE = System.getenv("VULKANMOD_AUTOTEST_SCENES");
+    /** A flat world and commands run once before the first scene, for the 26.2 comparison. */
+    private static final boolean FLAT_WORLD = System.getenv("VULKANMOD_AUTOTEST_FLAT") != null;
+    private static final String SCENE_COMMANDS = System.getenv("VULKANMOD_AUTOTEST_COMMANDS");
+    /** Drives the pack option screen with real clicks: a slider, then Done. */
+    private static final boolean PACK_GUI = System.getenv("VULKANMOD_AUTOTEST_PACKGUI") != null;
+    private static int packGuiTick;
+    private static final int SCENE_SETTLE = envInt("VULKANMOD_AUTOTEST_SETTLE", 200), SCENE_MEASURE = envInt("VULKANMOD_AUTOTEST_MEASURE", 400);
+    private static java.util.List<String[]> scenes;
+    private static int sceneIndex, sceneTick;
+    private static long sceneFrames, sceneNanos;
 
     /**
      * {@code VULKANMOD_AUTOTEST_RTTOGGLE=1}: in the world, switches the ray tracing preset the
@@ -534,7 +573,7 @@ public class AutoTest {
                     if (titleCaptured && ++titleTicks >= 3) {
                         mc.gameSettings.pauseOnLostFocus = false;
                         WorldSettings settings = new WorldSettings(0x5EEDL, GameType.CREATIVE,
-                                false, false, WorldType.DEFAULT);
+                                false, false, FLAT_WORLD ? WorldType.FLAT : WorldType.DEFAULT);
                         settings.enableCommands();
                         // Every run starts from a freshly generated world: a reused save
                         // keeps the dimension, position, effects and terrain edits of the
@@ -618,6 +657,16 @@ public class AutoTest {
                     if (++warmupTicks % 40 == 0) {
                         Initializer.LOGGER.info("[autotest] warmup fps {} | {}", Minecraft.getDebugFPS(), focusState(mc));
                     }
+                    return;
+                }
+
+                if (SCENES_FILE != null) {
+                    scenesStage(mc);
+                    return;
+                }
+
+                if (PACK_GUI) {
+                    packGuiStage(mc);
                     return;
                 }
 
@@ -815,6 +864,10 @@ public class AutoTest {
                 if (REPRO_SPEC != null) {
                     if (++ticks == 5) {
                         doRepro(mc);
+                    } else if (POOL && ticks == 20) {
+                        serverCommand(mc, "execute @p ~ ~ ~ fill ~-8 ~-9 ~0 ~2 ~-4 ~10 minecraft:stone");
+                    } else if (POOL && ticks == 25) {
+                        serverCommand(mc, "execute @p ~ ~ ~ fill ~-7 ~-8 ~1 ~1 ~-4 ~9 minecraft:water");
                     } else if (ticks == 45 && System.getenv("VULKANMOD_AUTOTEST_RAIN") != null) {
                         // Rain used to be unconditional here for the weather repro; it is
                         // opt-in now so plain scene repros (e.g. the world border pair)
@@ -936,8 +989,35 @@ public class AutoTest {
                     return;
                 }
 
+                if (PACK_SCENES) {
+                    int t = ++ticks;
+                    packScenesStep(mc, t);
+                    if (t == 300) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    return;
+                }
+
+                if (PACK_CHAIN != null) {
+                    int t = ++ticks, last = 0;
+                    for (String step : PACK_CHAIN.split(",")) {
+                        int colon = step.lastIndexOf(':'), at = Integer.parseInt(step.substring(colon + 1));
+                        last = Math.max(last, at);
+                        if (t == at) {
+                            String id = step.substring(0, colon);
+                            Initializer.LOGGER.info("[autotest] chain: {}", id);
+                            net.vulkanmod.shader.PackManager.select(id.equals("off") ? null : id);
+                        }
+                    }
+                    if (t == last + 1380) capture(mc, "chain");
+                    if (t == last + 1400) mc.shutdown();
+                    return;
+                }
+
                 if (RESIZE_MODE) {
                     int t = ++ticks;
+                    if (PACK_SWITCH != null) packSwitchStep(mc, t);
                     if (t == 5) {
                         Initializer.LOGGER.info("[autotest] RESIZE initial mc={}x{} display={}x{} win=0x{}",
                                 mc.displayWidth, mc.displayHeight,
@@ -1967,6 +2047,54 @@ public class AutoTest {
                 tx >> 4, tz >> 4);
     }
 
+    private static void packScenesStep(Minecraft mc, int t) {
+        switch (t) {
+            case 20 -> serverCommand(mc, "execute @p ~ ~ ~ setblock ~ ~1 ~ minecraft:water");
+            case 50 -> capture(mc, "sceneWater");
+            case 55 -> serverCommand(mc, "execute @p ~ ~ ~ setblock ~ ~1 ~ minecraft:air");
+            case 70 -> changeDimension(mc, -1);
+            case 170 -> capture(mc, "sceneNether");
+            case 180 -> changeDimension(mc, 1);
+            case 280 -> capture(mc, "sceneEnd");
+            default -> { }
+        }
+    }
+
+    private static void changeDimension(Minecraft mc, int dimension) {
+        net.minecraft.server.MinecraftServer server = mc.getIntegratedServer();
+        // No portal: the vanilla teleporter needs one, and a failed transfer desyncs the client.
+        net.minecraftforge.common.util.ITeleporter arrival = (world, entity, yaw) -> {
+            net.minecraft.util.math.BlockPos.MutableBlockPos pos = new net.minecraft.util.math.BlockPos.MutableBlockPos(
+                    (int) entity.posX, 32, (int) entity.posZ);
+            for (int y = 32; y < 120; y++) {
+                pos.setY(y);
+                if (world.getBlockState(pos.down()).isFullCube() && world.isAirBlock(pos) && world.isAirBlock(pos.up())) break;
+            }
+            entity.setPosition(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+        };
+        server.addScheduledTask(() -> server.getPlayerList().getPlayers().get(0).changeDimension(dimension, arrival));
+    }
+
+    private static String packSwitchRestore;
+
+    private static void packSwitchStep(Minecraft mc, int t) {
+        switch (t) {
+            case 10 -> {
+                packSwitchRestore = Initializer.CONFIG.shaderPack;
+                net.vulkanmod.shader.PackManager.select("builtin:sample_post");
+            }
+            case 25 -> capture(mc, "packHdr");
+            case 45 -> net.vulkanmod.shader.PackManager.select(PACK_SWITCH);
+            case 60 -> capture(mc, "packOther");
+            case 80 -> net.vulkanmod.shader.PackManager.select(null);
+            case 90 -> capture(mc, "packOff");
+            case 105 -> net.vulkanmod.shader.PackManager.select("builtin:sample_post");
+            case 125 -> capture(mc, "packHdrResized");
+            case 150 -> net.vulkanmod.shader.PackManager.select(packSwitchRestore);
+            default -> { }
+        }
+    }
+
     /**
      * Drives {@link #FPS_MODE}: pins the benchmark configuration, frames a fixed scene, holds
      * the camera perfectly still, then samples the debug FPS for a window and reports the
@@ -2266,6 +2394,114 @@ public class AutoTest {
             y--;
         }
         return y + 1;
+    }
+
+    private static void clickPackGui(net.minecraft.client.gui.GuiScreen screen, net.minecraft.client.gui.GuiButton b) {
+        try {
+            java.lang.reflect.Method click = screen.getClass().getDeclaredMethod("mouseClicked", int.class, int.class, int.class);
+            click.setAccessible(true);
+            click.invoke(screen, b.x + b.width - 8, b.y + 8, 0);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static java.util.List<net.minecraft.client.gui.GuiButton> buttons(net.minecraft.client.gui.GuiScreen screen) {
+        return ((net.vulkanmod.mixin.render.GuiScreenAccessor) screen).vulkanmod$getButtonList();
+    }
+
+    private static void packGuiStage(Minecraft mc) {
+        int t = ++packGuiTick;
+        if (t == 60) {
+            mc.displayGuiScreen(new net.vulkanmod.config.gui.ShaderOptionsScreen(null, net.vulkanmod.shader.PackManager.activeOptions()));
+        } else if (t == 90) {
+            capture(mc, "packgui_main");
+            net.minecraft.client.gui.GuiButton page = null;
+            for (net.minecraft.client.gui.GuiButton b : buttons(mc.currentScreen)) {
+                if (b.displayString.endsWith(" >")) page = b;
+            }
+            Initializer.LOGGER.info("[autotest] PACKGUI buttons={} page={}", buttons(mc.currentScreen).size(), page == null ? null : page.displayString);
+            if (page != null) clickPackGui(mc.currentScreen, page);
+        } else if (t == 110) {
+            capture(mc, "packgui_page");
+            for (net.minecraft.client.gui.GuiButton b : buttons(mc.currentScreen)) {
+                if (!b.getClass().equals(net.minecraft.client.gui.GuiButton.class)) {
+                    Initializer.LOGGER.info("[autotest] PACKGUI slider before: {}", b.displayString);
+                    clickPackGui(mc.currentScreen, b);
+                    Initializer.LOGGER.info("[autotest] PACKGUI slider after: {}", b.displayString);
+                    break;
+                }
+            }
+        } else if (t == 120) {
+            for (int i = 0; i < 4 && mc.currentScreen != null; i++) {
+                net.minecraft.client.gui.GuiButton done = null;
+                for (net.minecraft.client.gui.GuiButton b : buttons(mc.currentScreen)) {
+                    if (b.displayString.equals(net.minecraft.client.resources.I18n.format("gui.done"))
+                            || b.displayString.equals(net.minecraft.client.resources.I18n.format("gui.back"))) done = b;
+                }
+                if (done == null) break;
+                clickPackGui(mc.currentScreen, done);
+            }
+        } else if (t == 300) {
+            capture(mc, "packgui_after");
+            mc.shutdown();
+        }
+    }
+
+    private static void scenesStage(Minecraft mc) {
+        if (scenes == null) {
+            scenes = new java.util.ArrayList<>();
+            try {
+                for (String line : java.nio.file.Files.readAllLines(new File(SCENES_FILE).toPath())) {
+                    line = line.trim();
+                    if (!line.isEmpty() && !line.startsWith("#") && !line.startsWith("world ")) {
+                        scenes.add(line.split("\\s+"));
+                    }
+                }
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+            mc.gameSettings.limitFramerate = Integer.MAX_VALUE;
+            mc.gameSettings.enableVsync = false;
+            if (Initializer.isVulkanActive()) {
+                net.vulkanmod.vulkan.Vulkan.setVsync(false);
+            }
+            String size = System.getenv("VULKANMOD_AUTOTEST_SIZE");
+            if (size != null) {
+                String[] wh = size.trim().split("\\s+");
+                org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(org.lwjgl.sdl.SDLVideo.SDL_GL_GetCurrentWindow(),
+                        Integer.parseInt(wh[0]), Integer.parseInt(wh[1]));
+            }
+        }
+        if (sceneIndex >= scenes.size()) {
+            mc.shutdown();
+            return;
+        }
+        String[] s = scenes.get(sceneIndex);
+        mc.player.capabilities.isFlying = true;
+        if (sceneTick == 0) {
+            if (sceneIndex == 0 && SCENE_COMMANDS != null) {
+                for (String c : SCENE_COMMANDS.split(";")) serverCommand(mc, c.trim());
+            }
+            serverCommand(mc, "gamerule doDaylightCycle false");
+            serverCommand(mc, "gamerule randomTickSpeed 0");
+            serverCommand(mc, "weather " + s[7] + " 100000");
+            serverCommand(mc, "time set " + s[6]);
+            serverCommand(mc, String.format("tp %s %s %s %s %s %s", mc.player.getName(), s[1], s[2], s[3], s[4], s[5]));
+        }
+        sceneTick++;
+        if (sceneTick == SCENE_SETTLE) {
+            capture(mc, s[0]);
+            sceneFrames = net.vulkanmod.render.GuiRenderer.getRenderedFrames();
+            sceneNanos = System.nanoTime();
+        } else if (sceneTick == SCENE_SETTLE + SCENE_MEASURE) {
+            double seconds = (System.nanoTime() - sceneNanos) / 1e9;
+            Initializer.LOGGER.info("[autotest] SCENE {} fps={} res={}x{}", s[0],
+                    String.format("%.1f", (net.vulkanmod.render.GuiRenderer.getRenderedFrames() - sceneFrames) / seconds),
+                    mc.displayWidth, mc.displayHeight);
+            sceneIndex++;
+            sceneTick = 0;
+        }
     }
 
     private static void capture(Minecraft mc, String name) {

@@ -28,6 +28,7 @@ public final class DeviceFeatures {
     public boolean samplerAnisotropy, wideLines, multiDrawIndirect, logicOp;
     public boolean independentBlend, shaderInt64, fragmentStoresAndAtomics, depthClamp;
     public boolean storageImageReadWithoutFormat, storageImageWriteWithoutFormat;
+    public boolean geometryShader, tessellationShader;
 
     // Core 1.2
     public boolean timelineSemaphore, bufferDeviceAddress, scalarBlockLayout, hostQueryReset;
@@ -118,6 +119,10 @@ public final class DeviceFeatures {
         e.depthClamp(depthClamp = f.depthClamp());
         e.shaderInt64(shaderInt64 = f.shaderInt64());
         e.fragmentStoresAndAtomics(fragmentStoresAndAtomics = f.fragmentStoresAndAtomics());
+        e.geometryShader(geometryShader = f.geometryShader());
+        e.tessellationShader(tessellationShader = f.tessellationShader());
+        e.vertexPipelineStoresAndAtomics(f.vertexPipelineStoresAndAtomics());
+        e.shaderStorageImageExtendedFormats(f.shaderStorageImageExtendedFormats());
         e.shaderStorageImageReadWithoutFormat(storageImageReadWithoutFormat = f.shaderStorageImageReadWithoutFormat());
         e.shaderStorageImageWriteWithoutFormat(storageImageWriteWithoutFormat = f.shaderStorageImageWriteWithoutFormat());
         // ffx-api picks its 16-bit shader permutations from what the device supports.
@@ -170,6 +175,8 @@ public final class DeviceFeatures {
             en13.dynamicRendering(dynamicRendering = sup13.dynamicRendering());
             en13.synchronization2(synchronization2 = sup13.synchronization2());
             en13.maintenance4(maintenance4 = sup13.maintenance4());
+            // GL drops an imageStore past the edge, Vulkan leaves it undefined; packs rely on GL.
+            en13.robustImageAccess(sup13.robustImageAccess());
             // ffx-api requests wave sizes when the device reports subgroup size control.
             en13.subgroupSizeControl(sup13.subgroupSizeControl());
             en13.computeFullSubgroups(sup13.computeFullSubgroups());

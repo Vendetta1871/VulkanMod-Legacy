@@ -1,0 +1,8 @@
+{
+  "format": 1, "id": "gbuffers-attributes", "name": "M3 vertex attribute check", "version": "1",
+  "requires": { "vertex": ["normal", "tangent", "midTexCoord", "blockId"] },
+  "gbuffers": {
+    "terrain": { "vertex": "programs/a.vsh", "fragment": "programs/a.fsh", "targets": ["sceneColor"] }
+  },
+  "combination": { "fragment": "programs/final.fsh", "inputs": ["sceneColor"] }
+}

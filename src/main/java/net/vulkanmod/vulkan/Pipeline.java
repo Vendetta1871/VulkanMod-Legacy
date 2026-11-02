@@ -107,6 +107,7 @@ public class Pipeline {
     // share a shader path ("clouds", "terrain") get distinct ids so their recordings do
     // not pre-warm each other's union.
     private final String recordId;
+    private final RouteKind routeKind;
     // R12: state keys reached at draw time this session; saved back with age 0.
     private final it.unimi.dsi.fastutil.longs.LongOpenHashSet reachedKeys =
             new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
@@ -181,6 +182,7 @@ public class Pipeline {
     public Pipeline(VertexFormat vertexFormat, String path, String recordId) {
         this.path = path;
         this.recordId = recordId;
+        this.routeKind = routeKind(recordId);
 
         this.vertexFormat = vertexFormat;
 
@@ -188,7 +190,7 @@ public class Pipeline {
         createPipelineLayout();
         long defaultKey = packStateKey(DEFAULT_BLEND_STATE, DEFAULT_DEPTH_STATE.depthTest,
                 DEFAULT_DEPTH_STATE.depthMask, DEFAULT_DEPTH_STATE.function, DEFAULT_LOGICOP_STATE,
-                DEFAULT_COLORMASK.colorMask, VRenderSystem.cull, VRenderSystem.topology);
+                DEFAULT_COLORMASK.colorMask, VRenderSystem.cull, VRenderSystem.topology, false, false);
         graphicsPipelines.put(defaultKey, createGraphicsPipeline(vertexFormat, unpackStateKey(defaultKey)));
         lastStateKey = defaultKey;
         lastStateHandle = graphicsPipelines.get(defaultKey);
@@ -239,14 +241,20 @@ public class Pipeline {
 
     /**
      * Packs the full dynamic pipeline state (blend, depth, logic-op, color-mask, cull,
-     * topology) into a long map key, so a per-draw state lookup allocates nothing.
+     * topology, front face) into a long map key, so a per-draw state lookup allocates nothing.
      * Field widths: blend enabled 1 bit, four Vulkan blend factors (0..15) 4 bits each,
      * depth test/mask 1 bit each, Vulkan compare op (0..8) 4 bits, cull 1 bit, logic-op
-     * enabled 1 bit, logic op (0..16) 5 bits, color mask 4 bits, topology (0..5) 3 bits.
+     * enabled 1 bit, logic op (0..16) 5 bits, color mask 4 bits, topology (0..5) 3 bits,
+     * clockwise front face 1 bit (bit 37: draws in pack space, see FrameTargets.packSpace),
+     * HDR color attachment 1 bit (bit 38: draws into the RGBA16F scene, FrameTargets.hdrScene).
+     * Keys recorded before these bits existed decode unchanged (counter-clockwise, RGBA8).
+     * Bits 39..46 name an attachment layout of a pack's geometry ({@link #registerMrt}); they
+     * are or-ed in by the caller, and such keys are never recorded for the warm-up.
      */
     public static long packStateKey(BlendState blend, boolean depthTest, boolean depthMask,
                                     int vkDepthFunc, LogicOpState logicOp,
-                                    int colorMask, boolean cull, int topology) {
+                                    int colorMask, boolean cull, int topology, boolean frontFaceCw,
+                                    boolean hdrTarget) {
         long key = 0;
         if (blend.enabled) key |= 1L;
         key |= (long) blend.srcRgbFactor << 1;
@@ -261,6 +269,8 @@ public class Pipeline {
         key |= (long) logicOp.getLogicOp() << 25;
         key |= (long) colorMask << 30;
         key |= (long) topology << 34;
+        if (frontFaceCw) key |= 1L << 37;
+        if (hdrTarget) key |= 1L << 38;
         return key;
     }
 
@@ -274,21 +284,168 @@ public class Pipeline {
                 (int) (key >>> 19) & 0xF, true);
         LogicOpState logicOp = new LogicOpState((key & (1L << 24)) != 0, (int) (key >>> 25) & 0x1F);
         ColorMask colorMask = new ColorMask((int) (key >>> 30) & 0xF);
-        return new PipelineState(blend, depth, logicOp, colorMask,
-                (key & (1L << 23)) != 0, (int) (key >>> 34) & 0x7);
+        PipelineState state = new PipelineState(blend, depth, logicOp, colorMask,
+                (key & (1L << 23)) != 0, (int) (key >>> 34) & 0x7, (key & (1L << 37)) != 0, (key & (1L << 38)) != 0);
+        state.mrt = (int) (key >>> MRT_SHIFT) & 0xFF;
+        return state;
+    }
+
+    private static final int MRT_SHIFT = 39;
+    /** Color formats by layout id; 0 is the plain single attachment. Pipelines cached against an id stay valid. */
+    private static final List<int[]> MRT_LAYOUTS = new ArrayList<>(List.of(new int[0]));
+
+    /** The id of an attachment layout, as the state key bits. */
+    static long registerMrt(int[] formats) {
+        int id = 0;
+        for (int i = 1; i < MRT_LAYOUTS.size(); i++) {
+            if (java.util.Arrays.equals(MRT_LAYOUTS.get(i), formats)) id = i;
+        }
+        if (id == 0) {
+            id = MRT_LAYOUTS.size();
+            if (id > 0xFF) throw new IllegalStateException("too many geometry attachment layouts");
+            MRT_LAYOUTS.add(formats.clone());
+        }
+        return (long) id << MRT_SHIFT;
+    }
+
+    /** What a vanilla pipeline draws, for pack program routing (runtime.md); NONE is never routed. */
+    public enum RouteKind { NONE, TERRAIN, SKY, SKY_TEXTURED, CLOUDS, BORDER, MODEL, GLINT, PARTICLE, LINES }
+
+    private static RouteKind routeKind(String recordId) {
+        return switch (recordId) {
+            case "terrain", "terrain_batch" -> RouteKind.TERRAIN;
+            case "sky", "sky_vcol" -> RouteKind.SKY;
+            case "sky_tex" -> RouteKind.SKY_TEXTURED;
+            case "clouds" -> RouteKind.CLOUDS;
+            case "clouds#border" -> RouteKind.BORDER;
+            case "entity", "entity_item", "entity_shadow", "terrain#entity" -> RouteKind.MODEL;
+            case "entity_flat" -> RouteKind.GLINT;
+            case "entity_particle" -> RouteKind.PARTICLE;
+            case "debug_lines" -> RouteKind.LINES;
+            default -> RouteKind.NONE;
+        };
+    }
+
+    /** A pack program drawing in place of this pipeline's shaders: same vertex format and per-draw set. */
+    public static final class Program {
+        private final long vertModule, fragModule, layout;
+        /** Optional stages, 0 for none. */
+        private final long geomModule, tescModule, teseModule;
+        /** Attachments the program writes; the others keep a write mask of 0. */
+        private final int targetMask;
+        /** The blend the pack set, or null for the draw's. */
+        private final BlendState blend;
+        /** By attachment, or null: {@code blend.<program>.<buffer>}. */
+        private final BlendState[] targetBlend;
+        private final Map<Long, Long> handles = new HashMap<>();
+
+        private Program(long vertModule, long fragModule, long geomModule, long tescModule, long teseModule, long layout,
+                        int targetMask, BlendState blend, BlendState[] targetBlend) {
+            this.vertModule = vertModule;
+            this.fragModule = fragModule;
+            this.geomModule = geomModule;
+            this.tescModule = tescModule;
+            this.teseModule = teseModule;
+            this.layout = layout;
+            this.targetMask = targetMask;
+            this.blend = blend;
+            this.targetBlend = targetBlend;
+        }
+
+        public long layout() { return layout; }
+
+        /**
+         * Middle stages take triangles: patches of three from a list, and a geometry shader any
+         * triangle topology. Other draws, such as lines, stay on the vanilla shaders.
+         */
+        boolean accepts(long stateKey) {
+            if (tescModule == 0L && geomModule == 0L) return true;
+            int topology = (int) (stateKey >>> 34) & 0x7;
+            return tescModule != 0L ? topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : topology >= VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        }
+
+        /** The device is idle. */
+        public void destroy() {
+            handles.values().forEach(h -> vkDestroyPipeline(device, h, null));
+            vkDestroyPipelineLayout(device, layout, null);
+            vkDestroyShaderModule(device, vertModule, null);
+            vkDestroyShaderModule(device, fragModule, null);
+            if (geomModule != 0L) vkDestroyShaderModule(device, geomModule, null);
+            if (tescModule != 0L) vkDestroyShaderModule(device, tescModule, null);
+            if (teseModule != 0L) vkDestroyShaderModule(device, teseModule, null);
+        }
+    }
+
+    /** Programs by {@code GeometryCategory} ordinal for the running pack; null without one. */
+    public Program[] packPrograms;
+    /** The program of the last {@link #getHandle}: decides how {@link #bindDescriptorSets} binds. */
+    private Program boundProgram;
+
+    /** Set 0 is {@code sharedSetLayout}, this pipeline's descriptors move to set 1 (GeometryPrelude). */
+    public Program createProgram(ByteBuffer vertex, ByteBuffer fragment, ByteBuffer geometry, ByteBuffer tessControl, ByteBuffer tessEval,
+                                 long sharedSetLayout, long resourceSetLayout, int targetMask, BlendState blend, BlendState[] targetBlend) {
+        try (MemoryStack stack = stackPush()) {
+            LongBuffer p = stack.mallocLong(1);
+            VkPushConstantRange.Buffer draw = VkPushConstantRange.calloc(1, stack);
+            draw.get(0).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS).offset(0).size(Drawer.DRAW_BLOCK_SIZE);
+            if (vkCreatePipelineLayout(device, VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
+                    .pSetLayouts(resourceSetLayout != 0L ? stack.longs(sharedSetLayout, descriptorSetLayout, resourceSetLayout)
+                            : stack.longs(sharedSetLayout, descriptorSetLayout)).pPushConstantRanges(draw), null, p) != VK_SUCCESS) {
+                throw new RuntimeException("Failed to create pack program layout");
+            }
+            return new Program(createShaderModule(vertex), createShaderModule(fragment), geometry != null ? createShaderModule(geometry) : 0L,
+                    tessControl != null ? createShaderModule(tessControl) : 0L, tessEval != null ? createShaderModule(tessEval) : 0L,
+                    p.get(0), targetMask, blend, targetBlend);
+        }
+    }
+
+    public RouteKind routeKind() { return routeKind; }
+
+    public String recordId() { return recordId; }
+
+    /** The program of the last {@link #getHandle}, or null for the vanilla shaders. */
+    public Program boundProgram() { return boundProgram; }
+
+    /** Replaces the vertex format; the device is idle. Program variants are built on the next use. */
+    public void setVertexFormat(VertexFormat format) {
+        vertexFormat = format;
+        graphicsPipelines.values().forEach(h -> vkDestroyPipeline(device, h, null));
+        graphicsPipelines.clear();
+        lastStateKey = Long.MIN_VALUE;
+    }
+
+    /** Every pipeline a pack can route. */
+    public static List<Pipeline> routable() {
+        List<Pipeline> list = new ArrayList<>();
+        for (Pipeline p : INSTANCES) {
+            if (p.routeKind != RouteKind.NONE) list.add(p);
+        }
+        return list;
     }
 
     /** Handle of the pipeline variant for a packed state key, creating it on first use. */
-    public long getHandle(long stateKey) {
+    public long getHandle(long stateKey, Program program) {
+        if (program != null && !program.accepts(stateKey)) program = null;
+        boundProgram = program;
+        if (program != null) {
+            Long handle = program.handles.get(stateKey);
+            if (handle == null) {
+                handle = createGraphicsPipeline(vertexFormat, unpackStateKey(stateKey), program);
+                program.handles.put(stateKey, handle);
+                cacheDirty = true;
+            }
+            return handle;
+        }
         // R12: every key reached at draw time is saved back with age 0, so a variant
-        // that keeps being used never ages out of the recording.
-        reachedKeys.add(stateKey);
+        // that keeps being used never ages out of the recording. Geometry layouts belong to
+        // a pack and a session.
+        if ((stateKey >>> MRT_SHIFT) == 0) reachedKeys.add(stateKey);
         if (stateKey == lastStateKey) {
             return lastStateHandle;
         }
         Long handle = graphicsPipelines.get(stateKey);
         if (handle == null) {
-            handle = createGraphicsPipeline(vertexFormat, unpackStateKey(stateKey));
+            handle = createGraphicsPipeline(vertexFormat, unpackStateKey(stateKey), null);
             graphicsPipelines.put(stateKey, handle);
             // N13: the driver blob is several MB - writing it here hitched the frame on
             // every miss. Just mark it; Vulkan.cleanUp flushes the cache at shutdown.
@@ -300,6 +457,10 @@ public class Pipeline {
     }
 
     private long createGraphicsPipeline(VertexFormat vertexFormat, PipelineState state) {
+        return createGraphicsPipeline(vertexFormat, state, null);
+    }
+
+    private long createGraphicsPipeline(VertexFormat vertexFormat, PipelineState state, Program program) {
         this.vertexFormat = vertexFormat;
 
         try(MemoryStack stack = stackPush()) {
@@ -320,39 +481,50 @@ public class Pipeline {
 
             ByteBuffer entryPoint = stack.UTF8("main");
 
-            VkPipelineShaderStageCreateInfo.Buffer shaderStages = VkPipelineShaderStageCreateInfo.create(2);
+            boolean tessellated = program != null && program.tescModule != 0L;
+            boolean geometryStage = program != null && program.geomModule != 0L;
+            VkPipelineShaderStageCreateInfo.Buffer shaderStages = VkPipelineShaderStageCreateInfo.calloc(2 + (tessellated ? 2 : 0) + (geometryStage ? 1 : 0), stack);
 
             VkPipelineShaderStageCreateInfo vertShaderStageInfo = shaderStages.get(0);
 
             vertShaderStageInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
             vertShaderStageInfo.stage(VK_SHADER_STAGE_VERTEX_BIT);
-            vertShaderStageInfo.module(vertShaderModule);
+            vertShaderStageInfo.module(program != null ? program.vertModule : vertShaderModule);
             vertShaderStageInfo.pName(entryPoint);
 
             VkPipelineShaderStageCreateInfo fragShaderStageInfo = shaderStages.get(1);
 
             fragShaderStageInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
             fragShaderStageInfo.stage(VK_SHADER_STAGE_FRAGMENT_BIT);
-            fragShaderStageInfo.module(fragShaderModule);
+            fragShaderStageInfo.module(program != null ? program.fragModule : fragShaderModule);
             fragShaderStageInfo.pName(entryPoint);
+
+            int nextStage = 2;
+            if (tessellated) {
+                shaderStages.get(nextStage++).sType$Default().stage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT).module(program.tescModule).pName(entryPoint);
+                shaderStages.get(nextStage++).sType$Default().stage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT).module(program.teseModule).pName(entryPoint);
+            }
+            if (geometryStage) {
+                shaderStages.get(nextStage).sType$Default().stage(VK_SHADER_STAGE_GEOMETRY_BIT).module(program.geomModule).pName(entryPoint);
+            }
 
             // ===> VERTEX STAGE <===
 
-            VkPipelineVertexInputStateCreateInfo vertexInputInfo = VkPipelineVertexInputStateCreateInfo.create();
+            VkPipelineVertexInputStateCreateInfo vertexInputInfo = VkPipelineVertexInputStateCreateInfo.calloc(stack);
             vertexInputInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
-            vertexInputInfo.pVertexBindingDescriptions(getBindingDescription(vertexFormat));
-            vertexInputInfo.pVertexAttributeDescriptions(getAttributeDescriptions(vertexFormat));
+            vertexInputInfo.pVertexBindingDescriptions(getBindingDescription(vertexFormat, stack));
+            vertexInputInfo.pVertexAttributeDescriptions(getAttributeDescriptions(vertexFormat, stack));
 
             // ===> ASSEMBLY STAGE <===
 
-            VkPipelineInputAssemblyStateCreateInfo inputAssembly = VkPipelineInputAssemblyStateCreateInfo.create();
+            VkPipelineInputAssemblyStateCreateInfo inputAssembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack);
             inputAssembly.sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO);
-            inputAssembly.topology(state.topology);
+            inputAssembly.topology(tessellated ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : state.topology);
             inputAssembly.primitiveRestartEnable(false);
 
             // ===> VIEWPORT & SCISSOR
 
-            VkPipelineViewportStateCreateInfo viewportState = VkPipelineViewportStateCreateInfo.create();
+            VkPipelineViewportStateCreateInfo viewportState = VkPipelineViewportStateCreateInfo.calloc(stack);
             viewportState.sType(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO);
 
             viewportState.viewportCount(1);
@@ -360,7 +532,7 @@ public class Pipeline {
 
             // ===> RASTERIZATION STAGE <===
 
-            VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.create();
+            VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack);
             rasterizer.sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
             rasterizer.depthClampEnable(depthClamp);
             rasterizer.rasterizerDiscardEnable(false);
@@ -370,22 +542,24 @@ public class Pipeline {
             if(state.cullState) rasterizer.cullMode(VK_CULL_MODE_BACK_BIT);
             else rasterizer.cullMode(VK_CULL_MODE_NONE);
 
-            // The viewport is flipped (negative height); Vulkan determines primitive
-            // orientation independently of the viewport sign, so the counter-clockwise
-            // winding of GL quads stays the front face.
-            rasterizer.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE);
+            // Vulkan derives the orientation from framebuffer coordinates. With the usual
+            // flipped viewport (negative height) the image is upright, so GL's
+            // counter-clockwise front face stays counter-clockwise. Pack space draws with a
+            // positive viewport (GL row order, FrameTargets.packSpace), which mirrors the
+            // image vertically and with it the winding: there the front face is clockwise.
+            rasterizer.frontFace(state.frontFaceCw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
             rasterizer.depthBiasEnable(true);
 
             // ===> MULTISAMPLING <===
 
-            VkPipelineMultisampleStateCreateInfo multisampling = VkPipelineMultisampleStateCreateInfo.create();
+            VkPipelineMultisampleStateCreateInfo multisampling = VkPipelineMultisampleStateCreateInfo.calloc(stack);
             multisampling.sType(VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO);
             multisampling.sampleShadingEnable(false);
             multisampling.rasterizationSamples(VK_SAMPLE_COUNT_1_BIT);
 
             // ===> DEPTH TEST <===
 
-            VkPipelineDepthStencilStateCreateInfo depthStencil = VkPipelineDepthStencilStateCreateInfo.create();
+            VkPipelineDepthStencilStateCreateInfo depthStencil = VkPipelineDepthStencilStateCreateInfo.calloc(stack);
             depthStencil.sType(VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO);
             depthStencil.depthTestEnable(state.depthState.depthTest);
             depthStencil.depthWriteEnable(state.depthState.depthMask);
@@ -397,23 +571,39 @@ public class Pipeline {
 
             // ===> COLOR BLENDING <===
 
-            VkPipelineColorBlendAttachmentState.Buffer colorBlendAttachment = VkPipelineColorBlendAttachmentState.create(1);
-            colorBlendAttachment.colorWriteMask(state.colorMask.colorMask);
-
-            if(state.blendState.enabled) {
-                colorBlendAttachment.blendEnable(true);
-                colorBlendAttachment.srcColorBlendFactor(state.blendState.srcRgbFactor);
-                colorBlendAttachment.dstColorBlendFactor(state.blendState.dstRgbFactor);
-                colorBlendAttachment.colorBlendOp(VK_BLEND_OP_ADD);
-                colorBlendAttachment.srcAlphaBlendFactor(state.blendState.srcAlphaFactor);
-                colorBlendAttachment.dstAlphaBlendFactor(state.blendState.dstAlphaFactor);
-                colorBlendAttachment.alphaBlendOp(VK_BLEND_OP_ADD);
+            // Pack geometry attaches the union of its targets: every variant names all of
+            // them, and only those the program writes (the scene color for a vanilla shader)
+            // get a write mask.
+            int[] colorFormats = state.mrt != 0 ? MRT_LAYOUTS.get(state.mrt)
+                    : new int[]{state.hdrTarget ? FrameTargets.HDR_SCENE_FORMAT : FrameTargets.COLOR_FORMAT};
+            int writes = program != null ? program.targetMask : 1;
+            BlendState blendState = program != null && program.blend != null ? program.blend : state.blendState;
+            VkPipelineColorBlendAttachmentState.Buffer colorBlendAttachment =
+                    VkPipelineColorBlendAttachmentState.calloc(colorFormats.length, stack);
+            for (int i = 0; i < colorFormats.length; i++) {
+                VkPipelineColorBlendAttachmentState attachment = colorBlendAttachment.get(i);
+                if ((writes >> i & 1) == 0) {
+                    attachment.colorWriteMask(0).blendEnable(false);
+                    continue;
+                }
+                attachment.colorWriteMask(state.colorMask.colorMask);
+                boolean integer = colorFormats[i] == VK_FORMAT_R32_UINT || colorFormats[i] == VK_FORMAT_R32G32B32A32_UINT;
+                BlendState target = program != null && program.targetBlend != null && program.targetBlend[i] != null
+                        ? program.targetBlend[i] : blendState;
+                if (target.enabled && !integer) {
+                    attachment.blendEnable(true);
+                    attachment.srcColorBlendFactor(target.srcRgbFactor);
+                    attachment.dstColorBlendFactor(target.dstRgbFactor);
+                    attachment.colorBlendOp(VK_BLEND_OP_ADD);
+                    attachment.srcAlphaBlendFactor(target.srcAlphaFactor);
+                    attachment.dstAlphaBlendFactor(target.dstAlphaFactor);
+                    attachment.alphaBlendOp(VK_BLEND_OP_ADD);
+                } else {
+                    attachment.blendEnable(false);
+                }
             }
-            else {
-                colorBlendAttachment.blendEnable(false);
-            }
 
-            VkPipelineColorBlendStateCreateInfo colorBlending = VkPipelineColorBlendStateCreateInfo.create();
+            VkPipelineColorBlendStateCreateInfo colorBlending = VkPipelineColorBlendStateCreateInfo.calloc(stack);
             colorBlending.sType(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO);
             colorBlending.logicOpEnable(state.logicOpState.enabled);
             colorBlending.logicOp(state.logicOpState.getLogicOp());
@@ -422,7 +612,7 @@ public class Pipeline {
 
             // ===> DYNAMIC STATES <===
 
-            VkPipelineDynamicStateCreateInfo dynamicStates = VkPipelineDynamicStateCreateInfo.create();
+            VkPipelineDynamicStateCreateInfo dynamicStates = VkPipelineDynamicStateCreateInfo.calloc(stack);
             dynamicStates.sType(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
             // Line topologies honour glLineWidth through the dynamic line-width state
             // (the wideLines device feature is enabled for this); triangle pipelines keep
@@ -435,24 +625,28 @@ public class Pipeline {
                         VK_DYNAMIC_STATE_SCISSOR));
             }
 
-            VkGraphicsPipelineCreateInfo.Buffer pipelineInfo = VkGraphicsPipelineCreateInfo.create(1);
+            VkGraphicsPipelineCreateInfo.Buffer pipelineInfo = VkGraphicsPipelineCreateInfo.calloc(1, stack);
             pipelineInfo.sType(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
             pipelineInfo.pStages(shaderStages);
             pipelineInfo.pVertexInputState(vertexInputInfo);
             pipelineInfo.pInputAssemblyState(inputAssembly);
+            // The draw's indices are triangles, whatever the pack's tessellation domain.
+            if (tessellated) {
+                pipelineInfo.pTessellationState(VkPipelineTessellationStateCreateInfo.calloc(stack).sType$Default().patchControlPoints(3));
+            }
             pipelineInfo.pViewportState(viewportState);
             pipelineInfo.pRasterizationState(rasterizer);
             pipelineInfo.pMultisampleState(multisampling);
             pipelineInfo.pDepthStencilState(depthStencil);
             pipelineInfo.pColorBlendState(colorBlending);
             pipelineInfo.pDynamicState(dynamicStates);
-            pipelineInfo.layout(pipelineLayout);
+            pipelineInfo.layout(program != null ? program.layout : pipelineLayout);
             // B4: dynamic rendering - the pipeline names its attachment formats instead
             // of a render pass. Scene and display targets share the formats, so one
-            // pipeline serves both phases.
+            // pipeline serves both phases, except for the HDR scene of a pack (bit 38).
             VkPipelineRenderingCreateInfo renderingInfo = VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
-                    .colorAttachmentCount(1)
-                    .pColorAttachmentFormats(stack.ints(FrameTargets.COLOR_FORMAT))
+                    .colorAttachmentCount(colorFormats.length)
+                    .pColorAttachmentFormats(stack.ints(colorFormats))
                     .depthAttachmentFormat(FrameTargets.depthFormat())
                     .stencilAttachmentFormat(VK_FORMAT_UNDEFINED);
             pipelineInfo.pNext(renderingInfo.address());
@@ -529,7 +723,7 @@ public class Pipeline {
 
         try(MemoryStack stack = stackPush()) {
 
-            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.create(bindingsSize);
+            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(bindingsSize, stack);
 
             int i = 0;
             for(UBO ubo : this.UBOs) {
@@ -565,7 +759,7 @@ public class Pipeline {
                 ++i;
             }
 
-            VkDescriptorSetLayoutCreateInfo layoutInfo = VkDescriptorSetLayoutCreateInfo.create();
+            VkDescriptorSetLayoutCreateInfo layoutInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack);
             layoutInfo.sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
             layoutInfo.pBindings(bindings);
 
@@ -586,12 +780,12 @@ public class Pipeline {
         try(MemoryStack stack = stackPush()) {
             // ===> PIPELINE LAYOUT CREATION <===
 
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo = VkPipelineLayoutCreateInfo.create();
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo = VkPipelineLayoutCreateInfo.calloc(stack);
             pipelineLayoutInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
             pipelineLayoutInfo.pSetLayouts(stack.longs(descriptorSetLayout));
 
             if(pushConstant.getSize() > 0) {
-                VkPushConstantRange.Buffer pushConstantRange = VkPushConstantRange.create(1);
+                VkPushConstantRange.Buffer pushConstantRange = VkPushConstantRange.calloc(1, stack);
                 pushConstantRange.size(pushConstant.getSize());
                 pushConstantRange.offset(0);
                 pushConstantRange.stageFlags(VK_SHADER_STAGE_VERTEX_BIT);
@@ -619,7 +813,7 @@ public class Pipeline {
             int types = (UBOs.size() > 0 ? 1 : 0) + (samplers.size() > 0 ? 1 : 0)
                     + (ssbos.size() > 0 ? 1 : 0);
 
-            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.create(types);
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(types, stack);
 
             int i = 0;
             if (UBOs.size() > 0) {
@@ -635,7 +829,7 @@ public class Pipeline {
                         .descriptorCount(descriptorCount * ssbos.size());
             }
 
-            VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.create();
+            VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack);
             poolInfo.sType(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
             poolInfo.pPoolSizes(poolSizes);
             poolInfo.maxSets(descriptorCount);
@@ -747,8 +941,10 @@ public class Pipeline {
 
             long descriptorSet = getDescriptorSet(frame, uniformBuffers);
 
+            Program program = boundProgram;
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipelineLayout, 0, stack.longs(descriptorSet), offsets);
+                    program != null ? program.layout : pipelineLayout, program != null ? 1 : 0,
+                    stack.longs(descriptorSet), offsets);
         }
     }
 
@@ -943,10 +1139,10 @@ public class Pipeline {
         }
     }
 
-    private static VkVertexInputBindingDescription.Buffer getBindingDescription(VertexFormat vertexFormat) {
+    private static VkVertexInputBindingDescription.Buffer getBindingDescription(VertexFormat vertexFormat, MemoryStack stack) {
 
         VkVertexInputBindingDescription.Buffer bindingDescription =
-                VkVertexInputBindingDescription.create(1);
+                VkVertexInputBindingDescription.calloc(1, stack);
 
         bindingDescription.binding(0);
         bindingDescription.stride(vertexFormat.getSize());
@@ -960,14 +1156,14 @@ public class Pipeline {
      * location is the element index, so the ported shaders must declare their inputs
      * with the matching {@code layout(location = N)}.
      */
-    private static VkVertexInputAttributeDescription.Buffer getAttributeDescriptions(VertexFormat vertexFormat) {
+    private static VkVertexInputAttributeDescription.Buffer getAttributeDescriptions(VertexFormat vertexFormat, MemoryStack stack) {
 
         ImmutableList<VertexFormatElement> elements = ImmutableList.copyOf(vertexFormat.getElements());
 
         int size = elements.size();
 
         VkVertexInputAttributeDescription.Buffer attributeDescriptions =
-                VkVertexInputAttributeDescription.create(size);
+                VkVertexInputAttributeDescription.calloc(size, stack);
 
         for(int i = 0; i < size; ++i) {
             VkVertexInputAttributeDescription description = attributeDescriptions.get(i);
@@ -984,6 +1180,12 @@ public class Pipeline {
             }
             else if(usage == VertexFormatElement.EnumUsage.COLOR && type == VertexFormatElement.EnumType.UBYTE) {
                 description.format(VK_FORMAT_R8G8B8A8_UNORM);
+            }
+            else if(usage == VertexFormatElement.EnumUsage.GENERIC && type == VertexFormatElement.EnumType.BYTE) {
+                description.format(VK_FORMAT_R8G8B8A8_SNORM);   // Chunk normal and tangent.
+            }
+            else if(usage == VertexFormatElement.EnumUsage.GENERIC && type == VertexFormatElement.EnumType.USHORT) {
+                description.format(VK_FORMAT_R16G16_UNORM);     // Chunk midTexCoord.
             }
             else if(usage == VertexFormatElement.EnumUsage.UV) {
                 if(type == VertexFormatElement.EnumType.FLOAT) {
@@ -1091,7 +1293,7 @@ public class Pipeline {
 
         try(MemoryStack stack = stackPush()) {
 
-            VkShaderModuleCreateInfo createInfo = VkShaderModuleCreateInfo.create();
+            VkShaderModuleCreateInfo createInfo = VkShaderModuleCreateInfo.calloc(stack);
 
             createInfo.sType(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
             createInfo.pCode(spirvCode);
@@ -1119,7 +1321,7 @@ public class Pipeline {
         ByteBuffer initialData = null;
         try(MemoryStack stack = stackPush()) {
 
-            VkPipelineCacheCreateInfo cacheCreateInfo = VkPipelineCacheCreateInfo.create();
+            VkPipelineCacheCreateInfo cacheCreateInfo = VkPipelineCacheCreateInfo.calloc(stack);
             cacheCreateInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
 
             if (initial != null) {
@@ -1266,8 +1468,8 @@ public class Pipeline {
      * usage. Field layout: see {@link #packStateKey}.
      */
     static boolean isValidStateKey(long key) {
-        // Everything above the 3 used topology bits must be zero.
-        if ((key >>> 37) != 0) {
+        // Everything above the HDR target bit (38) must be zero.
+        if ((key >>> 39) != 0) {
             return false;
         }
         // The four blend factors: the port only mirrors values up to
@@ -1460,6 +1662,12 @@ public class Pipeline {
         final LogicOpState logicOpState;
         final boolean cullState;
         final int topology;
+        /** Clockwise front face: pack-space draws (positive viewport), see createGraphicsPipeline. */
+        final boolean frontFaceCw;
+        /** Color attachment is the RGBA16F scene of a pack, see createGraphicsPipeline. */
+        final boolean hdrTarget;
+        /** Attachment layout of a pack's geometry, or 0. See {@link #registerMrt}. */
+        int mrt;
 
         public PipelineState(BlendState blendState, DepthState depthState, LogicOpState logicOpState, ColorMask colorMask) {
             this(blendState, depthState, logicOpState, colorMask, VRenderSystem.cull, VRenderSystem.topology);
@@ -1467,12 +1675,20 @@ public class Pipeline {
 
         public PipelineState(BlendState blendState, DepthState depthState, LogicOpState logicOpState,
                              ColorMask colorMask, boolean cullState, int topology) {
+            this(blendState, depthState, logicOpState, colorMask, cullState, topology, false, false);
+        }
+
+        public PipelineState(BlendState blendState, DepthState depthState, LogicOpState logicOpState,
+                             ColorMask colorMask, boolean cullState, int topology, boolean frontFaceCw,
+                             boolean hdrTarget) {
             this.blendState = blendState;
             this.depthState = depthState;
             this.logicOpState = logicOpState;
             this.colorMask = colorMask;
             this.cullState = cullState;
             this.topology = topology;
+            this.frontFaceCw = frontFaceCw;
+            this.hdrTarget = hdrTarget;
         }
 
         @Override
@@ -1480,7 +1696,7 @@ public class Pipeline {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             PipelineState that = (PipelineState) o;
-            return blendState.equals(that.blendState) && depthState.equals(that.depthState) && logicOpState.equals(that.logicOpState) && (cullState == that.cullState) && colorMask.equals(that.colorMask) && topology == that.topology;
+            return blendState.equals(that.blendState) && depthState.equals(that.depthState) && logicOpState.equals(that.logicOpState) && (cullState == that.cullState) && colorMask.equals(that.colorMask) && topology == that.topology && frontFaceCw == that.frontFaceCw && hdrTarget == that.hdrTarget;
         }
 
         @Override
@@ -1492,6 +1708,8 @@ public class Pipeline {
             result = 31 * result + logicOpState.hashCode();
             result = 31 * result + (cullState ? 1231 : 1237);
             result = 31 * result + topology;
+            result = 31 * result + (frontFaceCw ? 1231 : 1237);
+            result = 31 * result + (hdrTarget ? 1231 : 1237);
             return result;
         }
     }
