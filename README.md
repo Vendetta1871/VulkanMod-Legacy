@@ -25,19 +25,24 @@ presentation layer is Vulkan.
 
 ## Configuration
 
-Options -> Video Settings opens the Vesu settings screen: pages for General, Quality, Upscaling,
-Ray Tracing and Advanced settings in the left column, plus the shader pack list, and a search
-field on top (Ctrl+F). Hover a row for its description;
-edits wait for Apply or Done (Undo drops them). Vanilla options still go to `options.txt`, Vesu's
-own to `config/vesu_settings.json`, for example:
+Options -> Video Settings opens the Vesu settings screen: pages for General, Quality, Render Distance,
+Ray Tracing, Shader Packs and Advanced in the left column, and a search field on top
+(Ctrl+F). Hover a row for its description; edits wait for Apply or Done (Undo drops them).
+Vanilla options still go to `options.txt`, Vesu's own to `config/vesu_settings.json`, for example:
 
-| Setting          | Default | Description                                         |
-|------------------|---------|-----------------------------------------------------|
-| `frameQueueSize` | `3`     | Frames in flight; read at startup                   |
-| `renderScale`    | `1.0`   | World resolution relative to the window, 0.25..1    |
-| `upscaler`       | `auto`  | `auto`, `fsr3`, `fsr1` or `blit`                    |
-| `rtPreset`       | `off`   | Ray tracing: `off`, `low`, `medium`, `high`, `custom` |
-| `shaderPack`     | none    | Selected pack in `shaderpacks/`                     |
+| Setting              | Default | Description                                                   |
+|----------------------|---------|---------------------------------------------------------------|
+| `renderScale`        | `1.0`   | World resolution relative to the window, 0.25..2 (above 1 supersamples) |
+| `upscaler`           | `auto`  | Scaling method: `auto`, `blit` (bilinear), `fsr1` or `fsr3`   |
+| `fsrSharpening`      | `0.5`   | Sharpening of FSR 1 and FSR 3, 0..1                           |
+| `fullscreenMode`     | none    | Fullscreen video mode `WIDTHxHEIGHT@HZ`; none keeps the desktop mode |
+| `menuFramerate`      | `60`    | Frame rate limit while paused, on the title menus or minimized |
+| `simulationDistance` | `12`    | Singleplayer: chunks around a player where the world runs, 5..32 |
+| `dynamicLights`      | `auto`  | `off` or `auto`; `rtDynamicLights` (`fast`, `rt`) with ray tracing |
+| `precipitation`      | `fancy` | `fancy` or `off`                                              |
+| `rtPreset`           | `off`   | Ray tracing: `off`, `potato`, `low`, `medium`, `high`, `ultra`, `nasa`, `custom` |
+| `shaderPack`         | none    | Selected pack in `shaderpacks/`, or `builtin:sample_post`, `builtin:vibrant_visuals` |
+| `frameQueueSize`     | `3`     | Frames in flight; read at startup                             |
 
 Settings and caches of versions named VulkanMod (`config/vulkanmod_settings.json`,
 `config/vulkanmod/`) move to the new names on the first launch.

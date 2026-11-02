@@ -1,0 +1,9 @@
+{
+  "biomes": {
+    "default": {
+      "water_surface_color": "#3F9FE8",
+      "water_surface_transparency": 0.6,
+      "fog_identifier": "vesu:fog_default"
+    }
+  }
+}

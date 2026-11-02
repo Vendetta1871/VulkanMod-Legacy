@@ -32,7 +32,7 @@ public abstract class Option {
     private String tooltip = "";
     private Impact impact;
     private BooleanSupplier available = () -> true;
-    private String unavailableReason;
+    private Supplier<String> unavailableReason = () -> null;
     private boolean restart;
     private Runnable onChange;
 
@@ -53,6 +53,11 @@ public abstract class Option {
 
     /** The option is greyed out and ignores input while {@code available} is false. */
     public Option availableWhen(BooleanSupplier available, String reason) {
+        return availableWhen(available, () -> reason);
+    }
+
+    /** As above, with a reason that depends on why the option is unavailable. */
+    public Option availableWhen(BooleanSupplier available, Supplier<String> reason) {
         this.available = available;
         this.unavailableReason = reason;
         return this;
@@ -73,7 +78,7 @@ public abstract class Option {
     public String tooltip() { return tooltip; }
     public Impact impact() { return impact; }
     public boolean available() { return available.getAsBoolean(); }
-    public String unavailableReason() { return unavailableReason; }
+    public String unavailableReason() { return unavailableReason.get(); }
     public boolean needsRestart() { return restart; }
 
     protected void changed(boolean byUser) {
@@ -92,13 +97,23 @@ public abstract class Option {
     /** Live setting to the pending value. */
     public abstract void revert();
 
+    /**
+     * Follows a live value changed outside the screen (F11 toggles fullscreen) while the
+     * pending value is unedited, so leaving the screen does not undo it.
+     */
+    public void sync() {
+    }
+
     /** A fixed list of values, stepped through by clicking. */
     public static class Cycle<T> extends Option {
         private final T[] values;
         private final Function<T, String> label;
         private final Supplier<T> getter;
         private final Consumer<T> setter;
+        private final java.util.Set<T> skipped = new java.util.HashSet<>();
         private T pending;
+        /** The live value when the pending one was last taken from it. */
+        private T base;
 
         public Cycle(String name, Storage storage, T[] values, Function<T, String> label,
                      Supplier<T> getter, Consumer<T> setter) {
@@ -107,10 +122,17 @@ public abstract class Option {
             this.label = label;
             this.getter = getter;
             this.setter = setter;
-            this.pending = getter.get();
+            this.pending = this.base = getter.get();
         }
 
         public T pending() { return pending; }
+
+        /** Values that are listed but not offered yet: cycling steps over them. */
+        @SafeVarargs
+        public final Cycle<T> skip(T... values) {
+            skipped.addAll(java.util.Arrays.asList(values));
+            return this;
+        }
 
         /** Sets the pending value without firing {@link #onChange}: for linked options. */
         public void set(T value) {
@@ -124,14 +146,26 @@ public abstract class Option {
                 if (Objects.equals(values[k], pending)) i = k;
             }
             if (i < 0) i = direction > 0 ? -1 : values.length;
-            pending = values[Math.floorMod(i + direction, values.length)];
+            for (int n = 0; n < values.length; n++) {
+                i = Math.floorMod(i + direction, values.length);
+                if (!skipped.contains(values[i])) break;
+            }
+            pending = values[i];
             changed(true);
         }
 
         @Override public String valueText() { return label.apply(pending); }
         @Override public boolean modified() { return !Objects.equals(pending, getter.get()); }
         @Override public void apply() { setter.accept(pending); }
-        @Override public void revert() { pending = getter.get(); }
+        @Override public void revert() { pending = base = getter.get(); }
+
+        @Override
+        public void sync() {
+            T live = getter.get();
+            if (Objects.equals(live, base)) return;
+            if (Objects.equals(pending, base)) pending = live;
+            base = live;
+        }
     }
 
     /** On or off, drawn as a check box. */
@@ -150,6 +184,7 @@ public abstract class Option {
         private final Supplier<Float> getter;
         private final Consumer<Float> setter;
         private float pending;
+        private float base;
 
         public Slider(String name, Storage storage, float min, float max, float step,
                       Function<Float, String> format, Supplier<Float> getter, Consumer<Float> setter) {
@@ -160,7 +195,7 @@ public abstract class Option {
             this.format = format;
             this.getter = getter;
             this.setter = setter;
-            this.pending = snap(getter.get());
+            this.pending = this.base = snap(getter.get());
         }
 
         public float pending() { return pending; }
@@ -192,6 +227,65 @@ public abstract class Option {
         @Override public String valueText() { return format.apply(pending); }
         @Override public boolean modified() { return Math.abs(pending - snap(getter.get())) > 1e-4f; }
         @Override public void apply() { setter.accept(pending); }
-        @Override public void revert() { pending = snap(getter.get()); }
+        @Override public void revert() { pending = base = snap(getter.get()); }
+
+        @Override
+        public void sync() {
+            float live = snap(getter.get());
+            if (live == base) return;
+            if (pending == base) pending = live;
+            base = live;
+        }
+    }
+
+    /**
+     * One choice of a hidden {@link Cycle}, drawn as its own row with a check box: the shader
+     * pack list. The cycle carries the pending value and applies it.
+     */
+    public static class Radio extends Option {
+        private final Cycle<String> target;
+        public final String value;
+        private final String format;
+        private final Supplier<String> info;
+
+        public Radio(String name, Cycle<String> target, String value, String format, Supplier<String> info) {
+            super(name, target.storage);
+            this.target = target;
+            this.value = value;
+            this.format = format;
+            this.info = info;
+        }
+
+        public boolean selected() { return Objects.equals(target.pending(), value); }
+
+        public void select() {
+            if (!selected()) {
+                target.set(value);
+                changed(true);
+            }
+        }
+
+        @Override public String tooltip() { return info.get(); }
+        @Override public String valueText() { return format; }
+        @Override public boolean modified() { return selected() && target.modified(); }
+        @Override public void apply() { }
+        @Override public void revert() { }
+    }
+
+    /** A button row: runs {@code action} with the options screen, holds no value. */
+    public static class Action extends Option {
+        private final java.util.function.Consumer<net.minecraft.client.gui.GuiScreen> action;
+
+        public Action(String name, java.util.function.Consumer<net.minecraft.client.gui.GuiScreen> action) {
+            super(name, Storage.VESU);
+            this.action = action;
+        }
+
+        public void run(net.minecraft.client.gui.GuiScreen screen) { action.accept(screen); }
+
+        @Override public String valueText() { return ""; }
+        @Override public boolean modified() { return false; }
+        @Override public void apply() { }
+        @Override public void revert() { }
     }
 }

@@ -1,0 +1,13 @@
+{
+  "format_version": "1.16.100",
+  "minecraft:fog_settings": {
+    "description": {"identifier": "vesu:fog_default"},
+    "distance": {
+      "air": {"fog_start": 0.9, "fog_end": 1.0, "fog_color": "#B4D4F8", "render_distance_type": "render"},
+      "water": {"fog_start": 0.0, "fog_end": 48.0, "fog_color": "#3A9EE0", "render_distance_type": "fixed"},
+      "weather": {"fog_start": 0.25, "fog_end": 0.75, "fog_color": "#6A6E74", "render_distance_type": "render"},
+      "lava": {"fog_start": 0.0, "fog_end": 0.6, "fog_color": "#A02000", "render_distance_type": "fixed"},
+      "lava_resistance": {"fog_start": 2.0, "fog_end": 4.0, "fog_color": "#A02000", "render_distance_type": "fixed"}
+    }
+  }
+}

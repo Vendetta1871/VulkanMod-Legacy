@@ -112,7 +112,7 @@ M2 is placed early on purpose: it is cheap once M1 exists, and it gives users pa
 | std140 layout builder and the `Frame` block (one source for the GLSL declaration and the host offsets) | `pack-compiler/.../pack/host/` |
 | Filling the `Frame` block, only with a selected pack or `VESU_FRAME_DUMP=1` | `J/shader/FrameUniforms.java` |
 | PackManager (scan of `shaderpacks/`, selection in `config.shaderPack`, full parse and program existence check of native packs) | `J/shader/PackManager.java` |
-| Pack list screen (Video Settings → "Shader Packs..." tab) | `J/config/gui/ShaderPackScreen.java` |
+| Pack list (Video Settings → Shader Packs page) | `J/config/gui/option/VesuOptionPages.java` |
 | Pack-space render mode: positive scene viewport, clockwise front face (pipeline key bit 37), one flipping blit into the display | `J/vulkan/FrameTargets.java`, `Pipeline.java`, `Drawer.java` |
 
 Debug knobs:

@@ -40,7 +40,10 @@ public final class PackManager {
     /** Id prefix of the packs shipped in the mod jar. */
     public static final String BUILTIN_PREFIX = "builtin:";
     private static final String BUILTIN_ROOT = "assets/vesu/shaderpacks/";
-    private static final List<String> BUILTIN = List.of("sample_post");
+    private static final List<String> BUILTIN = List.of("sample_post", "vibrant_visuals");
+    private static final Map<String, String> BUILTIN_NAMES = Map.of(
+            "sample_post", "Sample Post (built-in)",
+            "vibrant_visuals", "Vibrant Visuals (built-in)");
 
     /** Debug override of the selection, not saved (autotests). */
     private static final String ENV_PACK = Env.get("VESU_SHADERPACK");
@@ -50,8 +53,19 @@ public final class PackManager {
     /** Debug override of option values: {@code NAME=VALUE,NAME=VALUE}. */
     private static final String ENV_OPTIONS = Env.get("VESU_PACK_OPTIONS");
 
-    /** One listed pack. {@code usable}: its format has a frontend and it parsed without error. */
-    public record Entry(String id, String name, PackKind kind, boolean usable, String message) {
+    /**
+     * One listed pack. {@code usable}: its format has a frontend and it parsed without error.
+     * {@code iris}: an OptiFine-format pack that uses Iris features.
+     */
+    public record Entry(String id, String name, PackKind kind, boolean usable, String message, boolean iris) {
+        Entry(String id, String name, PackKind kind, boolean usable, String message) {
+            this(id, name, kind, usable, message, false);
+        }
+
+        /** The format as shown in the list: Iris for an OptiFine-format pack that needs Iris. */
+        public String format() {
+            return iris ? "Iris" : kind.label;
+        }
     }
 
     private static List<Entry> entries = List.of();
@@ -215,6 +229,24 @@ public final class PackManager {
         }
     }
 
+    private static String builtinName(String id) {
+        return id.startsWith(BUILTIN_PREFIX) ? id.substring(BUILTIN_PREFIX.length()) : "";
+    }
+
+    /**
+     * Iris extensions in shaders.properties: declared {@code iris.features}, custom images or
+     * shader storage buffers. Such a pack is written for Iris and is labelled so.
+     */
+    private static boolean usesIris(PackSource src) {
+        try {
+            if (!src.exists("shaders/shaders.properties")) return false;
+            return java.util.regex.Pattern.compile("(?m)^\\s*(iris\\.features\\.|image\\.|bufferObject\\.)")
+                    .matcher(src.read("shaders/shaders.properties")).find();
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private static Entry describe(Path p) {
         return describeSource(p.getFileName().toString());
     }
@@ -230,14 +262,16 @@ public final class PackManager {
                 }
             }
             if (kind == PackKind.OPTIFINE || kind == PackKind.BEDROCK) {
-                return new Entry(id, id.replaceAll("\\.(zip|mcpack)$", ""), kind, true, null);
+                String name = BUILTIN_NAMES.getOrDefault(builtinName(id), id.replaceAll("\\.(zip|mcpack)$", ""));
+                return new Entry(id, name, kind, true, null, kind == PackKind.OPTIFINE && usesIris(src));
             }
             if (kind != PackKind.NATIVE) {
                 String msg = kind == PackKind.UNKNOWN ? "not a shader pack" : kind.label + " packs are not supported yet";
                 return new Entry(id, src.id(), kind, false, msg);
             }
             IrPack pack = parseNative(src, id);
-            return new Entry(id, pack.name, kind, true, pack.version.isEmpty() ? null : "v" + pack.version);
+            return new Entry(id, BUILTIN_NAMES.getOrDefault(builtinName(id), pack.name), kind, true,
+                    pack.version.isEmpty() ? null : "v" + pack.version);
         } catch (IOException | RuntimeException e) {
             return new Entry(id, id, PackKind.NATIVE, false, message(e));
         }

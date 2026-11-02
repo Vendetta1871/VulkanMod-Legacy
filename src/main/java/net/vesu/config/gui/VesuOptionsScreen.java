@@ -60,7 +60,7 @@ public class VesuOptionsScreen extends GuiScreen {
     private static final String[] BUTTONS = {"Done", "Apply", "Undo"};
 
     private final GuiScreen parent;
-    private final List<OptionPage> pages;
+    private List<OptionPage> pages;
     private int page;
     private int scroll;
     private Option.Slider dragging;
@@ -207,6 +207,7 @@ public class VesuOptionsScreen extends GuiScreen {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        this.forEachOption(Option::sync);
         this.drawDefaultBackground();
         this.drawSearch();
         this.drawRail(mouseX, mouseY);
@@ -279,15 +280,26 @@ public class VesuOptionsScreen extends GuiScreen {
                 hover ? BG_HOVER : BG_INACTIVE);
         if (y < this.frameY || y + ROW_HEIGHT > this.frameY + this.frameHeight) return;
 
+        if (option instanceof Option.Action) {
+            int w = this.fontRenderer.getStringWidth(option.name);
+            this.fontRenderer.drawStringWithShadow(option.name, x + (right - x - w) / 2, y + 5,
+                    !available ? TEXT_MUTED : hover ? THEME_LIGHT : TEXT);
+            return;
+        }
+
         int controlLeft;   // the name must end before this
-        if (option instanceof Option.Toggle toggle) {
+        if (option instanceof Option.Radio radio) {
+            int bx = right - PAD - CHECKBOX, by = y + (ROW_HEIGHT - CHECKBOX) / 2;
+            int color = !available ? TEXT_MUTED : radio.selected() ? THEME : TEXT;
+            this.drawBox(bx, by, color, radio.selected());
+            String format = option.valueText();
+            int fx = bx - 8 - this.fontRenderer.getStringWidth(format);
+            this.fontRenderer.drawStringWithShadow(format, fx, y + 5, TEXT_MUTED);
+            controlLeft = fx;
+        } else if (option instanceof Option.Toggle toggle) {
             int bx = right - PAD - CHECKBOX, by = y + (ROW_HEIGHT - CHECKBOX) / 2;
             int color = !available ? TEXT_MUTED : toggle.pending() ? THEME : TEXT;
-            drawRect(bx, by, bx + CHECKBOX, by + 1, color);
-            drawRect(bx, by + CHECKBOX - 1, bx + CHECKBOX, by + CHECKBOX, color);
-            drawRect(bx, by + 1, bx + 1, by + CHECKBOX - 1, color);
-            drawRect(bx + CHECKBOX - 1, by + 1, bx + CHECKBOX, by + CHECKBOX - 1, color);
-            if (toggle.pending()) drawRect(bx + 2, by + 2, bx + CHECKBOX - 2, by + CHECKBOX - 2, color);
+            this.drawBox(bx, by, color, toggle.pending());
             controlLeft = bx;
         } else if (option instanceof Option.Slider slider && hover && available) {
             int sx = this.sliderX(), sy = y + (ROW_HEIGHT - CHECKBOX) / 2;
@@ -312,6 +324,15 @@ public class VesuOptionsScreen extends GuiScreen {
         }
         String style = !available ? "§7§m" : option.modified() ? "§o" : "";
         this.fontRenderer.drawStringWithShadow(style + name, x + PAD, y + 5, TEXT);
+    }
+
+    /** A check box: a frame, filled when checked. */
+    private void drawBox(int x, int y, int color, boolean checked) {
+        drawRect(x, y, x + CHECKBOX, y + 1, color);
+        drawRect(x, y + CHECKBOX - 1, x + CHECKBOX, y + CHECKBOX, color);
+        drawRect(x, y + 1, x + 1, y + CHECKBOX - 1, color);
+        drawRect(x + CHECKBOX - 1, y + 1, x + CHECKBOX, y + CHECKBOX - 1, color);
+        if (checked) drawRect(x + 2, y + 2, x + CHECKBOX - 2, y + CHECKBOX - 2, color);
     }
 
     private void drawScrollbar() {
@@ -397,14 +418,9 @@ public class VesuOptionsScreen extends GuiScreen {
         for (int i = 0; i < this.pages.size(); i++) {
             if (!inside(mouseX, mouseY, this.frameX, this.tabY(i), this.railWidth, TAB_HEIGHT)) continue;
             this.click();
-            OptionPage target = this.pages.get(i);
-            if (target.opens() != null) {
-                this.mc.displayGuiScreen(target.opens().apply(this));
-            } else {
-                this.search.setText("");
-                this.query = "";
-                this.selectPage(i);
-            }
+            this.search.setText("");
+            this.query = "";
+            this.selectPage(i);
             return;
         }
 
@@ -433,7 +449,13 @@ public class VesuOptionsScreen extends GuiScreen {
             if (!inside(mouseX, mouseY, this.listX, row.y, this.listRight - this.listX, ROW_HEIGHT)) continue;
             Option option = row.option;
             if (!option.available()) return;
-            if (option instanceof Option.Cycle<?> cycle) {
+            if (option instanceof Option.Radio radio) {
+                this.click();
+                radio.select();
+            } else if (option instanceof Option.Action action) {
+                this.click();
+                action.run(this);
+            } else if (option instanceof Option.Cycle<?> cycle) {
                 this.click();
                 cycle.cycle(button == 1 || isShiftKeyDown() ? -1 : 1);
             } else if (option instanceof Option.Slider slider && button == 0 && mouseX >= this.sliderX() - 4) {
@@ -516,18 +538,30 @@ public class VesuOptionsScreen extends GuiScreen {
             for (List<Option> group : p.groups()) {
                 group.forEach(action);
             }
+            p.hidden().forEach(action);
         }
     }
 
     private boolean anyModified() {
-        for (OptionPage p : this.pages) {
-            for (List<Option> group : p.groups()) {
-                for (Option option : group) {
-                    if (option.available() && option.modified()) return true;
-                }
+        boolean[] modified = {false};
+        this.forEachOption(option -> modified[0] |= option.available() && option.modified());
+        return modified[0];
+    }
+
+    /** Applies what is pending now (a row that opens another screen needs the applied state). */
+    public void applyPending() {
+        if (this.anyModified()) this.applyChanges();
+    }
+
+    /** Rebuilds one page from the current state (the shader pack list after a rescan). */
+    public void reloadPage(String name) {
+        for (int i = 0; i < this.pages.size(); i++) {
+            if (this.pages.get(i).name().equals(name) && name.equals(VesuOptionPages.SHADER_PACKS)) {
+                this.pages.set(i, VesuOptionPages.shaderPacks());
             }
         }
-        return false;
+        this.forcedHover = null;
+        this.updateList();
     }
 
     /** Pending values to the game, then saves whichever settings file changed. */
@@ -556,7 +590,7 @@ public class VesuOptionsScreen extends GuiScreen {
         }
     }
 
-    /** Leaving the screen any way (Done, Escape, the shader pack page) applies what is pending. */
+    /** Leaving the screen any way (Done, Escape, a pack's options) applies what is pending. */
     @Override
     public void onGuiClosed() {
         Keyboard.enableRepeatEvents(false);
@@ -576,14 +610,8 @@ public class VesuOptionsScreen extends GuiScreen {
         return this.pages.get(i).name();
     }
 
-    /** False for a page that opens another screen. */
-    public boolean hasOptions(int i) {
-        return this.pages.get(i).opens() == null;
-    }
-
-    /** Selects a page; pages that open another screen are ignored. */
+    /** Selects a page. */
     public void selectPage(int i) {
-        if (this.pages.get(i).opens() != null) return;
         this.page = i;
         this.scroll = 0;
         this.dragging = null;

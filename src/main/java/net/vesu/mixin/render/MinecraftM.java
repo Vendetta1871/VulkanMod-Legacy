@@ -77,6 +77,20 @@ public class MinecraftM {
         return screen;
     }
 
+    /**
+     * The menu frame rate (Vesu setting) while the game is paused, on the title menus or
+     * hidden; vanilla only had a fixed 30 on the title menus.
+     */
+    @Inject(method = "getLimitFramerate", at = @At("HEAD"), cancellable = true)
+    private void vesu$menuFramerate(org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> cir) {
+        Minecraft mc = (Minecraft) (Object) this;
+        boolean menu = (mc.world == null && mc.currentScreen != null) || mc.isGamePaused()
+                || !org.lwjgl.opengl.Display.isVisible();
+        if (menu && Initializer.CONFIG != null) {
+            cir.setReturnValue(Math.min(Initializer.CONFIG.menuFramerate, mc.gameSettings.limitFramerate));
+        }
+    }
+
     @Inject(method = "updateFramebufferSize", at = @At("HEAD"))
     private void vesu$onResize(CallbackInfo ci) {
         Minecraft mc = (Minecraft) (Object) this;

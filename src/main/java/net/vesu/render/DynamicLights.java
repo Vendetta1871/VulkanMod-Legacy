@@ -19,7 +19,7 @@ import java.util.Map;
 /**
  * Dynamic lights: light-emitting items held by players and mobs or lying on the ground, and
  * burning entities. Collected once per frame (up to {@link #MAX} nearest). Config
- * rtDynamicLights: "fast" raises the block light of terrain vertices (and entities) near
+ * dynamicLights and rtDynamicLights ({@link net.vesu.config.Config#effectiveDynamicLights}): "fast" raises the block light of terrain vertices (and entities) near
  * them in the raster shaders, like Sodium's dynamic lights but without chunk rebuilds;
  * "on" adds them to the ray-traced block lights (RtLights) with shadows.
  */

@@ -1,11 +1,13 @@
 {
   "frameQueueSize": 3,
-  "configVersion": 1,
+  "configVersion": 2,
   "guiOptimizations": true,
   "renderScale": 0.8,
-  "upscaler": "fsr1",
-  "fsr1Sharpness": 0.3,
-  "fsr3Sharpness": 0.3,
+  "upscaler": "auto",
+  "fsrSharpening": 0.3,
+  "menuFramerate": 60,
+  "simulationDistance": 12,
+  "precipitation": "fancy",
   "shaderPack": "complementary-reimagined",
   "rtPreset": "off",
   "rtShadowDistance": 0,
@@ -15,5 +17,6 @@
   "rtBlockLight": 1.0,
   "rtReflections": 1.0,
   "rtIndirect": 1.0,
-  "rtDynamicLights": "off"
+  "dynamicLights": "off",
+  "rtDynamicLights": "rt"
 }

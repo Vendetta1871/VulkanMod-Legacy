@@ -29,18 +29,38 @@ public class Config {
     public int frameQueueSize = 3;
     /** Settings format; null in files written before it existed (see {@link #migrate}). */
     public Integer configVersion;
-    private static final int CONFIG_VERSION = 1;
+    private static final int CONFIG_VERSION = 2;
     /** Batch GUI draws through the Vulkan GUI renderer. */
     public boolean guiOptimizations = true;
 
-    /** World resolution relative to the window, 0.25..1; below 1 the upscaler fills in (F7). */
+    /**
+     * World resolution relative to the window, 0.25..2. Below 1 the upscaler fills in (F7);
+     * above 1 the world is supersampled and filtered down bilinearly.
+     */
     public float renderScale = 1.0f;
+    public static final float RENDER_SCALE_MIN = 0.25f, RENDER_SCALE_MAX = 2.0f;
     /** auto (FSR 3 when scaled with ray tracing on and available, else FSR 1) | fsr3 | fsr1 | blit. */
     public String upscaler = "auto";
-    /** FSR 1 RCAS sharpness in stops: 0 = strongest. */
-    public float fsr1Sharpness = 0.2f;
-    /** FSR 3 sharpening strength 0..1: 0 = off. */
-    public float fsr3Sharpness = 0.3f;
+    /** FSR sharpening 0..1, shared by FSR 1 (RCAS, 2 stops at 0 down to 0 stops at 1) and FSR 3. */
+    public float fsrSharpening = 0.5f;
+    /** Older per-upscaler sharpness, read once by {@link #migrate}. */
+    public Float fsr1Sharpness, fsr3Sharpness;
+
+    /**
+     * Exclusive fullscreen video mode as {@code WIDTHxHEIGHT@HZ}, or null for the desktop
+     * mode. See {@link net.vesu.config.DisplayModes}.
+     */
+    public String fullscreenMode;
+    /** Frame rate limit while the game is paused, on the title menus or hidden. */
+    public int menuFramerate = 60;
+    /**
+     * Singleplayer: entities, block entities, scheduled and random ticks only run within this
+     * many chunks of a player; farther chunks up to the render distance stay loaded and frozen.
+     */
+    public int simulationDistance = 12;
+    public static final int SIMULATION_DISTANCE_MIN = 5, SIMULATION_DISTANCE_MAX = 32;
+    /** Rain and snow: fancy (the vanilla drawing) | off. */
+    public String precipitation = "fancy";
 
     /**
      * Selected shader pack: a folder or zip name in {@code shaderpacks/}, or null for none
@@ -60,15 +80,18 @@ public class Config {
     public Boolean rayTracing;
 
     public static final int RT_DISTANCE_MAX = 16;
-    public static final String[] RT_PRESETS = {"off", "low", "medium", "high", "custom"};
+    public static final String[] RT_PRESETS = {"off", "potato", "low", "medium", "high", "ultra", "nasa", "custom"};
 
     /** {shadows, indirect, reflections} of a named preset, or null for custom. */
     public static int[] rtPresetDistances(String preset) {
         return switch (preset == null ? "off" : preset) {
             case "off" -> new int[]{0, 0, 0};
+            case "potato" -> new int[]{3, 0, 0};
             case "low" -> new int[]{4, 0, 2};
             case "medium" -> new int[]{6, 3, 4};
             case "high" -> new int[]{10, 6, 8};
+            case "ultra" -> new int[]{14, 10, 12};
+            case "nasa" -> new int[]{RT_DISTANCE_MAX, RT_DISTANCE_MAX, RT_DISTANCE_MAX};
             default -> null;
         };
     }
@@ -91,8 +114,13 @@ public class Config {
     public float rtReflections = 1.0f;
     /** Ray-traced indirect light (bounces, occlusion), 0..1 (0 = off). */
     public float rtIndirect = 1.0f;
-    /** Dynamic lights (held / dropped light sources): off | fast (raster) | on (ray traced). */
-    public String rtDynamicLights = "on";
+    /**
+     * Dynamic lights (held and dropped light sources): off | auto. Auto is off while a shader
+     * pack lights the world; with ray tracing on, {@link #rtDynamicLights} picks the kind.
+     */
+    public String dynamicLights = "auto";
+    /** Dynamic lights with ray tracing on: fast (raster) | rt (ray traced, casts shadows). */
+    public String rtDynamicLights = "rt";
 
     // Environment overrides (tests and autotest runs) take precedence over the file.
 
@@ -131,10 +159,22 @@ public class Config {
         return d;
     }
 
+    /**
+     * "off" | "fast" | "on" (ray traced). VESU_DYNAMIC_LIGHTS overrides with one of those.
+     * Auto is off under a pack with its own lighting, else fast, or the ray-tracing choice
+     * while ray tracing is on.
+     */
     public String effectiveDynamicLights() {
         String env = Env.get("VESU_DYNAMIC_LIGHTS");
-        String v = (env != null ? env : rtDynamicLights == null ? "on" : rtDynamicLights).toLowerCase();
-        return v.equals("off") || v.equals("fast") ? v : "on";
+        if (env != null) {
+            String v = env.toLowerCase();
+            return v.equals("off") || v.equals("fast") ? v : "on";
+        }
+        if ("off".equals(dynamicLights)) return "off";
+        if (net.vesu.vulkan.rt.RtScene.enabled()) return "fast".equals(rtDynamicLights) ? "fast" : "on";
+        net.vesu.pack.ir.IrPack pack = net.vesu.shader.PackManager.active();
+        if (pack != null && !(pack.renderer.has("rt") && pack.renderer.get("rt").getAsBoolean())) return "off";
+        return "fast";
     }
 
     public float effectiveRtIndirect() {
@@ -154,7 +194,7 @@ public class Config {
     }
 
     public float effectiveRenderScale() {
-        return clamp(envFloat("VESU_RENDER_SCALE", renderScale), 0.25f, 1.0f);
+        return clamp(envFloat("VESU_RENDER_SCALE", renderScale), RENDER_SCALE_MIN, RENDER_SCALE_MAX);
     }
 
     public String effectiveUpscaler() {
@@ -166,12 +206,18 @@ public class Config {
         };
     }
 
+    /** FSR 1 RCAS sharpness in stops, 0 = strongest; VESU_FSR_SHARPNESS gives stops directly. */
     public float effectiveFsr1Sharpness() {
-        return clamp(envFloat("VESU_FSR_SHARPNESS", fsr1Sharpness), 0.0f, 2.0f);
+        float stops = 2.0f * (1.0f - clamp(fsrSharpening, 0.0f, 1.0f));
+        return clamp(envFloat("VESU_FSR_SHARPNESS", stops), 0.0f, 2.0f);
     }
 
     public float effectiveFsr3Sharpness() {
-        return clamp(envFloat("VESU_FSR3_SHARPNESS", fsr3Sharpness), 0.0f, 1.0f);
+        return clamp(envFloat("VESU_FSR3_SHARPNESS", fsrSharpening), 0.0f, 1.0f);
+    }
+
+    public int effectiveSimulationDistance() {
+        return Math.max(SIMULATION_DISTANCE_MIN, Math.min(SIMULATION_DISTANCE_MAX, simulationDistance));
     }
 
     private static float envFloat(String name, float fallback) {
@@ -229,6 +275,14 @@ public class Config {
             // 0.2.0 and older defaulted to 2 frames in flight.
             if (frameQueueSize == 2) frameQueueSize = 3;
         }
+        if (configVersion == null || configVersion < 2) {
+            // 0.3.0: one sharpening for both FSR versions; dynamic lights split in two.
+            if (fsr3Sharpness != null) fsrSharpening = clamp(fsr3Sharpness, 0.0f, 1.0f);
+            if ("off".equals(rtDynamicLights)) dynamicLights = "off";
+            rtDynamicLights = "fast".equals(rtDynamicLights) ? "fast" : "rt";
+        }
+        fsr1Sharpness = null;
+        fsr3Sharpness = null;
         configVersion = CONFIG_VERSION;
     }
 

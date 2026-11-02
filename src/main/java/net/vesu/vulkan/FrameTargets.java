@@ -128,8 +128,9 @@ public final class FrameTargets {
     public static void applySettings() {
         net.vesu.config.Config config = net.vesu.Initializer.CONFIG;
         upscaler = PACK_SPACE_DEBUG ? "blit" : config.effectiveUpscaler();
-        blitOnly = upscaler.equals("blit");
         float scale = config.effectiveRenderScale();
+        // Above 1 the world is supersampled: FSR only upscales, a linear blit filters it down.
+        blitOnly = upscaler.equals("blit") || scale > 1.0f;
         boolean share = scale == 1.0f && shareColorAllowed();
         if (scale != renderScale || (display.width() > 0 && share != sharedColor)) {
             renderScale = scale;
@@ -464,7 +465,7 @@ public final class FrameTargets {
         boolean requested = upscaler.equals("fsr3")
                 || (upscaler.equals("auto") && scaled() && net.vesu.vulkan.rt.RtScene.enabled());
         // Camera history (jitter, motion vectors) is captured by the batched chunk path only.
-        return requested && net.vesu.render.TerrainRenderer.BATCH && Fsr3Upscaler.available();
+        return requested && !blitOnly && net.vesu.render.TerrainRenderer.BATCH && Fsr3Upscaler.available();
     }
 
     /** Starts the SCENE phase: clears and begins rendering into the scene target. */

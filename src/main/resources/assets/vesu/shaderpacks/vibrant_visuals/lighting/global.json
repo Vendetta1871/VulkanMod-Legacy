@@ -1,0 +1,23 @@
+{
+  "format_version": "1.21.80",
+  "minecraft:lighting_settings": {
+    "description": {"identifier": "vesu:default_lighting"},
+    "directional_lights": {
+      "orbital": {
+        "sun": {
+          "illuminance": {"0.0": 90.0, "0.24": 40.0, "0.28": 0.5, "0.29": 0.0, "0.71": 0.0, "0.72": 0.5, "0.76": 40.0, "1.0": 90.0},
+          "color": {"0.0": [255, 236, 222], "0.20": [255, 190, 120], "0.26": [255, 130, 60], "0.74": [255, 130, 60], "0.80": [255, 190, 120], "1.0": [255, 236, 222]}
+        },
+        "moon": {
+          "illuminance": {"0.0": 0.0, "0.22": 0.0, "0.26": 0.35, "0.74": 0.35, "0.78": 0.0, "1.0": 0.0},
+          "color": {"0.0": [150, 175, 255], "1.0": [150, 175, 255]}
+        },
+        "orbital_offset_degrees": 0.0
+      },
+      "flash": {"illuminance": 8.0, "color": [210, 120, 255]}
+    },
+    "emissive": {"desaturation": 0.1},
+    "ambient": {"color": "#FFFFFF", "illuminance": 0.03},
+    "sky": {"intensity": 1.0}
+  }
+}

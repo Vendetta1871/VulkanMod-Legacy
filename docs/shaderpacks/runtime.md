@@ -13,7 +13,7 @@ How the renderer runs an IR pack, in terms of the code that exists today.
 | `J/shader/PackTargets` | Allocates the pack's textures, depth copies and shadow maps; recreated on resize together with `FrameTargets` (same `generation()` scheme). |
 | `J/shader/ShadowPass` | D8: light-frustum culling over the arena, captured entities, records into the early command buffer. |
 | `J/shader/FrameUniforms` | Fills the `Frame` and `PackUniforms` blocks once per frame. |
-| `J/config/gui/ShaderPackScreen`, `ShaderOptionsScreen` | Pack list, generated option pages, profiles, error list. |
+| `J/config/gui/option/VesuOptionPages` (Shader Packs page), `ShaderOptionsScreen` | Pack list, generated option pages, profiles, error list. |
 
 The vanilla path keeps its current classes untouched. With no pack, `PackRuntime` is null
 and every hook below is a single null check (goal 4).

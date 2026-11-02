@@ -5,61 +5,130 @@ import net.minecraft.client.resources.I18n;
 import net.minecraft.client.settings.GameSettings;
 import net.vesu.Initializer;
 import net.vesu.config.Config;
-import net.vesu.config.gui.ShaderPackScreen;
+import net.vesu.config.DisplayModes;
+import net.vesu.config.gui.ShaderOptionsScreen;
+import net.vesu.config.gui.VesuOptionsScreen;
 import net.vesu.config.gui.option.Option.Impact;
 import net.vesu.config.gui.option.Option.Storage;
+import net.vesu.pack.PackKind;
+import net.vesu.shader.PackManager;
+import net.vesu.vulkan.PackRuntime;
 import net.vesu.vulkan.ffx.FfxApi;
 import net.vesu.vulkan.rt.RtScene;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
- * The tabs of {@link net.vesu.config.gui.VesuOptionsScreen}: every vanilla video option except
- * VBOs (meaningless under Vulkan), then Vesu's own settings. Vanilla options are applied
- * through {@link GameSettings#setOptionValue} and {@link GameSettings#setOptionFloatValue},
- * so their side effects (chunk reloads, fullscreen, mipmaps) stay vanilla's.
+ * The pages of {@link VesuOptionsScreen}: every vanilla video option except VBOs
+ * (meaningless under Vulkan), then Vesu's own settings. Vanilla options are applied through
+ * {@link GameSettings#setOptionValue} and {@link GameSettings#setOptionFloatValue}, so their
+ * side effects (chunk reloads, fullscreen, mipmaps) stay vanilla's.
  */
 public final class VesuOptionPages {
 
-    private static final String[] RT_PRESETS = {"off", "low", "medium", "high"};
-    private static final String[] UPSCALERS = {"auto", "fsr3", "fsr1", "blit"};
-    private static final String[] DYNAMIC_LIGHTS = {"off", "fast", "on"};
+    public static final String SHADER_PACKS = "Shader Packs";
+
+    private static final String[] RT_PRESETS = {"off", "potato", "low", "medium", "high", "ultra", "nasa"};
+    private static final String[] SCALING = {"auto", "blit", "fsr1", "fsr3"};
     private static final String RT_UNSUPPORTED = "Needs a GPU with Vulkan ray tracing.";
+    private static final String NOT_YET = "Not available yet.";
 
     public static List<OptionPage> create() {
         boolean rt = RtScene.supported();
-        boolean fsr3 = FfxApi.load();
-        return List.of(general(), quality(), upscaling(fsr3), rayTracing(rt), advanced(),
-                OptionPage.link("Shader Packs...", ShaderPackScreen::new));
+        // The Ray Tracing page's dynamic lighting depends on the General page's.
+        Option.Cycle<String> dynamicLights = dynamicLights();
+        return new ArrayList<>(List.of(general(dynamicLights), quality(), renderDistance(), rayTracing(rt, dynamicLights),
+                shaderPacks(), advanced()));
     }
 
-    private static OptionPage general() {
-        GameSettings.Options renderDistance = GameSettings.Options.RENDER_DISTANCE;
+    private static Option.Cycle<String> dynamicLights() {
+        Option.Cycle<String> dynamicLights = new Option.Cycle<>("Dynamic Lighting", Storage.VESU, new String[]{"off", "auto"},
+                v -> v.equals("off") ? "Off" : "Auto", () -> "off".equals(cfg().dynamicLights) ? "off" : "auto",
+                v -> cfg().dynamicLights = v);
+        dynamicLights.tooltip("Held and dropped torches and burning mobs light up their surroundings. "
+                        + "Auto turns it off while a shader pack lights the world; with ray tracing on, the Ray Tracing page picks how it is drawn.")
+                .impact(Impact.LOW);
+        return dynamicLights;
+    }
+
+    private static OptionPage general(Option.Cycle<String> dynamicLights) {
+        boolean fsr3 = FfxApi.load();
+        Option.Toggle fullscreen = vanillaToggle(GameSettings.Options.USE_FULLSCREEN, () -> gs().fullScreen);
+        fullscreen.tooltip("Covers the whole screen with the game.");
+
+        // A slider over Current (the desktop mode) and then the modes from the smallest up, as in newer Minecraft.
+        List<String> modes = new ArrayList<>(DisplayModes.list());
+        java.util.Collections.reverse(modes);
+        modes.add(0, null);
+        String current = cfg().fullscreenMode;
+        if (current != null && !modes.contains(current)) modes.add(current);
+        Option resolution = new Option.Slider("Fullscreen Resolution", Storage.VESU, 0.0f, Math.max(1, modes.size() - 1), 1.0f,
+                v -> DisplayModes.label(modes.get(Math.min(modes.size() - 1, Math.round(v)))),
+                () -> (float) Math.max(0, modes.indexOf(cfg().fullscreenMode)),
+                v -> {
+                    cfg().fullscreenMode = modes.get(Math.min(modes.size() - 1, Math.round(v)));
+                    DisplayModes.apply(Minecraft.getMinecraft().isFullScreen(), true);
+                })
+                .tooltip("The display's video mode in fullscreen. Current keeps the desktop's mode. "
+                        + "A lower mode makes the monitor scale the picture; Render Scale is usually the better way to gain speed.")
+                .availableWhen(() -> DisplayModes.supported() && fullscreen.pending(),
+                        () -> DisplayModes.supported() ? "Applies in fullscreen only."
+                                : "Cleanroom's borderless fullscreen is on (Forge early config), so the display mode cannot change.");
+
+        Option.Cycle<String> scaling = new Option.Cycle<>("Scaling Method", Storage.VESU, SCALING, v -> switch (v) {
+            case "blit" -> "Bilinear";
+            case "fsr1" -> "FSR 1";
+            case "fsr3" -> "FSR 3" + (fsr3 ? "" : " (n/a)");
+            default -> "Auto";
+        }, () -> cfg().upscaler == null ? "auto" : cfg().upscaler, v -> cfg().upscaler = v);
+        scaling.tooltip("How the world is brought to the window size. Auto uses FSR 3 when the world is scaled down with ray tracing on, "
+                        + "FSR 1 otherwise. FSR 3 is temporal and also smooths edges; FSR 1 is spatial and cheaper; Bilinear is plain filtering. "
+                        + "Above 100% the world is always filtered down bilinearly."
+                        + (fsr3 ? "" : " The FSR 3 library could not be loaded, so FSR 3 falls back to FSR 1."))
+                .impact(Impact.MEDIUM);
+
+
         return OptionPage.of("General", List.of(
                 List.of(
-                        vanillaSlider(renderDistance, 1.0f, v -> I18n.format("options.chunks", Math.round(v)))
-                                .tooltip("How far away terrain is drawn. Shorter distances render fewer chunks and raise the frame rate.")
+                        resolution,
+                        vesuSlider("Render Scale", Config.RENDER_SCALE_MIN, Config.RENDER_SCALE_MAX, 0.05f, v -> Math.round(v * 100.0f) + "%",
+                                () -> cfg().renderScale, v -> cfg().renderScale = v)
+                                .tooltip("The world is rendered at this share of the window size; the menus stay sharp. "
+                                        + "Below 100% it is upscaled and faster; above 100% it is supersampled: smoother edges, much slower.")
                                 .impact(Impact.HIGH),
+                        scaling,
+                        vesuSlider("FSR Sharpening", 0.0f, 1.0f, 0.05f, v -> v <= 0.0f ? "Off" : Math.round(v * 100.0f) + "%",
+                                () -> cfg().fsrSharpening, v -> cfg().fsrSharpening = v)
+                                .tooltip("Sharpening after FSR 1 and FSR 3.")
+                                .availableWhen(() -> !scaling.pending().equals("blit"), "Bilinear scaling does not sharpen.")),
+                List.of(
                         vanillaSlider(GameSettings.Options.GAMMA, 0.01f, VesuOptionPages::gammaText)
                                 .tooltip("The brightness of dark areas. It does not change the light level of the world.")
-                                .impact(Impact.LOW)),
+                                .impact(Impact.LOW),
+                        dynamicLights),
                 List.of(
-                        vanillaCycle(GameSettings.Options.GUI_SCALE, () -> gs().guiScale, maxGuiScale() + 1,
+                        vanillaCycle(GameSettings.Options.GUI_SCALE, () -> gs().guiScale, maxGuiScale() + 1, maxGuiScale() + 1,
                                 v -> v == 0 ? I18n.format("options.guiScale.auto") : Integer.toString(v))
                                 .tooltip("The size of menus, the hotbar and text. Auto picks the largest scale that fits the window; "
                                         + "a larger window allows larger scales."),
-                        vanillaToggle(GameSettings.Options.USE_FULLSCREEN, () -> gs().fullScreen)
-                                .tooltip("Covers the whole screen with the game."),
+                        fullscreen,
                         vanillaToggle(GameSettings.Options.ENABLE_VSYNC, () -> gs().enableVsync)
                                 .tooltip("Syncs frames to the display's refresh rate to avoid tearing, at the cost of a little input latency.")
                                 .impact(Impact.VARIES),
-                        vanillaSlider(GameSettings.Options.FRAMERATE_LIMIT, 10.0f, VesuOptionPages::framerateText)
-                                .tooltip("The highest frame rate the game renders at. A limit saves power when the game runs faster than needed.")),
+                        new Option.Slider("Game Framerate", Storage.VANILLA, GameSettings.Options.FRAMERATE_LIMIT.getValueMin(),
+                                GameSettings.Options.FRAMERATE_LIMIT.getValueMax(), 10.0f, VesuOptionPages::framerateText,
+                                () -> gs().getOptionFloatValue(GameSettings.Options.FRAMERATE_LIMIT),
+                                v -> gs().setOptionFloatValue(GameSettings.Options.FRAMERATE_LIMIT, v))
+                                .tooltip("The highest frame rate while playing. A limit saves power when the game runs faster than needed."),
+                        vesuSlider("Menu Framerate", 10.0f, 240.0f, 10.0f, v -> Math.round(v) + " fps",
+                                () -> (float) cfg().menuFramerate, v -> cfg().menuFramerate = Math.round(v))
+                                .tooltip("The highest frame rate while the game is paused, on the title menus or minimized. "
+                                        + "It never goes above the game frame rate.")),
                 List.of(
                         vanillaToggle(GameSettings.Options.VIEW_BOBBING, () -> gs().viewBobbing)
                                 .tooltip("The view sways while walking."),
@@ -69,6 +138,135 @@ public final class VesuOptionPages {
                                 .tooltip("Where the attack cooldown is shown."))));
     }
 
+    private static OptionPage renderDistance() {
+        return OptionPage.of("Render Distance", List.of(
+                List.of(
+                        vanillaSlider(GameSettings.Options.RENDER_DISTANCE, 1.0f, VesuOptionPages::chunks)
+                                .tooltip("How far away terrain is drawn. Shorter distances render fewer chunks and raise the frame rate.")
+                                .impact(Impact.HIGH),
+                        vesuSlider("Simulation Distance", Config.SIMULATION_DISTANCE_MIN, Config.SIMULATION_DISTANCE_MAX, 1.0f,
+                                VesuOptionPages::chunks, () -> (float) cfg().simulationDistance, v -> cfg().simulationDistance = Math.round(v))
+                                .tooltip("How far from you mobs move, crops grow, furnaces smelt and redstone runs. Farther chunks up to the "
+                                        + "render distance stay visible but frozen. Chunks kept loaded by mods always run. Singleplayer only; "
+                                        + "a server decides this for itself.")
+                                .impact(Impact.MEDIUM)),
+                List.of(
+                        placeholder("LOD Distance", "64 chunks",
+                                "Simplified terrain drawn beyond the render distance, out to this many chunks."),
+                        placeholder("LOD Quality", "Medium",
+                                "How quickly the simplified terrain loses detail with distance: Low, Medium or High."),
+                        placeholder("LOD Generation Distance", "32 chunks",
+                                "How far around you the world is generated in advance to build the simplified terrain."))));
+    }
+
+    private static OptionPage rayTracing(boolean rt, Option.Cycle<String> general) {
+        Option.Slider[] distances = new Option.Slider[3];
+        Option.Cycle<String> preset = new Option.Cycle<>("Ray Tracing", Storage.VESU, RT_PRESETS,
+                VesuOptionPages::presetText,
+                () -> cfg().rtPreset == null ? "off" : cfg().rtPreset, v -> cfg().rtPreset = v);
+        preset.tooltip("Ray-traced shadows, indirect light and reflections near the camera; farther away the world stays rasterized. "
+                        + "Not compatible with shader packs: a pack that lights the world pauses while ray tracing is on, "
+                        + "only post-processing packs run over it. Moving a distance below makes the preset Custom.")
+                .impact(Impact.HIGH)
+                .availableWhen(() -> rt, RT_UNSUPPORTED)
+                .onChange(() -> {
+                    int[] d = Config.rtPresetDistances(preset.pending());
+                    if (d != null) {
+                        for (int i = 0; i < 3; i++) distances[i].set(d[i]);
+                    }
+                });
+        String[] names = {"Shadows", "Indirect Light", "Reflections"};
+        String[] tips = {
+                "Sun and moon shadows are ray traced within this many chunks of the camera.",
+                "Bounced light and occlusion are ray traced within this many chunks of the camera.",
+                "Water, glass and ice reflect the world within this many chunks of the camera."};
+        for (int i = 0; i < 3; i++) {
+            int effect = i;
+            distances[i] = vesuSlider(names[i], 0.0f, Config.RT_DISTANCE_MAX, 1.0f,
+                    v -> v < 0.5f ? "Off" : chunks(v),
+                    () -> (float) liveDistances()[effect], v -> setDistance(effect, Math.round(v)));
+            distances[i].tooltip(tips[i]).impact(Impact.HIGH).availableWhen(() -> rt, RT_UNSUPPORTED)
+                    .onChange(() -> preset.set(matchPreset(distances)));
+        }
+        Option dynamic = new Option.Cycle<>("Dynamic Lighting", Storage.VESU, new String[]{"fast", "rt"},
+                v -> v.equals("fast") ? "Fast" : "Ray Traced", () -> "fast".equals(cfg().rtDynamicLights) ? "fast" : "rt",
+                v -> cfg().rtDynamicLights = v)
+                .tooltip("How dynamic lights are drawn while ray tracing is on. Fast brightens the surroundings like without ray tracing; "
+                        + "Ray Traced adds them to the traced light, with shadows.")
+                .impact(Impact.LOW)
+                .availableWhen(() -> rt && !general.pending().equals("off"),
+                        () -> rt ? "Dynamic Lighting is off on the General page." : RT_UNSUPPORTED);
+        return OptionPage.of("Ray Tracing [Beta]", List.of(
+                List.of(preset, dynamic),
+                List.of(distances[0], distances[1], distances[2])));
+    }
+
+    /** The pack list, scanned afresh: Off, the built-in packs, the folder's packs, then Rescan and Pack Options. */
+    public static OptionPage shaderPacks() {
+        PackManager.rescan();
+        List<PackManager.Entry> entries = PackManager.entries();
+        String[] ids = new String[entries.size() + 1];
+        ids[0] = "";
+        for (int i = 0; i < entries.size(); i++) ids[i + 1] = entries.get(i).id();
+        Option.Cycle<String> choice = new Option.Cycle<>("Shader Pack", Storage.VESU, ids, v -> v,
+                () -> PackManager.selectedId() == null ? "" : PackManager.selectedId(),
+                v -> PackManager.select(v.isEmpty() ? null : v));
+
+        List<Option> builtIn = new ArrayList<>();
+        builtIn.add(new Option.Radio("Off", choice, "", "", () -> "Draws the world with Vesu's own shaders."));
+        List<Option> folder = new ArrayList<>();
+        for (PackManager.Entry e : entries) {
+            Option row = new Option.Radio(e.name(), choice, e.id(), "[" + e.format() + "]", () -> packInfo(e))
+                    .availableWhen(e::usable, () -> e.message() != null ? e.message() : "This pack cannot be used.");
+            (e.id().startsWith(PackManager.BUILTIN_PREFIX) ? builtIn : folder).add(row);
+        }
+
+        Option rescan = new Option.Action("Rescan Folder", screen -> ((VesuOptionsScreen) screen).reloadPage(SHADER_PACKS)).tooltip("Looks for new packs in " + PackManager.DIR.toAbsolutePath() + ". Put pack folders or zips there.");
+        Option options = new Option.Action("Pack Options...", screen -> {
+            ((VesuOptionsScreen) screen).applyPending();
+            if (PackManager.activeOptions() != null) {
+                Minecraft.getMinecraft().displayGuiScreen(new ShaderOptionsScreen(screen, PackManager.activeOptions()));
+            }
+        }).tooltip("The selected pack's own settings.")
+                .availableWhen(() -> kindOf(entries, choice.pending()) == PackKind.OPTIFINE,
+                        "Only OptiFine and Iris packs have options.");
+
+        List<List<Option>> groups = new ArrayList<>();
+        groups.add(builtIn);
+        if (!folder.isEmpty()) groups.add(folder);
+        groups.add(List.of(rescan, options));
+        return new OptionPage(SHADER_PACKS, groups, List.of(choice));
+    }
+
+    private static PackKind kindOf(List<PackManager.Entry> entries, String id) {
+        for (PackManager.Entry e : entries) {
+            if (e.id().equals(id)) return e.kind();
+        }
+        return null;
+    }
+
+    private static String packInfo(PackManager.Entry e) {
+        StringBuilder s = new StringBuilder(switch (e.format()) {
+            case "Iris" -> "An OptiFine-format pack that uses Iris features.";
+            case "OptiFine" -> "An OptiFine-format pack.";
+            case "Bedrock" -> "A Bedrock Vibrant Visuals pack.";
+            case "Native" -> "A Vesu pack.";
+            default -> "A " + e.format() + " pack.";
+        });
+        if (e.message() != null && e.usable()) s.append(' ').append(e.message()).append('.');
+        if (e.id().equals(PackManager.selectedId())) {
+            String compiling = PackRuntime.compiling();
+            if (compiling != null) {
+                s.append(" Compiling: ").append(PackRuntime.compilePercent()).append("%, the picture changes when it is done.");
+            } else if (PackManager.activeError() != null) {
+                s.append(" Failed: ").append(PackManager.activeError());
+            } else if (PackManager.pausedByRt(PackManager.active())) {
+                s.append(" Paused: ray tracing is on. Turn it off to use this pack.");
+            }
+        }
+        return s.toString();
+    }
+
     private static OptionPage quality() {
         return OptionPage.of("Quality", List.of(
                 List.of(
@@ -76,16 +274,32 @@ public final class VesuOptionPages {
                                 I18n.format("options.graphics.fast"), I18n.format("options.graphics.fancy"))
                                 .tooltip("Fancy draws transparent leaves, detailed weather and other details. Changing it rebuilds all chunks.")
                                 .impact(Impact.MEDIUM),
-                        vanillaCycle(GameSettings.Options.RENDER_CLOUDS, () -> gs().clouds,
-                                I18n.format("options.off"), I18n.format("options.clouds.fast"),
-                                I18n.format("options.clouds.fancy"))
-                                .tooltip("Fast clouds are flat, Fancy clouds have volume.")
+                        vanillaCycle(GameSettings.Options.RENDER_CLOUDS, () -> gs().clouds, 4, 3,
+                                v -> switch (v) {
+                                    case 0 -> I18n.format("options.off");
+                                    case 1 -> I18n.format("options.clouds.fast");
+                                    case 2 -> I18n.format("options.clouds.fancy");
+                                    default -> "Better";
+                                })
+                                .skip(3)
+                                .tooltip("Fast clouds are flat, Fancy clouds have volume. Better, volumetric clouds, is not available yet.")
+                                .impact(Impact.LOW),
+                        new Option.Cycle<>("Precipitation", Storage.VESU, new String[]{"off", "fancy", "particle"}, v -> switch (v) {
+                            case "off" -> "Off";
+                            case "particle" -> "Particle";
+                            default -> "Fancy";
+                        }, () -> "off".equals(cfg().precipitation) ? "off" : "fancy", v -> cfg().precipitation = v)
+                                .skip("particle")
+                                .tooltip("Rain and snow. Off hides them and their splashes; the rain still sounds. "
+                                        + "Particle, drops as particles, is not available yet.")
                                 .impact(Impact.LOW),
                         vanillaCycle(GameSettings.Options.PARTICLES, () -> gs().particleSetting,
                                 I18n.format("options.particles.all"), I18n.format("options.particles.decreased"),
                                 I18n.format("options.particles.minimal"))
                                 .tooltip("How many particles are spawned.")
-                                .impact(Impact.MEDIUM)),
+                                .impact(Impact.MEDIUM),
+                        placeholder("Foliage", gs().fancyGraphics ? "Fancy" : "Fast",
+                                "Leaves and plants: Potato, Fast or Fancy. For now Graphics decides.")),
                 List.of(
                         vanillaCycle(GameSettings.Options.AMBIENT_OCCLUSION, () -> gs().ambientOcclusion,
                                 I18n.format("options.off"), I18n.format("options.ao.min"), I18n.format("options.ao.max"))
@@ -103,93 +317,6 @@ public final class VesuOptionPages {
                                 .tooltip("Red and cyan 3D for anaglyph glasses."))));
     }
 
-    private static OptionPage upscaling(boolean fsr3) {
-        String unavailable = fsr3 ? "" : " (n/a)";
-        return OptionPage.of("Upscaling", List.of(
-                List.of(
-                        vesuSlider("Render Scale", 0.25f, 1.0f, 0.05f, v -> Math.round(v * 100.0f) + "%",
-                                () -> cfg().renderScale, v -> cfg().renderScale = v)
-                                .tooltip("The world is rendered at this share of the window size and upscaled. Lower is faster; the menus stay sharp.")
-                                .impact(Impact.HIGH),
-                        new Option.Cycle<>("Upscaler", Storage.VESU, UPSCALERS, v -> switch (v) {
-                            case "fsr3" -> "FSR 3" + unavailable;
-                            case "fsr1" -> "FSR 1";
-                            case "blit" -> "Bilinear";
-                            default -> "Auto";
-                        }, () -> cfg().upscaler == null ? "auto" : cfg().upscaler, v -> cfg().upscaler = v)
-                                .tooltip("Auto uses FSR 3 when the world is scaled with ray tracing on, FSR 1 otherwise. "
-                                        + "FSR 3 is temporal and also smooths edges; FSR 1 is spatial and cheaper."
-                                        + (fsr3 ? "" : " The FSR 3 library could not be loaded, so FSR 3 falls back to FSR 1."))
-                                .impact(Impact.MEDIUM)),
-                List.of(
-                        vesuSlider("FSR 1 Sharpening", 0.0f, 2.0f, 0.1f,
-                                v -> String.format(Locale.ROOT, "%.1f stops", v),
-                                () -> cfg().fsr1Sharpness, v -> cfg().fsr1Sharpness = v)
-                                .tooltip("RCAS sharpening after FSR 1, in stops: 0 is the strongest, 2 the weakest."),
-                        vesuSlider("FSR 3 Sharpening", 0.0f, 1.0f, 0.05f,
-                                v -> v <= 0.0f ? "Off" : Math.round(v * 100.0f) + "%",
-                                () -> cfg().fsr3Sharpness, v -> cfg().fsr3Sharpness = v)
-                                .tooltip("Sharpening applied by FSR 3.")
-                                .availableWhen(() -> fsr3, "The FSR 3 library could not be loaded."))));
-    }
-
-    private static OptionPage rayTracing(boolean rt) {
-        Option.Slider[] distances = new Option.Slider[3];
-        Option.Cycle<String> preset = new Option.Cycle<>("Preset", Storage.VESU, RT_PRESETS,
-                VesuOptionPages::presetText,
-                () -> cfg().rtPreset == null ? "off" : cfg().rtPreset, v -> cfg().rtPreset = v);
-        preset.tooltip("Ray-traced shadows, indirect light and reflections near the camera; farther away the world stays rasterized. "
-                        + "Moving a distance below makes the preset Custom. "
-                        + "Shader packs that light the world pause while ray tracing is on; post-processing packs run over it.")
-                .impact(Impact.HIGH)
-                .availableWhen(() -> rt, RT_UNSUPPORTED)
-                .onChange(() -> {
-                    int[] d = Config.rtPresetDistances(preset.pending());
-                    if (d != null) {
-                        for (int i = 0; i < 3; i++) distances[i].set(d[i]);
-                    }
-                });
-        String[] names = {"Shadow Distance", "Indirect Light Distance", "Reflection Distance"};
-        String[] tips = {
-                "Sun and moon shadows are ray traced within this many chunks of the camera.",
-                "Bounced light and occlusion are ray traced within this many chunks of the camera.",
-                "Water, glass and ice reflect the world within this many chunks of the camera."};
-        for (int i = 0; i < 3; i++) {
-            int effect = i;
-            distances[i] = vesuSlider(names[i], 0.0f, Config.RT_DISTANCE_MAX, 1.0f,
-                    v -> v < 0.5f ? "Off" : Math.round(v) + (Math.round(v) == 1 ? " chunk" : " chunks"),
-                    () -> (float) liveDistances()[effect], v -> setDistance(effect, Math.round(v)));
-            distances[i].tooltip(tips[i]).impact(Impact.HIGH).availableWhen(() -> rt, RT_UNSUPPORTED)
-                    .onChange(() -> preset.set(matchPreset(distances)));
-        }
-        return OptionPage.of("Ray Tracing", List.of(
-                List.of(preset),
-                List.of(distances[0], distances[1], distances[2]),
-                List.of(
-                        percentSlider("Shadow Strength", () -> cfg().rtShadowStrength, v -> cfg().rtShadowStrength = v)
-                                .tooltip("How much ray-traced shadows darken the ground.")
-                                .availableWhen(() -> rt, RT_UNSUPPORTED),
-                        percentSlider("Block Light", () -> cfg().rtBlockLight, v -> cfg().rtBlockLight = v)
-                                .tooltip("How much ray-traced light from torches, lava and glowstone replaces vanilla's.")
-                                .availableWhen(() -> rt, RT_UNSUPPORTED),
-                        percentSlider("Indirect Light", () -> cfg().rtIndirect, v -> cfg().rtIndirect = v)
-                                .tooltip("The strength of bounced light and occlusion.")
-                                .availableWhen(() -> rt, RT_UNSUPPORTED),
-                        percentSlider("Reflections", () -> cfg().rtReflections, v -> cfg().rtReflections = v)
-                                .tooltip("The strength of ray-traced reflections on water, glass and ice.")
-                                .availableWhen(() -> rt, RT_UNSUPPORTED)),
-                List.of(
-                        new Option.Cycle<>("Dynamic Lights", Storage.VESU, DYNAMIC_LIGHTS, v -> switch (v) {
-                            case "off" -> "Off";
-                            case "fast" -> "Fast";
-                            default -> rt ? "Ray Traced" : "Fast (no RT)";
-                        }, () -> cfg().rtDynamicLights == null ? "on" : cfg().rtDynamicLights,
-                                v -> cfg().rtDynamicLights = v)
-                                .tooltip("Held and dropped torches light up their surroundings. "
-                                        + "Fast works without ray tracing; Ray Traced also casts shadows.")
-                                .impact(Impact.LOW))));
-    }
-
     private static OptionPage advanced() {
         return OptionPage.of("Advanced", List.of(
                 List.of(
@@ -199,6 +326,13 @@ public final class VesuOptionPages {
                                         + "fewer lower the input latency.")
                                 .impact(Impact.MEDIUM)
                                 .restart())));
+    }
+
+    /** A row for a setting that is planned but not there yet: shown, greyed out. */
+    private static Option placeholder(String name, String value, String tooltip) {
+        return new Option.Cycle<>(name, Storage.VESU, new String[]{value}, v -> v, () -> value, v -> { })
+                .tooltip(tooltip)
+                .availableWhen(() -> false, NOT_YET);
     }
 
     // ---- Vanilla options ----
@@ -219,14 +353,18 @@ public final class VesuOptionPages {
     }
 
     private static Option.Cycle<Integer> vanillaCycle(GameSettings.Options option, IntSupplier getter, String... labels) {
-        return vanillaCycle(option, getter, labels.length, i -> i >= 0 && i < labels.length ? labels[i] : Integer.toString(i));
+        return vanillaCycle(option, getter, labels.length, labels.length,
+                i -> i >= 0 && i < labels.length ? labels[i] : Integer.toString(i));
     }
 
-    /** Vanilla adds the value passed to setOptionValue, modulo the number of choices. */
-    private static Option.Cycle<Integer> vanillaCycle(GameSettings.Options option, IntSupplier getter, int count,
+    /**
+     * {@code shown} values 0..shown-1. Vanilla adds the value passed to setOptionValue modulo
+     * its own number of choices, {@code count}, which is less when a listed value is not offered yet.
+     */
+    private static Option.Cycle<Integer> vanillaCycle(GameSettings.Options option, IntSupplier getter, int shown, int count,
                                                       Function<Integer, String> label) {
-        Integer[] values = new Integer[count];
-        for (int i = 0; i < count; i++) values[i] = i;
+        Integer[] values = new Integer[shown];
+        for (int i = 0; i < shown; i++) values[i] = i;
         return new Option.Cycle<>(name(option), Storage.VANILLA, values, label, getter::getAsInt, v -> {
             int delta = Math.floorMod(v - getter.getAsInt(), count);
             if (delta != 0) gs().setOptionValue(option, delta);
@@ -244,6 +382,11 @@ public final class VesuOptionPages {
     private static Option.Slider vanillaSlider(GameSettings.Options option, float step, Function<Float, String> format) {
         return new Option.Slider(name(option), Storage.VANILLA, option.getValueMin(), option.getValueMax(), step, format,
                 () -> gs().getOptionFloatValue(option), v -> gs().setOptionFloatValue(option, v));
+    }
+
+    private static String chunks(float v) {
+        int n = Math.round(v);
+        return n + (n == 1 ? " chunk" : " chunks");
     }
 
     private static String gammaText(float v) {
@@ -269,15 +412,14 @@ public final class VesuOptionPages {
         return new Option.Slider(name, Storage.VESU, min, max, step, format, getter, setter);
     }
 
-    private static Option.Slider percentSlider(String name, Supplier<Float> getter, Consumer<Float> setter) {
-        return vesuSlider(name, 0.0f, 1.0f, 0.05f, v -> v <= 0.0f ? "Off" : Math.round(v * 100.0f) + "%", getter, setter);
-    }
-
     private static String presetText(String preset) {
         return switch (preset) {
+            case "potato" -> "Potato";
             case "low" -> "Low";
             case "medium" -> "Medium";
             case "high" -> "High";
+            case "ultra" -> "Ultra";
+            case "nasa" -> "NASA Supercomputer";
             case "custom" -> "Custom";
             default -> "Off";
         };

@@ -1731,7 +1731,7 @@ public class AutoTest {
                 if (step % 6 == 0) {
                     screen.selectPage(tab);
                     screen.hoverRow(0);
-                } else if (step % 6 == 4 && screen.hasOptions(tab)) {
+                } else if (step % 6 == 4) {
                     capture(mc, "video" + screen.pageName(tab).replaceAll("[^A-Za-z]", ""));
                 }
             } else if (tab == screen.pageCount()) {
