@@ -31,6 +31,9 @@ dependencies {
     // Shader pack compiler (docs/shaderpacks): pure Java, merged into the mod jar below.
     implementation project(':pack-compiler')
     vulkanBundle project(':pack-compiler')
+    // LOD core (AUDIT 5.2): pure Java plus LMDB and zstd, merged into the mod jar as well.
+    implementation project(':lod-core')
+    vulkanBundle project(':lod-core')
 
     // Vulkan bindings (pure Java, libvulkan is loaded from the system),
     // Vulkan Memory Allocator and shaderc (GLSL -> SPIR-V at runtime).
@@ -44,6 +47,8 @@ dependencies {
     runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-linux"
     runtimeOnly "org.lwjgl:lwjgl-vma:${lwjgl_version}:natives-windows"
     runtimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-linux"
+    runtimeOnly "org.lwjgl:lwjgl-zstd:${lwjgl_version}:natives-linux"
 
     // Cleanroom ships lwjgl core/sdl/opengl/stb/openal/jemalloc/freetype but NOT the
     // Vulkan extensions, so the release jar must carry them and their natives itself
@@ -53,9 +58,13 @@ dependencies {
     vulkanBundle "org.lwjgl:lwjgl-vulkan:${lwjgl_version}"
     vulkanBundle "org.lwjgl:lwjgl-vma:${lwjgl_version}"
     vulkanBundle "org.lwjgl:lwjgl-shaderc:${lwjgl_version}"
+    vulkanBundle "org.lwjgl:lwjgl-lmdb:${lwjgl_version}"
+    vulkanBundle "org.lwjgl:lwjgl-zstd:${lwjgl_version}"
     ['natives-linux', 'natives-windows', 'natives-linux-arm64'].each { nativeClassifier ->
         vulkanBundle "org.lwjgl:lwjgl-vma:${lwjgl_version}:${nativeClassifier}"
         vulkanBundle "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:${nativeClassifier}"
+        vulkanBundle "org.lwjgl:lwjgl-lmdb:${lwjgl_version}:${nativeClassifier}"
+        vulkanBundle "org.lwjgl:lwjgl-zstd:${lwjgl_version}:${nativeClassifier}"
     }
 }
 
@@ -89,10 +98,10 @@ cleanroom {
                 doFirst {
                     // The pack compiler is part of the mod: it goes to the LaunchClassLoader
                     // with the mod's own classes, never to the app classpath (it will use LWJGL).
-                    def pcJars = classpath.files.findAll { it.name ==~ /pack-compiler.*\.jar/ }
+                    def pcJars = classpath.files.findAll { it.name ==~ /(pack-compiler|lod-core).*\.jar/ }
                     if (!noMod) {
                         def vulkanJars = classpath.files.findAll {
-                            it.name ==~ /lwjgl-(vulkan|vma|shaderc).*\.jar/ && !it.name.contains('windows')
+                            it.name ==~ /lwjgl-(vulkan|vma|shaderc|lmdb|zstd).*\.jar/ && !it.name.contains('windows')
                         }
                         jvmArgs "-Dcrl.dev.extrapath=${(ownDirs + vulkanJars + pcJars).join(File.pathSeparator)}"
                     }

@@ -26,6 +26,27 @@ public abstract class RenderGlobalM {
     @Accessor("cloudTickCounter")
     abstract int vesu$getCloudTickCounter();
 
+    /** LOD terrain (AUDIT 5.15): opaque LODs after vanilla's last opaque layer, translucent ones before its translucent layer. */
+    @Inject(method = "renderBlockLayer(Lnet/minecraft/util/BlockRenderLayer;DILnet/minecraft/entity/Entity;)I",
+            at = @At("HEAD"))
+    private void vesu$lodTranslucent(net.minecraft.util.BlockRenderLayer layer, double partialTicks, int pass,
+                                     net.minecraft.entity.Entity entity,
+                                     org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> ci) {
+        if (layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT && Initializer.isVulkanActive()) {
+            net.vesu.lod.mc.LodSystem.renderTranslucent();
+        }
+    }
+
+    @Inject(method = "renderBlockLayer(Lnet/minecraft/util/BlockRenderLayer;DILnet/minecraft/entity/Entity;)I",
+            at = @At("RETURN"))
+    private void vesu$lodOpaque(net.minecraft.util.BlockRenderLayer layer, double partialTicks, int pass,
+                                net.minecraft.entity.Entity entity,
+                                org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> ci) {
+        if (layer == net.minecraft.util.BlockRenderLayer.CUTOUT && Initializer.isVulkanActive()) {
+            net.vesu.lod.mc.LodSystem.renderOpaque();
+        }
+    }
+
     @Inject(method = "renderBlockLayer(Lnet/minecraft/util/BlockRenderLayer;DILnet/minecraft/entity/Entity;)I",
             at = @At("HEAD"))
     private void vesu$beforeLayer(net.minecraft.util.BlockRenderLayer layer, double partialTicks, int pass,

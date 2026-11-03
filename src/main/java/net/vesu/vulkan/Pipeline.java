@@ -94,7 +94,7 @@ public class Pipeline {
     private static final int imagesSize = getSwapChainImages().size();
 
     /** Shared driver cache handle, so compute pipelines land in the same persisted blob. */
-    static long getPipelineCache() {
+    public static long getPipelineCache() {
         return pipelineCache;
     }
 

@@ -706,6 +706,12 @@ public class Drawer {
 
     public static int getCurrentFrame() { return currentFrame; }
 
+    /** The command buffer of the frame being recorded (LOD passes record into it). */
+    public static VkCommandBuffer currentCommandBuffer() { return commandBuffers.get(currentFrame); }
+
+    /** Another renderer bound its own graphics pipeline: forget the cached bind and reset the depth bias. */
+    public static void forgetBoundPipeline(VkCommandBuffer commandBuffer) { invalidateBoundPipeline(commandBuffer); }
+
     /** Frames that can be queued on the GPU at once (one per swapchain image). */
     public static int framesInFlight() { return Math.max(1, MAX_FRAMES_IN_FLIGHT); }
 

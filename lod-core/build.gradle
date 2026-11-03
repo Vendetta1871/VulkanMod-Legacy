@@ -1,0 +1,36 @@
+plugins {
+    id 'java-library'
+}
+
+// LOD core (AUDIT 5.2): the voxel format, section store, storage, mesher and the
+// version-independent logic. No Minecraft, Forge or Vulkan classes; LWJGL only for
+// LMDB and zstd. Merged into the mod jar like pack-compiler.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api platform("org.lwjgl:lwjgl-bom:${lwjgl_version}")
+    // Cleanroom ships LWJGL core at runtime; lmdb and zstd travel with the mod.
+    compileOnly "org.lwjgl:lwjgl"
+    api "org.lwjgl:lwjgl-lmdb"
+    api "org.lwjgl:lwjgl-zstd"
+
+    testImplementation "org.lwjgl:lwjgl"
+    testRuntimeOnly "org.lwjgl:lwjgl::natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb::natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd::natives-linux"
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}

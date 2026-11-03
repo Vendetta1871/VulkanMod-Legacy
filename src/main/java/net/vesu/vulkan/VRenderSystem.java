@@ -93,6 +93,26 @@ public class VRenderSystem {
      */
     public static boolean reverseZ = true;
 
+    /**
+     * With LODs drawing, the far plane of every perspective projection moves out to the LOD
+     * distance (AUDIT 5.15); 0 keeps vanilla's. Reverse-Z only.
+     */
+    public static float lodFarPlane;
+
+    /**
+     * LOD fog (AUDIT 5.15): vanilla's terrain fog ({@code start = 0.75 far, end = far} with
+     * far = {@link #fogScaleFrom}) is stretched by {@link #fogScale}, so the edge of the vanilla
+     * terrain stays clear and the LODs behind it carry the fog. Sky and special fogs keep theirs.
+     */
+    public static float fogScale = 1.0f, fogScaleFrom;
+
+    private static float scaledFog(float v) {
+        if (fogScale == 1.0f || !reverseZ) return v;
+        float far = fogScaleFrom;
+        boolean terrainFog = Math.abs(fogEnd - far) <= far * 0.01f && Math.abs(fogStart - far * 0.75f) <= far * 0.01f;
+        return terrainFog ? v * fogScale : v;
+    }
+
     /** The Vulkan clear value for the GL clear depth {@link #clearDepth}. */
     public static float depthClearValue() {
         return reverseZ ? 1.0f - clearDepth : clearDepth;
@@ -306,6 +326,7 @@ public class VRenderSystem {
             // planes: z' = (n z + f n) / (f - n), so z'/w is 1 at -n and 0 at -f.
             double m22 = gl.m22(), m32 = gl.m32();
             double n = m32 / (m22 - 1.0), f = m32 / (m22 + 1.0);
+            if (lodFarPlane > f) f = lodFarPlane;
             if (!(f > n) || Double.isInfinite(f)) {
                 dest.m22(0.0f).m32((float) n);
             } else {
@@ -625,11 +646,11 @@ public class VRenderSystem {
 
     public static void setFogStart(float v) { fogStart = v; }
     public static float getFogStart() { return fogStart; }
-    public static float getShaderFogStart() { return fogStart; }
+    public static float getShaderFogStart() { return scaledFog(fogStart); }
 
     public static void setFogEnd(float v) { fogEnd = v; }
     public static float getFogEnd() { return fogEnd; }
-    public static float getShaderFogEnd() { return fogEnd; }
+    public static float getShaderFogEnd() { return scaledFog(fogEnd); }
 
     public static void setFogDensity(float v) { fogDensity = v; }
     public static float getFogDensity() { return fogDensity; }

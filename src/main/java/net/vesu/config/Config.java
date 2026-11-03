@@ -77,6 +77,34 @@ public class Config {
     public String rtPreset = "off";
     /** Per effect: within this many chunks of the camera (0 = off); farther stays raster. */
     public int rtShadowDistance = 6, rtIndirectDistance = 3, rtReflectionDistance = 4;
+
+    // --- LOD terrain (AUDIT 5.18) ---
+    /** Far terrain past the render distance. Off: no LOD thread, buffer or pipeline exists. */
+    public boolean lodEnabled = true;
+    /** Draw LODs (ingest and storage keep running when false). */
+    public boolean lodRendering = true;
+    /** Take terrain from received chunks into the LOD store. */
+    public boolean lodIngest = true;
+    /** In chunks, a multiple of 32 (one top-level node). */
+    public int lodDistance = 512;
+    public static final int LOD_DISTANCE_MIN = 32, LOD_DISTANCE_MAX = 2048;
+    /** Subdivision threshold in pixels: Low 128, Medium 64, High 40; anything 28..256 is custom. */
+    public int lodQuality = 64;
+    public static final int LOD_QUALITY_MIN = 28, LOD_QUALITY_MAX = 256;
+    /** Singleplayer pre-generation radius in chunks, 0 = off (AUDIT 5.7). */
+    public int lodGenerationDistance = 0;
+    /** Worker threads; 0 = max(cores / 1.5, 1). */
+    public int lodThreads = 0;
+    /** fog+fade | fog | fade | off. */
+    public String lodFog = "fog+fade";
+    /** auto | basic | better | best (AUDIT 5.15). */
+    public String lodSsao = "auto";
+    /** Top-level sections past the vanilla distance whose LODs enter the RT scene. */
+    public int lodRtRing = 2;
+    /** Levels 3..4 in the shader pack's shadow pass. */
+    public boolean lodPackShadows = false;
+    /** CPU mesh cache in MiB. */
+    public int lodMeshCacheMb = 512;
     /** Older settings, read once and migrated to the preset and distances. */
     public Integer rtDistance;
     public Boolean rayTracing;

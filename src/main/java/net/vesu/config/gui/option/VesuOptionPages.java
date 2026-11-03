@@ -159,11 +159,29 @@ public final class VesuOptionPages {
                                         + "a server decides this for itself.")
                                 .impact(Impact.MEDIUM)),
                 List.of(
-                        placeholder("LOD Distance", "64 chunks",
-                                "Simplified terrain drawn beyond the render distance, out to this many chunks."),
-                        placeholder("LOD Quality", "Medium",
-                                "How quickly the simplified terrain loses detail with distance: Low, Medium or High."),
-                        placeholder("LOD Generation Distance", "32 chunks",
+                        new Option.Toggle("Distant Terrain", Storage.VESU, () -> cfg().lodEnabled, v -> cfg().lodEnabled = v)
+                                .tooltip("Simplified terrain beyond the render distance, built from the chunks you have seen and "
+                                        + "kept per world. Off: nothing of it runs.")
+                                .impact(Impact.MEDIUM)
+                                .onChange(net.vesu.lod.mc.LodSystem::applySettings),
+                        vesuSlider("LOD Distance", Config.LOD_DISTANCE_MIN, Config.LOD_DISTANCE_MAX, 32.0f,
+                                VesuOptionPages::chunks, () -> (float) cfg().lodDistance, v -> cfg().lodDistance = Math.round(v / 32.0f) * 32)
+                                .tooltip("Simplified terrain is drawn out to this many chunks.")
+                                .impact(Impact.MEDIUM),
+                        new Option.Cycle<>("LOD Quality", Storage.VESU, new Integer[]{128, 64, 40},
+                                q -> q == 128 ? "Low" : q == 64 ? "Medium" : q == 40 ? "High" : q + " px",
+                                () -> cfg().lodQuality, v -> cfg().lodQuality = v)
+                                .tooltip("How large a piece of distant terrain may look on screen before it is split into finer detail.")
+                                .impact(Impact.MEDIUM),
+                        new Option.Cycle<>("LOD Fog", Storage.VESU, new String[]{"fog+fade", "fog", "fade", "off"},
+                                f -> switch (f) {
+                                    case "fog+fade" -> "Fog and Fade";
+                                    case "fog" -> "Fog";
+                                    case "fade" -> "Fade";
+                                    default -> "Off";
+                                }, () -> cfg().lodFog, v -> cfg().lodFog = v)
+                                .tooltip("Fog follows the LOD distance instead of the render distance; the fade blends the outer edge into the sky."),
+                        placeholder("LOD Generation Distance", "Off",
                                 "How far around you the world is generated in advance to build the simplified terrain."))));
     }
 

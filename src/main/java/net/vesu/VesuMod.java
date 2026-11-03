@@ -31,6 +31,7 @@ public class VesuMod {
         LOGGER.info("== Vesu {} on Cleanroom ==", VERSION);
         // RT material atlas follows the block atlas across resource reloads.
         MinecraftForge.EVENT_BUS.register(net.vesu.vulkan.rt.RtMaterials.class);
+        net.vesu.lod.mc.LodSystem.init();
 
         if (AutoTest.ENABLED) {
             MinecraftForge.EVENT_BUS.register(AutoTest.class);

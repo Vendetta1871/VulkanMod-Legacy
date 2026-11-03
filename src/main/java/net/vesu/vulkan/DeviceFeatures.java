@@ -27,6 +27,8 @@ public final class DeviceFeatures {
     // Core 1.0
     public boolean samplerAnisotropy, wideLines, multiDrawIndirect, logicOp;
     public boolean independentBlend, shaderInt64, fragmentStoresAndAtomics, depthClamp;
+    /** LOD draws carry their section in firstInstance; vkCmdDrawIndirectCount (core 1.2) for the GPU path. */
+    public boolean drawIndirectFirstInstance, drawIndirectCount;
     public boolean storageImageReadWithoutFormat, storageImageWriteWithoutFormat;
     public boolean geometryShader, tessellationShader;
 
@@ -132,6 +134,7 @@ public final class DeviceFeatures {
         e.samplerAnisotropy(samplerAnisotropy = f.samplerAnisotropy());
         e.wideLines(wideLines = f.wideLines());
         e.multiDrawIndirect(multiDrawIndirect = f.multiDrawIndirect());
+        e.drawIndirectFirstInstance(drawIndirectFirstInstance = f.drawIndirectFirstInstance());
         e.logicOp(logicOp = f.logicOp());
         e.independentBlend(independentBlend = f.independentBlend());
         e.depthClamp(depthClamp = f.depthClamp());
@@ -166,6 +169,7 @@ public final class DeviceFeatures {
             en12.scalarBlockLayout(scalarBlockLayout = sup12.scalarBlockLayout());
             en12.hostQueryReset(hostQueryReset = sup12.hostQueryReset());
             en12.shaderFloat16(sup12.shaderFloat16());
+            en12.drawIndirectCount(drawIndirectCount = sup12.drawIndirectCount());
 
             descriptorIndexing = sup12.descriptorIndexing()
                     && sup12.descriptorBindingPartiallyBound()

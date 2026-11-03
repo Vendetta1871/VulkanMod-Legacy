@@ -2500,6 +2500,10 @@ public class AutoTest {
             if (Initializer.isVulkanActive()) {
                 net.vesu.vulkan.Vulkan.setVsync(false);
             }
+            // Scene runs keep options.txt's render distance unless asked (LOD comparisons).
+            if (Env.get("VESU_AUTOTEST_RENDER") != null) {
+                mc.gameSettings.renderDistanceChunks = envInt("VESU_AUTOTEST_RENDER", 8);
+            }
             String size = Env.get("VESU_AUTOTEST_SIZE");
             if (size != null) {
                 String[] wh = size.trim().split("\\s+");
