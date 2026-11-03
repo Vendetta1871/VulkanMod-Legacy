@@ -146,7 +146,7 @@ public final class FrameTargets {
     /** Recreates the targets at the current extent (settings changed their usage); waits for idle. */
     public static void recreateIfCreated() {
         if (display.width() <= 0) return;
-        vkDeviceWaitIdle(Vulkan.getDevice());
+        Vulkan.waitIdle();
         resize(display.width(), display.height());
     }
 

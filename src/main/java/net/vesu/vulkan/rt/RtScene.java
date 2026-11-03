@@ -128,7 +128,7 @@ public final class RtScene {
 
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
         if (!want) {
-            vkDeviceWaitIdle(Vulkan.getDevice());
+            Vulkan.waitIdle();
             net.vesu.vulkan.FrameTargets.releaseRtPasses();
             destroy();
             enabled = false;

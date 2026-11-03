@@ -218,7 +218,8 @@ public final class FrameGeneration {
         hudless = new StorageImage[0];
     }
 
-    private static void waitForPresents() {
+    /** Blocks until the swapchain's queued presents went out; a no-op without it. */
+    static void waitForPresents() {
         if (!swapContextValid) return;
         ByteBuffer d = memCalloc(16);
         try {
@@ -320,6 +321,8 @@ public final class FrameGeneration {
 
     private static boolean ensureContext() {
         if (contextValid && contextGeneration == FrameTargets.generation()) return true;
+        // ffx's backend waits for the device to idle while creating and destroying contexts.
+        waitForPresents();
         releaseContext();
         if (callbackStub == null) callbackStub = createCallback();
         if (pContext == NULL) pContext = nmemCalloc(1, 8);

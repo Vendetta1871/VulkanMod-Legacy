@@ -83,6 +83,7 @@ public final class QueueSetup {
         try (MemoryStack stack = stackPush()) {
             PointerBuffer p = stack.mallocPointer(1);
 
+            int graphicsCount = counts.get(graphicsFamily);
             vkGetDeviceQueue(device, graphicsFamily, 0, p);
             graphics = new VkQueue(p.get(0), device);
 
@@ -101,12 +102,20 @@ public final class QueueSetup {
                 asyncCompute = graphics;
             }
 
-            int extra = counts.get(graphicsFamily) - 1;
+            // Highest index first: auxGraphics[0] (the frame interpolation swapchain's present
+            // queue) is the family's last queue. Overlay layers (MangoHud) draw on the last
+            // graphics queue of the device from the thread that presents; that must be the
+            // swapchain's present thread on its own queue. With the acquire queue last, the
+            // overlay submitted to it from the present thread while the render thread
+            // signalled acquires there: an unsynchronized queue that faulted the GPU
+            // (Xid 13/31/32 on the V100, validation THREADING ERROR).
+            int extra = graphicsCount - 1;
             auxGraphics = new VkQueue[extra];
             for (int i = 0; i < extra; i++) {
-                vkGetDeviceQueue(device, graphicsFamily, i + 1, p);
+                vkGetDeviceQueue(device, graphicsFamily, graphicsCount - 1 - i, p);
                 auxGraphics[i] = new VkQueue(p.get(0), device);
             }
+            Vulkan.debugName(VK_OBJECT_TYPE_QUEUE, graphics.address(), "Vesu game queue");
         }
     }
 

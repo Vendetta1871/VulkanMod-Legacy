@@ -932,7 +932,7 @@ public class Drawer {
     /** @return true when the swapchain was replaced. */
     private boolean recreateSwapChain() {
         flushPreFrameTransfers();
-        vkDeviceWaitIdle(device);
+        Vulkan.waitIdle();
         shouldRecreate = false;
 
         if(!Vulkan.recreateSwapChain()) {

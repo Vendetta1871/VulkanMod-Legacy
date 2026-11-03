@@ -62,7 +62,7 @@ C++ standard library.
 | 0004 context-size, queued frames | 4-byte `wchar_t` in context size math; `FFX_MAX_QUEUED_FRAMES` 4 -> 8 (views live that many `UnregisterResources` calls, and the mod runs two dispatches per frame with up to three frames in flight) |
 | 0005 ffx-message | missing include for `FFX_UNUSED` |
 | 0006 vk-backend-portability | `windows.h`/wide-string APIs; scratch sub-arrays aligned to 32 bytes (GCC emits aligned SSE stores into them, the SDK aligned to 4) |
-| 0007 vk-swapchain-portability | `CreateThread`/events/`WaitForSingleObject`/QPC in the FG swapchain; SDK bug: the per-image present semaphores overwrote the ones created just before (3 leaked per swapchain creation) |
+| 0007 vk-swapchain-portability | `CreateThread`/events/`WaitForSingleObject`/QPC in the FG swapchain; SDK bugs: the per-image present semaphores overwrote the ones created just before (3 leaked per swapchain creation); destroying the swapchain waited its queues idle while the presenter thread could still present (now: drain, stop the thread, then wait) |
 | 0008 luma-history-format | SDK bug: `rw_luma_history` declared `rgba8` but the image is RGBA16F |
 
 Known SDK quirk handled on the mod side: the auto-reactive output is declared

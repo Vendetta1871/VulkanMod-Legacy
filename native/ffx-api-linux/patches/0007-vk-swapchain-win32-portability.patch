@@ -85,7 +85,26 @@
          res = createSemaphoreFormat(presentInfo.frameRenderedSemaphores[i], "AMD swapchain image semaphore %d", i);
          EXIT_ON_VKRESULT_NOT_SUCCESS(res);
      }
-@@ -2823,7 +2831,8 @@
+@@ -1718,9 +1726,16 @@
+ 
+ void FrameInterpolationSwapChainVK::destroySwapchain(VkDevice device, const VkAllocationCallbacks* pAllocator)
+ {
+-    // Wait for all operations to be finished
+-    waitForPresents();
++    // Vesu port: the presents are drained through their semaphores, the presenter thread is
++    // stopped, and only then are the queues waited idle (waitForPresents). The queue waits
++    // ran while that thread could still be presenting on the present queue, which needs
++    // external synchronization.
++    waitForSemaphoreValue(presentInfo.device, presentInfo.gameSemaphore, gameSemaphoreValue, UINT64_MAX, presentInfo.waitCallback);
++    waitForSemaphoreValue(presentInfo.device, presentInfo.interpolationSemaphore, interpolationSemaphoreValue, UINT64_MAX, presentInfo.waitCallback);
++    if (framesSentForPresentation > 0)
++        waitForSemaphoreValue(presentInfo.device, presentInfo.presentSemaphore, framesSentForPresentation, UINT64_MAX, presentInfo.waitCallback);
+     killPresenterThread();
++    waitForPresents();
+ 
+     FFX_ASSERT_MESSAGE(device == presentInfo.device, "Attempting to destroy Frame interpolation swapchain with another device");
+ 
+@@ -2823,7 +2838,8 @@
          // if no frame was presented, we still need to update the semaphore
          if (toWait.count > 0)
          {

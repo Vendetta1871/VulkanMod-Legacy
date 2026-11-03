@@ -132,13 +132,13 @@ public final class PackRuntime {
         PackRuntime wanted = runtimes.get(variant);
         if (wanted == null) {
             // Dimensions are built on first entry: a pack can have three full program sets.
-            vkDeviceWaitIdle(Vulkan.getDevice());
+            Vulkan.waitIdle();
             wanted = buildVariant(pack, variant);
             if (wanted == null) return null;
         }
         if (wanted != current) {
             if (current != null) {
-                vkDeviceWaitIdle(Vulkan.getDevice());
+                Vulkan.waitIdle();
                 current.destroyImages();
             }
             current = wanted;
@@ -217,7 +217,7 @@ public final class PackRuntime {
 
     private static void rebuild(IrPack pack) {
         if (!runtimes.isEmpty()) {
-            vkDeviceWaitIdle(Vulkan.getDevice());
+            Vulkan.waitIdle();
             destroyRuntimes();
         }
         builtFor = pack;

@@ -127,6 +127,8 @@ final class NrdDenoiser {
                     // Frames in flight plus one: NRD's constants must outlive every queued frame.
                     .putInt(60, frames)
                     .putInt(64, 3);
+            // NRI waits for the device to idle here; no other thread may use a queue meanwhile.
+            FrameGeneration.waitForPresents();
             int rc = JNI.callPI(MemoryUtil.memAddress(desc), fnCreate);
             if (rc != 0) {
                 failed = true;
@@ -191,7 +193,10 @@ final class NrdDenoiser {
 
     /** The device must be idle (or NRD waits for it: autoWaitForIdle). */
     static void destroy() {
-        if (library != null && width > 0) JNI.callV(fnDestroy);
+        if (library != null && width > 0) {
+            FrameGeneration.waitForPresents();
+            JNI.callV(fnDestroy);
+        }
         width = height = 0;
     }
 }

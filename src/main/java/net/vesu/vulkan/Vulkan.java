@@ -89,9 +89,37 @@ public class Vulkan {
 
 //        System.err.println("Stack dump:");
 //        Thread.dumpStack();
-        System.err.println("Validation layer: " + callbackData.pMessageString());
+        StringBuilder objects = new StringBuilder();
+        // Threading errors name no object in the message: list them, with their debug names.
+        if (callbackData.pMessageString().contains("THREADING")) {
+            VkDebugUtilsObjectNameInfoEXT.Buffer list = callbackData.pObjects();
+            for (int i = 0; list != null && i < list.capacity(); i++) {
+                VkDebugUtilsObjectNameInfoEXT o = list.get(i);
+                objects.append(" [object 0x").append(Long.toHexString(o.objectHandle()))
+                        .append(o.pObjectName() != null ? " " + o.pObjectNameString() : "").append("]");
+            }
+        }
+        System.err.println("Validation layer: " + callbackData.pMessageString() + objects);
 
         return VK_FALSE;
+    }
+
+    /**
+     * vkDeviceWaitIdle needs every queue left alone meanwhile; the frame interpolation
+     * swapchain's present thread submits on its own, so its presents are drained first.
+     */
+    public static void waitIdle() {
+        FrameGeneration.waitForPresents();
+        vkDeviceWaitIdle(device);
+    }
+
+    /** Debug name for a Vulkan object, under VESU_VALIDATION only (debug utils is enabled there). */
+    static void debugName(int objectType, long handle, String name) {
+        if (!ENABLE_VALIDATION_LAYERS || device == null) return;
+        try (MemoryStack stack = stackPush()) {
+            org.lwjgl.vulkan.EXTDebugUtils.vkSetDebugUtilsObjectNameEXT(device, VkDebugUtilsObjectNameInfoEXT.calloc(stack)
+                    .sType$Default().objectType(objectType).objectHandle(handle).pObjectName(stack.UTF8(name)));
+        }
     }
 
     private static int createDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerCreateInfoEXT createInfo,
@@ -338,7 +366,7 @@ public class Vulkan {
             return;
         }
 
-        vkDeviceWaitIdle(device);
+        waitIdle();
 
         // M20: init can stop anywhere between createLogicalDevice and createFramebuffers.
         // Pipeline, Drawer and MemoryManager read getSwapChainImages() in their static
