@@ -391,17 +391,9 @@ public final class FrameUniforms {
         shadowProjectionRemapped.m32(0.5f * shadowProjection.m32() + 0.5f * shadowProjection.m33());
     }
 
-    /**
-     * Inverse of VRenderSystem.DEPTH_REMAP (z' = 0.5 z + 0.5 w): the GL depth row is
-     * 2 * row2 - row3 of the remapped matrix.
-     */
+    /** Inverse of the host's depth remap (VRenderSystem.remapDepth). */
     static Matrix4f undoDepthRemap(Matrix4f remapped, Matrix4f dest) {
-        dest.set(remapped);
-        dest.m02(2.0f * remapped.m02() - remapped.m03());
-        dest.m12(2.0f * remapped.m12() - remapped.m13());
-        dest.m22(2.0f * remapped.m22() - remapped.m23());
-        dest.m32(2.0f * remapped.m32() - remapped.m33());
-        return dest;
+        return net.vesu.vulkan.VRenderSystem.undoDepthRemap(remapped, dest);
     }
 
     /** Exponential approach to {@code target} with the given half-life in seconds. */

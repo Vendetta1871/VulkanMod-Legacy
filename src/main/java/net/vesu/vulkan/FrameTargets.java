@@ -101,6 +101,9 @@ public final class FrameTargets {
         return pack != null && packSpaceFrame && phase == Phase.SCENE;
     }
 
+    /** VESU_FORWARD_Z=1: forward depth everywhere, for A/B comparisons of the reverse-Z path. */
+    private static final boolean FORWARD_Z = net.vesu.Env.get("VESU_FORWARD_Z") != null;
+
     /** True once the world's depth must survive a depth clear (the one vanilla issues for the hand). */
     static boolean keepsDepth() {
         return pack != null && packSpaceFrame && phase == Phase.SCENE && translucentEntered;
@@ -475,6 +478,8 @@ public final class FrameTargets {
         recording++;
         GpuTimer.beginFrame(cmd);
         pack = PackRuntime.forFrame();
+        // Packs keep forward depth until their programs are rewritten for reverse-Z (AUDIT 5.16).
+        VRenderSystem.reverseZ = pack == null && !FORWARD_Z;
         net.vesu.render.ChunkBatcher.requestVertexFlags(pack != null ? pack.vertexFlags() : 0);
         int wantedFormat = pack != null && pack.hdrScene() ? HDR_SCENE_FORMAT : COLOR_FORMAT;
         if (wantedFormat != sceneFormat) {
@@ -693,7 +698,7 @@ public final class FrameTargets {
                 .imageLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .loadOp(depthLoadOp)
                 .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
-        depth.clearValue().depthStencil().set(1.0f, 0);
+        depth.clearValue().depthStencil().set(VRenderSystem.farDepth(), 0);
 
         // Stencil is never attached: pipelines declare stencilAttachmentFormat UNDEFINED.
         VkRenderingInfo info = VkRenderingInfo.calloc(stack).sType$Default()

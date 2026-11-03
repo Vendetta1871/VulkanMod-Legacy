@@ -26,6 +26,8 @@ final class Fsr3Upscaler {
     private static long pContext;
     private static boolean contextValid;
     private static int contextGeneration = -1;
+    /** The depth direction the context was created for (VRenderSystem.reverseZ). */
+    private static boolean contextReverseZ;
     private static boolean failed;
     private static boolean resetNext = true;
     private static long lastDispatchNanos;
@@ -62,7 +64,8 @@ final class Fsr3Upscaler {
     }
 
     private static boolean ensureContext() {
-        if (contextValid && contextGeneration == FrameTargets.generation()) return true;
+        if (contextValid && contextGeneration == FrameTargets.generation()
+                && contextReverseZ == VRenderSystem.reverseZ) return true;
         // Resize waits for the device to idle before bumping the generation.
         releaseContext();
 
@@ -78,8 +81,9 @@ final class Fsr3Upscaler {
                     vkGetInstanceProcAddr(device.getPhysicalDevice().getInstance(), "vkGetDeviceProcAddr"));
 
             header(create, 0, CREATE_CONTEXT_DESC_TYPE_UPSCALE, memAddress(backend));
-            // LDR, perceptual (gamma) color; depth is standard [0..1] with a finite far plane.
-            create.putInt(CREATE_UPSCALE_FLAGS, UPSCALE_ENABLE_NON_LINEAR_COLORSPACE);
+            // LDR, perceptual (gamma) color; depth has a finite far plane, reversed unless a pack runs.
+            create.putInt(CREATE_UPSCALE_FLAGS, UPSCALE_ENABLE_NON_LINEAR_COLORSPACE
+                    | (VRenderSystem.reverseZ ? UPSCALE_ENABLE_DEPTH_INVERTED : 0));
             create.putInt(CREATE_UPSCALE_MAX_RENDER, FrameTargets.scene.width());
             create.putInt(CREATE_UPSCALE_MAX_RENDER + 4, FrameTargets.scene.height());
             create.putInt(CREATE_UPSCALE_MAX_UPSCALE, FrameTargets.display.width());
@@ -99,6 +103,7 @@ final class Fsr3Upscaler {
 
         contextValid = true;
         contextGeneration = FrameTargets.generation();
+        contextReverseZ = VRenderSystem.reverseZ;
         resetNext = true;
         if (dispatchDesc == null) dispatchDesc = memCalloc(DISPATCH_UPSCALE_SIZE);
         if (reactiveDesc == null) reactiveDesc = memCalloc(DISPATCH_REACTIVE_SIZE);

@@ -304,7 +304,8 @@ void main() {
     ivec2 p = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
     float d = texelFetch(sceneDepth, p, 0).r;
-    if (d >= 0.99999) {   // sky, clouds past the far plane
+    float farD = farPlaneDepth(pc.invViewProj);
+    if (isSkyDepth(d, farD)) {   // sky, clouds past the far plane
         imageStore(aux, p, vec4(1.0, 0.0, 0.0, -1.0));
         imageStore(aux2, p, vec4(1.0, 1.0, 1.0, 0.0));
         if (pc.restir.y <= 0.0) imageStore(historyCur, p, vec4(0.0));
@@ -342,7 +343,7 @@ void main() {
         return;
     }
     vec3 n = c * inversesqrt(len2);
-    vec3 eye = unproject(p, 0.0, vec2(size));
+    vec3 eye = unproject(p, 1.0 - farD, vec2(size));   // the near plane
     vec3 view = pos - eye;
     if (dot(n, view) > 0.0) n = -n;
     float dist = length(view);

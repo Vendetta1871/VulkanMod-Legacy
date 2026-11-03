@@ -1865,15 +1865,17 @@ public class Pipeline {
             return glToVulkan(value);
         }
 
+        /** GL compare op to Vulkan; reverse-Z mirrors the ordered ones (VRenderSystem.reverseZ). */
         private static int glToVulkan(int value) {
+            boolean r = VRenderSystem.reverseZ;
             return switch (value) {
                 case 512 -> VK_COMPARE_OP_NEVER;
-                case 513 -> VK_COMPARE_OP_LESS;
+                case 513 -> r ? VK_COMPARE_OP_GREATER : VK_COMPARE_OP_LESS;
                 case 514 -> VK_COMPARE_OP_EQUAL;
-                case 515 -> VK_COMPARE_OP_LESS_OR_EQUAL;
-                case 516 -> VK_COMPARE_OP_GREATER;
+                case 515 -> r ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
+                case 516 -> r ? VK_COMPARE_OP_LESS : VK_COMPARE_OP_GREATER;
                 case 517 -> VK_COMPARE_OP_NOT_EQUAL;
-                case 518 -> VK_COMPARE_OP_GREATER_OR_EQUAL;
+                case 518 -> r ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_GREATER_OR_EQUAL;
                 case 519 -> VK_COMPARE_OP_ALWAYS;
                 default -> throw new RuntimeException("unknown depth function: " + value);
             };

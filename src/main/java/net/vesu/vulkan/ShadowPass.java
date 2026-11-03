@@ -325,7 +325,7 @@ public final class ShadowPass {
     /** The pipeline state of shadow draws, whatever the main pass set. */
     long stateKey(int topology) {
         return Pipeline.packStateKey(translucent ? Pipeline.DEFAULT_BLEND_STATE : Pipeline.NO_BLEND_STATE, true, true,
-                Pipeline.DepthState.depthFuncToVulkan(515), Pipeline.DEFAULT_LOGICOP_STATE,
+                VK_COMPARE_OP_LESS_OR_EQUAL /* the shadow map keeps forward depth */, Pipeline.DEFAULT_LOGICOP_STATE,
                 Pipeline.DEFAULT_COLORMASK.colorMask, false, topology, true, false) | mrtBits;
     }
 

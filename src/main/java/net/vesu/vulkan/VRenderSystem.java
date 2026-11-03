@@ -82,6 +82,26 @@ public class VRenderSystem {
     public static int logicOpMode = 0x1503; // GL_COPY, the GL default
 
     public static float clearDepth = 1.0f;
+
+    /**
+     * Reverse-Z (AUDIT 5, L1): the depth buffer holds 1 at the near plane and 0 at the far
+     * plane, which keeps float depth precise out to the LOD distance. Every GL-facing value
+     * stays forward: projections are remapped here, compare ops are mirrored in
+     * Pipeline.DepthState, clear values and depth bias are mirrored where they are applied.
+     * Chosen once per frame (FrameTargets.beginFrame): shader packs still keep forward depth
+     * until their programs are rewritten for it (AUDIT 5.16).
+     */
+    public static boolean reverseZ = true;
+
+    /** The Vulkan clear value for the GL clear depth {@link #clearDepth}. */
+    public static float depthClearValue() {
+        return reverseZ ? 1.0f - clearDepth : clearDepth;
+    }
+
+    /** The Vulkan depth of the far plane: what a cleared, empty pixel holds. */
+    public static float farDepth() {
+        return reverseZ ? 0.0f : 1.0f;
+    }
     private static final float[] SECTION_MV = new float[16], SECTION_MVP = new float[16];
     public static FloatBuffer clearColor = MemoryUtil.memAllocFloat(4);
 
@@ -258,29 +278,65 @@ public class VRenderSystem {
     private static final org.joml.Matrix4f SCRATCH_T1 = new org.joml.Matrix4f();
     private static final org.joml.Matrix4f SCRATCH_T2 = new org.joml.Matrix4f();
 
-    // GL projections map depth to [-1, 1]; Vulkan's clip volume is [0, w].
-    // Remap z' = 0.5z + 0.5w before multiplying (also fixes near-plane clipping).
-    // NOTE: joml's ctor takes column-major args (m00, m01, m02, m03, m10, ...),
-    // so the 0.5 that adds w into z belongs in column 3, not column 2.
-    private static final org.joml.Matrix4f DEPTH_REMAP = new org.joml.Matrix4f(
-            1, 0, 0, 0,
-            0, 1, 0, 0,
-            0, 0, 0.5f, 0f,
-            0, 0, 0.5f, 1f);
+    /** The scene-phase jitter translation in clip space (B7), applied after the depth remap. */
+    private static final org.joml.Matrix4f JITTER = new org.joml.Matrix4f();
 
-    /** DEPTH_REMAP plus the scene-phase jitter translation (B7). */
-    private static final org.joml.Matrix4f CLIP_REMAP = new org.joml.Matrix4f(DEPTH_REMAP);
+    private static org.joml.Matrix4f jitter() {
+        net.vesu.render.CameraHistory.applyJitter(JITTER);
+        return JITTER;
+    }
 
-    private static org.joml.Matrix4f clipRemap() {
-        net.vesu.render.CameraHistory.applyJitter(CLIP_REMAP);
-        return CLIP_REMAP;
+    /**
+     * GL projections map depth to [-1, 1]; Vulkan's clip volume is [0, w]. Forward depth:
+     * {@code z' = 0.5 z + 0.5 w}. Reverse-Z: {@code z' = 0.5 w - 0.5 z}, except that a
+     * perspective depth row is rebuilt from its near and far planes: the GL row keeps
+     * {@code (f + n) / (f - n)} in float, and subtracting w from it would cancel the very
+     * digits reverse-Z needs.
+     */
+    public static org.joml.Matrix4f remapDepth(org.joml.Matrix4f gl, org.joml.Matrix4f dest) {
+        dest.set(gl);
+        if (!reverseZ) {
+            dest.m02(0.5f * gl.m02() + 0.5f * gl.m03());
+            dest.m12(0.5f * gl.m12() + 0.5f * gl.m13());
+            dest.m22(0.5f * gl.m22() + 0.5f * gl.m23());
+            dest.m32(0.5f * gl.m32() + 0.5f * gl.m33());
+        } else if (gl.m02() == 0.0f && gl.m12() == 0.0f && gl.m03() == 0.0f && gl.m13() == 0.0f
+                && gl.m23() == -1.0f && gl.m33() == 0.0f) {
+            // GL perspective: m22 = -(f+n)/(f-n), m32 = -2fn/(f-n). Reverse-Z with the same
+            // planes: z' = (n z + f n) / (f - n), so z'/w is 1 at -n and 0 at -f.
+            double m22 = gl.m22(), m32 = gl.m32();
+            double n = m32 / (m22 - 1.0), f = m32 / (m22 + 1.0);
+            if (!(f > n) || Double.isInfinite(f)) {
+                dest.m22(0.0f).m32((float) n);
+            } else {
+                dest.m22((float) (n / (f - n))).m32((float) (f * n / (f - n)));
+            }
+        } else {
+            dest.m02(0.5f * gl.m03() - 0.5f * gl.m02());
+            dest.m12(0.5f * gl.m13() - 0.5f * gl.m12());
+            dest.m22(0.5f * gl.m23() - 0.5f * gl.m22());
+            dest.m32(0.5f * gl.m33() - 0.5f * gl.m32());
+        }
+        return dest;
+    }
+
+    /** Inverse of {@link #remapDepth}: the GL depth row of a remapped projection. */
+    public static org.joml.Matrix4f undoDepthRemap(org.joml.Matrix4f remapped, org.joml.Matrix4f dest) {
+        // Forward: z = 2 z' - w. Reverse: z = w - 2 z'.
+        float s = reverseZ ? -2.0f : 2.0f, t = reverseZ ? -1.0f : 1.0f;
+        dest.set(remapped);
+        dest.m02(s * remapped.m02() - t * remapped.m03());
+        dest.m12(s * remapped.m12() - t * remapped.m13());
+        dest.m22(s * remapped.m22() - t * remapped.m23());
+        dest.m32(s * remapped.m32() - t * remapped.m33());
+        return dest;
     }
 
     public static void calculateMVP() {
         SCRATCH_MV.set(modelViewMatrixF.position(0).limit(16));
         SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
 
-        clipRemap().mul(SCRATCH_P, SCRATCH_T1).mul(SCRATCH_MV, SCRATCH_T2);
+        jitter().mul(remapDepth(SCRATCH_P, SCRATCH_T1), SCRATCH_T1).mul(SCRATCH_MV, SCRATCH_T2);
 
         MVP.position(0);
         SCRATCH_T2.get(MVP);
@@ -297,9 +353,9 @@ public class VRenderSystem {
         outModelView.set(modelViewMatrixF.position(0).limit(16));
         SCRATCH_P.set(projectionMatrixF.position(0).limit(16));
         // History keeps the unjittered camera; draws get the jittered one.
-        DEPTH_REMAP.mul(SCRATCH_P, SCRATCH_T1);
+        remapDepth(SCRATCH_P, SCRATCH_T1);
         net.vesu.render.CameraHistory.captureMain(outModelView, SCRATCH_T1, SCRATCH_P);
-        clipRemap().mul(SCRATCH_P, outProjRemap);
+        jitter().mul(SCRATCH_T1, outProjRemap);
     }
 
     /**
@@ -709,7 +765,9 @@ public class VRenderSystem {
     public static void enablePolygonOffset() {
         // GL: offset = units*r + factor*m; Vulkan: offset = constantFactor + slopeFactor*m,
         // so GL units map to the constant factor and GL factor to the slope factor.
-        Drawer.setDepthBias(depthBias[1], depthBias[0]);
+        // Reverse-Z mirrors depth, so a bias towards the camera changes sign.
+        float sign = reverseZ ? -1.0f : 1.0f;
+        Drawer.setDepthBias(sign * depthBias[1], sign * depthBias[0]);
     }
 
     public static void disablePolygonOffset() {

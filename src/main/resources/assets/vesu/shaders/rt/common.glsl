@@ -68,3 +68,18 @@ vec2 interpolateUv(ChunkVertex a, ChunkVertex b, ChunkVertex c, vec2 bary) {
     return a.uv * (1.0 - bary.x - bary.y) + b.uv * bary.x + c.uv * bary.y;
 }
 #endif // RT_HIT
+
+// Depth of the far plane for a camera-relative inverse view-projection: 0 under reverse-Z
+// (near = 1, far = 0), 1 under forward depth (shader packs). Read off the matrix, so the
+// passes need no extra constant: the far plane unprojects farther from the camera.
+float farPlaneDepth(mat4 invViewProj) {
+    vec4 a = invViewProj * vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 b = invViewProj * vec4(0.0, 0.0, 1.0, 1.0);
+    return length(a.xyz / a.w) > length(b.xyz / b.w) ? 0.0 : 1.0;
+}
+
+// Sky: nothing was drawn there. Reverse-Z keeps distant terrain just above 0, so only an
+// exact 0 counts; forward depth keeps the old tolerance.
+bool isSkyDepth(float d, float farDepth) {
+    return farDepth == 0.0 ? d <= 0.0 : d >= 0.99999;
+}

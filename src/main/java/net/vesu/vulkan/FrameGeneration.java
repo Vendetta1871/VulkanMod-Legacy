@@ -68,6 +68,10 @@ public final class FrameGeneration {
     private static long pSwapContext, pContext;
     private static boolean swapContextValid, contextValid;
     private static int contextGeneration = -1;
+    /** The depth direction the context was created for (VRenderSystem.reverseZ). */
+    private static boolean contextReverseZ;
+    /** FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED. */
+    private static final int FG_DEPTH_INVERTED = 1 << 3;
     private static boolean failed;
     private static long fnCreate, fnDestroy, fnImages, fnAcquire, fnPresent, fnPresentCount;
     private static MethodHandle presentCount;
@@ -320,7 +324,8 @@ public final class FrameGeneration {
     }
 
     private static boolean ensureContext() {
-        if (contextValid && contextGeneration == FrameTargets.generation()) return true;
+        if (contextValid && contextGeneration == FrameTargets.generation()
+                && contextReverseZ == VRenderSystem.reverseZ) return true;
         // ffx's backend waits for the device to idle while creating and destroying contexts.
         waitForPresents();
         releaseContext();
@@ -339,8 +344,9 @@ public final class FrameGeneration {
             header(hud, 0, CREATE_FRAMEGENERATION_HUDLESS, memAddress(backend));
             hud.putInt(HUDLESS_FORMAT, FORMAT_R8G8B8A8_UNORM);
             header(create, 0, CREATE_FRAMEGENERATION, memAddress(hud));
-            // Standard depth with a finite far plane, LDR color, jitter-free camera vectors.
-            create.putInt(CFG_FLAGS, 0);
+            // Depth with a finite far plane (reversed unless a pack runs), LDR color,
+            // jitter-free camera vectors.
+            create.putInt(CFG_FLAGS, VRenderSystem.reverseZ ? FG_DEPTH_INVERTED : 0);
             create.putInt(CFG_DISPLAY, FrameTargets.display.width()).putInt(CFG_DISPLAY + 4, FrameTargets.display.height());
             create.putInt(CFG_MAX_RENDER, FrameTargets.scene.width()).putInt(CFG_MAX_RENDER + 4, FrameTargets.scene.height());
             create.putInt(CFG_FORMAT, surfaceFormat(Vulkan.getSwapChainImageFormat()));
@@ -358,6 +364,7 @@ public final class FrameGeneration {
         }
         contextValid = true;
         contextGeneration = FrameTargets.generation();
+        contextReverseZ = VRenderSystem.reverseZ;
         if (configureDesc == null) configureDesc = memCalloc(CONF_SIZE);
         if (prepareDesc == null) prepareDesc = memCalloc(PREP_SIZE);
         Initializer.LOGGER.info("[fg] context {}x{} -> {}x{} ({})", FrameTargets.scene.width(), FrameTargets.scene.height(),

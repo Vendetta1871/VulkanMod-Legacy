@@ -1302,7 +1302,7 @@ public class Drawer {
             colorValue.color().float32(VRenderSystem.clearColor);
 
             VkClearValue depthValue = VkClearValue.calloc(stack);
-            depthValue.depthStencil().depth(VRenderSystem.clearDepth);
+            depthValue.depthStencil().depth(VRenderSystem.depthClearValue());
 
             int attachmentsCount;
             VkClearAttachment.Buffer pAttachments;
