@@ -81,6 +81,14 @@ public final class DeviceFeatures {
                 && available.contains(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)
                 && available.contains(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
         boolean rqExt = rtExts && available.contains(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        // M2: on a 1.2 device the 1.3 features come from their extensions.
+        boolean ext13 = v12 && !v13;
+        boolean drExt = ext13 && available.contains(KHRDynamicRendering.VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+        boolean s2Ext = ext13 && available.contains(KHRSynchronization2.VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+        boolean m4Ext = ext13 && available.contains(KHRMaintenance4.VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+        boolean irExt = ext13 && available.contains(EXTImageRobustness.VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME);
+        boolean sscExt = ext13 && available.contains(EXTSubgroupSizeControl.VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+        VkCompat.core13 = v13;
 
         // --- query ---
         VkPhysicalDeviceFeatures2 sup = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default();
@@ -89,6 +97,11 @@ public final class DeviceFeatures {
         VkPhysicalDeviceAccelerationStructureFeaturesKHR supAs = VkPhysicalDeviceAccelerationStructureFeaturesKHR.calloc(stack).sType$Default();
         VkPhysicalDeviceRayTracingPipelineFeaturesKHR supRtp = VkPhysicalDeviceRayTracingPipelineFeaturesKHR.calloc(stack).sType$Default();
         VkPhysicalDeviceRayQueryFeaturesKHR supRq = VkPhysicalDeviceRayQueryFeaturesKHR.calloc(stack).sType$Default();
+        VkPhysicalDeviceDynamicRenderingFeatures supDr = VkPhysicalDeviceDynamicRenderingFeatures.calloc(stack).sType$Default();
+        VkPhysicalDeviceSynchronization2Features supS2 = VkPhysicalDeviceSynchronization2Features.calloc(stack).sType$Default();
+        VkPhysicalDeviceMaintenance4Features supM4 = VkPhysicalDeviceMaintenance4Features.calloc(stack).sType$Default();
+        VkPhysicalDeviceImageRobustnessFeatures supIr = VkPhysicalDeviceImageRobustnessFeatures.calloc(stack).sType$Default();
+        VkPhysicalDeviceSubgroupSizeControlFeatures supSsc = VkPhysicalDeviceSubgroupSizeControlFeatures.calloc(stack).sType$Default();
 
         long chain = 0;
         if (v12) { sup12.pNext(chain); chain = sup12.address(); }
@@ -98,6 +111,11 @@ public final class DeviceFeatures {
             supRtp.pNext(chain); chain = supRtp.address();
         }
         if (rqExt) { supRq.pNext(chain); chain = supRq.address(); }
+        if (drExt) { supDr.pNext(chain); chain = supDr.address(); }
+        if (s2Ext) { supS2.pNext(chain); chain = supS2.address(); }
+        if (m4Ext) { supM4.pNext(chain); chain = supM4.address(); }
+        if (irExt) { supIr.pNext(chain); chain = supIr.address(); }
+        if (sscExt) { supSsc.pNext(chain); chain = supSsc.address(); }
         sup.pNext(chain);
 
         if (apiVersion >= VK_API_VERSION_1_1) {
@@ -182,6 +200,36 @@ public final class DeviceFeatures {
             en13.computeFullSubgroups(sup13.computeFullSubgroups());
             en13.pNext(chain); chain = en13.address();
         }
+        if (drExt && supDr.dynamicRendering()) {
+            VkPhysicalDeviceDynamicRenderingFeatures x = VkPhysicalDeviceDynamicRenderingFeatures.calloc(stack).sType$Default();
+            x.dynamicRendering(dynamicRendering = true);
+            x.pNext(chain); chain = x.address();
+            extensions.add(KHRDynamicRendering.VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+        }
+        if (s2Ext && supS2.synchronization2()) {
+            VkPhysicalDeviceSynchronization2Features x = VkPhysicalDeviceSynchronization2Features.calloc(stack).sType$Default();
+            x.synchronization2(synchronization2 = true);
+            x.pNext(chain); chain = x.address();
+            extensions.add(KHRSynchronization2.VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+        }
+        if (m4Ext && supM4.maintenance4()) {
+            VkPhysicalDeviceMaintenance4Features x = VkPhysicalDeviceMaintenance4Features.calloc(stack).sType$Default();
+            x.maintenance4(maintenance4 = true);
+            x.pNext(chain); chain = x.address();
+            extensions.add(KHRMaintenance4.VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+        }
+        if (irExt && supIr.robustImageAccess()) {
+            VkPhysicalDeviceImageRobustnessFeatures x = VkPhysicalDeviceImageRobustnessFeatures.calloc(stack).sType$Default();
+            x.robustImageAccess(true);
+            x.pNext(chain); chain = x.address();
+            extensions.add(EXTImageRobustness.VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME);
+        }
+        if (sscExt && (supSsc.subgroupSizeControl() || supSsc.computeFullSubgroups())) {
+            VkPhysicalDeviceSubgroupSizeControlFeatures x = VkPhysicalDeviceSubgroupSizeControlFeatures.calloc(stack).sType$Default();
+            x.subgroupSizeControl(supSsc.subgroupSizeControl());
+            x.computeFullSubgroups(supSsc.computeFullSubgroups());
+            x.pNext(chain); chain = x.address();
+        }
 
         rayTracingPipeline = rtExts && bufferDeviceAddress
                 && supAs.accelerationStructure() && supRtp.rayTracingPipeline();
@@ -215,20 +263,33 @@ public final class DeviceFeatures {
     }
 
     /**
-     * The frame is built from dynamic rendering and sync2 barriers (B2/B6), so devices
-     * without Vulkan 1.3 and both features are not suitable.
+     * The frame is built from dynamic rendering and sync2 barriers (B2/B6): Vulkan 1.3
+     * with both features, or Vulkan 1.2 with VK_KHR_dynamic_rendering and
+     * VK_KHR_synchronization2 (M2). Returns why the device falls short, or null.
      */
-    static boolean meetsBaseline(VkPhysicalDevice physicalDevice, int instanceApiVersion) {
+    static String baselineProblem(VkPhysicalDevice physicalDevice, int instanceApiVersion, Set<String> available) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkPhysicalDeviceProperties props = VkPhysicalDeviceProperties.calloc(stack);
             vkGetPhysicalDeviceProperties(physicalDevice, props);
-            if (Math.min(instanceApiVersion, props.apiVersion() & ~0xFFF) < VK_API_VERSION_1_3) {
-                return false;
+            int api = Math.min(instanceApiVersion, props.apiVersion() & ~0xFFF);
+            String version = VK_API_VERSION_MAJOR(api) + "." + VK_API_VERSION_MINOR(api);
+            if (api < VK_API_VERSION_1_2) {
+                return "Vulkan " + version + ", needs 1.2 or newer";
             }
-            VkPhysicalDeviceVulkan13Features f13 = VkPhysicalDeviceVulkan13Features.calloc(stack).sType$Default();
-            VkPhysicalDeviceFeatures2 f = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default().pNext(f13.address());
+            boolean v13 = api >= VK_API_VERSION_1_3;
+            boolean drExt = v13 || available.contains(KHRDynamicRendering.VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+            boolean s2Ext = v13 || available.contains(KHRSynchronization2.VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+            VkPhysicalDeviceDynamicRenderingFeatures dr = VkPhysicalDeviceDynamicRenderingFeatures.calloc(stack).sType$Default();
+            VkPhysicalDeviceSynchronization2Features s2 = VkPhysicalDeviceSynchronization2Features.calloc(stack).sType$Default();
+            long chain = 0;
+            if (drExt) { dr.pNext(chain); chain = dr.address(); }
+            if (s2Ext) { s2.pNext(chain); chain = s2.address(); }
+            VkPhysicalDeviceFeatures2 f = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default().pNext(chain);
             vkGetPhysicalDeviceFeatures2(physicalDevice, f);
-            return f13.dynamicRendering() && f13.synchronization2();
+            StringBuilder missing = new StringBuilder();
+            if (!drExt || !dr.dynamicRendering()) missing.append(" dynamic rendering (VK_KHR_dynamic_rendering)");
+            if (!s2Ext || !s2.synchronization2()) missing.append(" synchronization2 (VK_KHR_synchronization2)");
+            return missing.length() == 0 ? null : "Vulkan " + version + " without" + missing;
         }
     }
 

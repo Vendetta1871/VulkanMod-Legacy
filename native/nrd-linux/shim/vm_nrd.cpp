@@ -16,7 +16,11 @@
 #include "Extensions/NRIWrapperVK.h"
 #include "NRDIntegration.hpp"
 
+#ifdef _WIN32
+#define VM_EXPORT extern "C" __declspec(dllexport)
+#else
 #define VM_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
 
 struct VmNrdCreate {
     uint64_t vkInstance, vkPhysicalDevice, vkDevice;

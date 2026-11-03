@@ -138,6 +138,8 @@ public final class FrameTargets {
         }
         if (Vulkan.getDevice() != null) {
             net.vesu.vulkan.rt.RtScene.applySettings();
+            // F9: switching frame generation swaps the swapchain.
+            if (display.width() > 0 && FrameGeneration.active() != FrameGeneration.wanted()) Drawer.shouldRecreate = true;
         }
     }
 
@@ -233,7 +235,7 @@ public final class FrameTargets {
         boolean shadows = rtShadowsWanted();
         if (!temporal && !shadows) return;
         opaqueDone = true;
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         if (shadows) {
             // T8: RT lighting lands on opaque geometry only; water and particles blend over it.
             recordRtShadows(cmd, stack);
@@ -290,7 +292,7 @@ public final class FrameTargets {
         translucentEntered = true;
         pack.shadowTranslucent(stack);
         if (!pack.usesTranslucentHook()) return;
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         pack.recordDeferred(cmd, stack);
         depthBackToAttachment(cmd, stack);
         Drawer.invalidateBoundPipeline(cmd);
@@ -301,7 +303,7 @@ public final class FrameTargets {
     /** Before the hand: the copy behind depthtex2 leaves rendering and comes back with everything loaded. */
     static void beforeHand(VkCommandBuffer cmd, MemoryStack stack) {
         if (phase != Phase.SCENE || pack == null || !pack.wantsHandDepth()) return;
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         pack.copyHandDepth(cmd, stack);
         Drawer.invalidateBoundPipeline(cmd);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
@@ -527,7 +529,7 @@ public final class FrameTargets {
      */
     public static void enterDisplayPhase(VkCommandBuffer cmd, MemoryStack stack) {
         if (phase != Phase.SCENE) return;
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         GpuTimer.mark(cmd, GpuTimer.SCENE_END);
 
         if (MotionVectorPass.enabled()) {
@@ -567,6 +569,8 @@ public final class FrameTargets {
                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, false, stack);
         } else if (temporal && Fsr3Upscaler.record(cmd, stack)) {
             // F5: FSR 3 upscale; leaves the display color ready as an attachment.
+            // F9: frame generation takes its HUD-less copy before the hand and the GUI.
+            FrameGeneration.record(cmd, stack);
             VkImageMemoryBarrier2.Buffer depth = VkImageMemoryBarrier2.calloc(1, stack);
             depthToAttachment(depth.get(0), display);
             pipelineBarrier(cmd, depth, stack);
@@ -639,7 +643,7 @@ public final class FrameTargets {
                          int swapW, int swapH, MemoryStack stack) {
         // Frames without a hand or GUI (loading screens drawn outside updateCameraAndRender).
         enterDisplayPhase(cmd, stack);
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         phase = Phase.NONE;
 
         VkImageMemoryBarrier2.Buffer pre = VkImageMemoryBarrier2.calloc(2, stack);
@@ -699,7 +703,7 @@ public final class FrameTargets {
         info.renderArea().offset().set(0, 0);
         info.renderArea().extent().set(target.width(), target.height());
 
-        vkCmdBeginRendering(cmd, info);
+        VkCompat.beginRendering(cmd, info);
 
         // Viewport and scissor follow the target; the viewport flips Y like GL, so images
         // are stored upright. In pack space the scene keeps GL row order instead (positive
@@ -780,6 +784,6 @@ public final class FrameTargets {
     }
 
     static void pipelineBarrier(VkCommandBuffer cmd, VkImageMemoryBarrier2.Buffer barriers, MemoryStack stack) {
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(barriers));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(barriers));
     }
 }

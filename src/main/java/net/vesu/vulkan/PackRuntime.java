@@ -1320,7 +1320,7 @@ public final class PackRuntime {
             bindResources(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipelineLayout);
             vkCmdPushConstants(cmd, g.pipelineLayout, g.pushStages, 0, push);
             vkCmdDraw(cmd, 3, 1, 0, 0);
-            vkCmdEndRendering(cmd);
+            VkCompat.endRendering(cmd);
         }
 
         for (int t : step.mipmaps()) {
@@ -1383,7 +1383,7 @@ public final class PackRuntime {
         bindResources(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipelineLayout);
         vkCmdPushConstants(cmd, g.pipelineLayout, g.pushStages, 0, push);
         vkCmdDraw(cmd, 3, 1, 0, 0);
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
     }
 
     private void copySceneColor(VkCommandBuffer cmd, MemoryStack stack) {
@@ -1540,7 +1540,7 @@ public final class PackRuntime {
 
         void flush(VkCommandBuffer cmd) {
             if (n == 0) return;
-            vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(MemoryStack.stackGet()).sType$Default()
+            VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(MemoryStack.stackGet()).sType$Default()
                     .pImageMemoryBarriers(buf.limit(n)));
         }
 
@@ -1553,7 +1553,7 @@ public final class PackRuntime {
         VkRenderingInfo info = VkRenderingInfo.calloc(stack).sType$Default().layerCount(1).pColorAttachments(color);
         info.renderArea().offset().set(0, 0);
         info.renderArea().extent().set(areaW, areaH);
-        vkCmdBeginRendering(cmd, info);
+        VkCompat.beginRendering(cmd, info);
         VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
         if (hostOrder) {
             viewport.x(0.0f).y(viewH).width(viewW).height(-viewH);
@@ -2111,13 +2111,13 @@ public final class PackRuntime {
             int slot = Drawer.getCurrentFrame() % slots;
             if (written[slot]) collect(slot);
             vkCmdResetQueryPool(cmd, pool, slot * marks, marks);
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool, slot * marks);
+            VkCompat.writeTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool, slot * marks);
             written[slot] = true;
         }
 
         void mark(VkCommandBuffer cmd, int pass) {
             int slot = Drawer.getCurrentFrame() % slots;
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool, slot * marks + pass + 1);
+            VkCompat.writeTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool, slot * marks + pass + 1);
         }
 
         private void collect(int slot) {

@@ -1,5 +1,6 @@
 package net.vesu.vulkan.rt;
 
+import net.vesu.vulkan.VkCompat;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.init.Blocks;
@@ -24,7 +25,8 @@ import static org.lwjgl.vulkan.VK13.*;
  * Light-emitting blocks of the ray-traced sections, for the RT block lighting pass.
  * Each section's emitters are scanned when its BLAS is built. The GPU gets a light list
  * (position relative to {@link #originX}.., level) and a hashed grid of 8-block cells,
- * each listing the lights whose range (their level, in blocks) reaches it.
+ * each listing the lights whose range (their level, in blocks) reaches it. Both are kept
+ * between updates and changed per section (R8).
  */
 public final class RtLights {
 
@@ -33,7 +35,7 @@ public final class RtLights {
 
     private static boolean dirty = true;
     private static RtBuffer lights, grid, index;
-    private static int gridMask, lightCount, lastHash;
+    private static int gridMask, lightCount;
     private static int originX, originY, originZ;
     private static final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
     private static final float[] LIGHT_SCRATCH = new float[MAX_LIGHTS * 8];
@@ -176,11 +178,11 @@ public final class RtLights {
         b.get(0).sType$Default()
                 .srcStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).srcAccessMask(VK_ACCESS_2_SHADER_STORAGE_READ_BIT)
                 .dstStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT).dstAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        vkCmdPipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+        VkCompat.pipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
         RtScene.updateBuffer(cmd, dynamic.buffer, dynamicCpu, n * 32);
         b.get(0).srcStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT).srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
                 .dstStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).dstAccessMask(VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-        vkCmdPipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+        VkCompat.pipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
     }
 
     public static boolean ready() { return lights != null; }
@@ -201,135 +203,274 @@ public final class RtLights {
         return new float[]{(float) (camX - originX), (float) (camY - originY), (float) (camZ - originZ)};
     }
 
+    // --- R8: persistent light slots and cell lists ---
+    // Each light keeps its slot in the list while its section is unchanged; a changed
+    // section only removes and adds its own lights and touches their cells. Freed slots
+    // stay in the list with level 0 and are in no cell (the shader reaches lights through
+    // cells only). The origin moves (a full reset) when the camera goes far from it.
+
+    /** A section's emitters as scanned (compared to detect changes) and their slots. */
+    private record SectionLights(int[] packed, int[] slots) {}
+
+    /** The slots of the lights reaching a cell; {@code trimmed} caches a crowded cell's nearest ones. */
+    private static final class Cell {
+        int[] slots = new int[8];
+        int n;
+        int[] trimmed;
+
+        void add(int slot) {
+            if (n == slots.length) slots = java.util.Arrays.copyOf(slots, n * 2);
+            slots[n++] = slot;
+            trimmed = null;
+        }
+    }
+
+    private static final HashMap<Long, SectionLights> bySection = new HashMap<>();
+    private static final HashMap<Long, Cell> cellMap = new HashMap<>();
+    private static final int[] freeSlots = new int[MAX_LIGHTS];
+    private static int freeTop, highWater;
+    private static boolean capWarned;
+    private static long tTable;
+    private static final long[] CELL_SCRATCH = new long[125];
+    private static final boolean CHECK = net.vesu.Env.get("VESU_RT_LIGHTS_CHECK") != null;
+
+    private static long sectionKey(RtScene.Section s) {
+        return ((long) (s.originX >> 4) & 0x3FFFFF) << 42 | ((long) (s.originY >> 4) & 0xFFFFF) << 22
+                | ((long) (s.originZ >> 4) & 0x3FFFFF);
+    }
+
     /**
-     * Rebuilds and uploads the light data when emitters changed or the camera moved far
-     * from the origin (float precision). Outside rendering, before the RT passes.
+     * Applies emitter changes and uploads the light data when anything changed or the
+     * camera moved far from the origin (float precision). Outside rendering, before the
+     * RT passes.
      */
     static void update(VkCommandBuffer cmd, List<RtScene.Section> sections, double camX, double camY, double camZ) {
         boolean far = Math.abs(camX - originX) > 1024 || Math.abs(camZ - originZ) > 1024 || Math.abs(camY - originY) > 1024;
         if (!dirty && !far && lights != null) return;
         dirty = false;
-        if (far || lights == null) {
+        long t0 = System.nanoTime();
+        boolean reset = far || lights == null;
+        if (reset) {
             originX = (int) Math.floor(camX) & ~(CELL - 1);
             originY = (int) Math.floor(camY) & ~(CELL - 1);
             originZ = (int) Math.floor(camZ) & ~(CELL - 1);
+            clearSlots();
         }
 
-        // Light list, nearest sections first when over the cap.
-        ArrayList<int[]> sorted = new ArrayList<>();
-        // A section has one RtScene.Section per render layer, each scanned: keep one.
-        java.util.HashSet<Long> seen = new java.util.HashSet<>();
+        // A section has one RtScene.Section per render layer, all with the same scan: keep one.
+        HashMap<Long, RtScene.Section> now = new HashMap<>();
         for (RtScene.Section s : sections) {
             if (s.lights == null || !s.placed) continue;
-            if (!seen.add(((long) (s.originX >> 4) & 0x3FFFFF) << 42 | ((long) (s.originY >> 4) & 0xFFFFF) << 22
-                    | ((long) (s.originZ >> 4) & 0x3FFFFF))) continue;
-            long dx = s.originX + 8 - (long) camX, dy = s.originY + 8 - (long) camY, dz = s.originZ + 8 - (long) camZ;
-            sorted.add(new int[]{(int) Math.min(Integer.MAX_VALUE, dx * dx + dy * dy + dz * dz), s.index});
+            now.putIfAbsent(sectionKey(s), s);
         }
-        sorted.sort((a, b) -> Integer.compare(a[0], b[0]));
 
-        // Per light: center (relative to the origin), level, then rgb color.
-        // Reused: this runs after every BLAS batch, usually to find nothing changed.
-        float[] lx = LIGHT_SCRATCH;
-        int n = 0;
-        outer:
-        for (int[] e : sorted) {
-            RtScene.Section s = sections.get(e[1]);
-            for (int packed : s.lights) {
-                if (n == MAX_LIGHTS) break outer;
-                float[] rgb = colorTable.get(packed >>> 16);
-                lx[n * 8] = s.originX + (packed & 15) - originX + 0.5f;
-                lx[n * 8 + 1] = s.originY + (packed >> 4 & 15) - originY + 0.5f;
-                lx[n * 8 + 2] = s.originZ + (packed >> 8 & 15) - originZ + 0.5f;
-                lx[n * 8 + 3] = packed >> 12 & 15;
-                lx[n * 8 + 4] = rgb[0];
-                lx[n * 8 + 5] = rgb[1];
-                lx[n * 8 + 6] = rgb[2];
-                n++;
+        boolean changed = reset;
+        for (var it = bySection.entrySet().iterator(); it.hasNext(); ) {
+            var e = it.next();
+            RtScene.Section s = now.get(e.getKey());
+            if (s != null && (s.lights == e.getValue().packed() || java.util.Arrays.equals(s.lights, e.getValue().packed()))) {
+                continue;
             }
+            removeLights(e.getValue().slots());
+            it.remove();
+            changed = true;
+        }
+        // New and changed sections, nearest first: the cap drops the far ones.
+        ArrayList<long[]> added = new ArrayList<>();
+        for (var e : now.entrySet()) {
+            if (bySection.containsKey(e.getKey())) continue;
+            RtScene.Section s = e.getValue();
+            long dx = s.originX + 8 - (long) camX, dy = s.originY + 8 - (long) camY, dz = s.originZ + 8 - (long) camZ;
+            added.add(new long[]{dx * dx + dy * dy + dz * dz, e.getKey()});
+        }
+        added.sort((x, y) -> Long.compare(x[0], y[0]));
+        for (long[] a : added) {
+            RtScene.Section s = now.get(a[1]);
+            int[] slots = new int[s.lights.length];
+            int k = 0;
+            for (int packed : s.lights) {
+                int slot = allocSlot();
+                if (slot < 0) {
+                    if (!capWarned) Initializer.LOGGER.warn("[rt] more than {} block lights, the farthest are left out", MAX_LIGHTS);
+                    capWarned = true;
+                    break;
+                }
+                float[] rgb = colorTable.get(packed >>> 16);
+                float[] lx = LIGHT_SCRATCH;
+                lx[slot * 8] = s.originX + (packed & 15) - originX + 0.5f;
+                lx[slot * 8 + 1] = s.originY + (packed >> 4 & 15) - originY + 0.5f;
+                lx[slot * 8 + 2] = s.originZ + (packed >> 8 & 15) - originZ + 0.5f;
+                lx[slot * 8 + 3] = packed >> 12 & 15;
+                lx[slot * 8 + 4] = rgb[0];
+                lx[slot * 8 + 5] = rgb[1];
+                lx[slot * 8 + 6] = rgb[2];
+                lx[slot * 8 + 7] = 0.0f;
+                int c = cellsOf(slot);
+                for (int j = 0; j < c; j++) cellMap.computeIfAbsent(CELL_SCRATCH[j], q -> new Cell()).add(slot);
+                slots[k++] = slot;
+            }
+            bySection.put(a[1], new SectionLights(s.lights, k == slots.length ? slots : java.util.Arrays.copyOf(slots, k)));
+            changed = true;
         }
         // Chunk rebuilds without emitter changes (most of them) keep the uploaded data.
-        int hash = n;
-        for (int i = 0; i < n * 8; i++) hash = hash * 31 + Float.floatToIntBits(lx[i]);
-        if (!far && lights != null && hash == lastHash && n == lightCount) return;
-        lastHash = hash;
-        lightCount = n;
+        if (!changed) return;
+        lightCount = highWater;
         generation++;
-
-        // Cells reached by each light's range.
-        HashMap<Long, int[]> cells = new HashMap<>();
-        for (int i = 0; i < n; i++) {
-            float x = lx[i * 8], y = lx[i * 8 + 1], z = lx[i * 8 + 2], r = lx[i * 8 + 3];
-            int x0 = floorDiv(x - r), x1 = floorDiv(x + r);
-            int y0 = floorDiv(y - r), y1 = floorDiv(y + r);
-            int z0 = floorDiv(z - r), z1 = floorDiv(z + r);
-            for (int cx = x0; cx <= x1; cx++)
-                for (int cy = y0; cy <= y1; cy++)
-                    for (int cz = z0; cz <= z1; cz++) {
-                        // Skip cells the light sphere misses.
-                        float qx = clampF(x, cx * CELL, cx * CELL + CELL) - x;
-                        float qy = clampF(y, cy * CELL, cy * CELL + CELL) - y;
-                        float qz = clampF(z, cz * CELL, cz * CELL + CELL) - z;
-                        if (qx * qx + qy * qy + qz * qz > r * r) continue;
-                        int[] list = cells.computeIfAbsent(key(cx, cy, cz), k -> new int[9]);
-                        int c = list[0];
-                        if (c + 1 == list.length) {
-                            list = java.util.Arrays.copyOf(list, list.length * 2);
-                            cells.put(key(cx, cy, cz), list);
-                        }
-                        list[c + 1] = i;
-                        list[0] = c + 1;
-                    }
+        if (CHECK) check();
+        long t1 = System.nanoTime();
+        uploadAll(cmd);
+        if (RtScene.LOG) {
+            Initializer.LOGGER.info("[rt] lights: {} slots, {} cells, {} sections{}: apply {} us, table {} us, upload {} us",
+                    highWater, cellMap.size(), bySection.size(), reset ? " (reset)" : "", (t1 - t0) / 1000,
+                    (tTable - t1) / 1000, (System.nanoTime() - tTable) / 1000);
         }
-        // Crowded cells (a lava sea reaches each with hundreds of blocks) keep the lights
-        // nearest to them: those dominate, and the first come were often far away.
-        for (var e : cells.entrySet()) {
-            int[] list = e.getValue();
-            int c = list[0];
-            if (c <= MAX_PER_CELL) continue;
-            long k = e.getKey();
-            float mx = ((int) (k >> 42) + 0.5f) * CELL, my = ((int) (k << 22 >> 43) + 0.5f) * CELL,
-                    mz = ((int) (k << 43 >> 43) + 0.5f) * CELL;
-            long[] byDistance = new long[c];
-            for (int j = 0; j < c; j++) {
-                int li = list[j + 1];
-                float dx = lx[li * 8] - mx, dy = lx[li * 8 + 1] - my, dz = lx[li * 8 + 2] - mz;
-                // Brighter lights count as nearer by their level (a lower falloff at the cell).
-                float score = (float) Math.sqrt(dx * dx + dy * dy + dz * dz) - lx[li * 8 + 3];
-                byDistance[j] = (long) Float.floatToIntBits(score + 64.0f) << 32 | li;
+    }
+
+    private static void clearSlots() {
+        bySection.clear();
+        cellMap.clear();
+        freeTop = 0;
+        highWater = 0;
+        capWarned = false;
+    }
+
+    private static int allocSlot() {
+        if (freeTop > 0) return freeSlots[--freeTop];
+        return highWater < MAX_LIGHTS ? highWater++ : -1;
+    }
+
+    private static final boolean[] REMOVED = new boolean[MAX_LIGHTS];
+
+    /**
+     * Takes a section's lights out of their cells: the slots are marked, then each touched
+     * cell is compacted once (a crowded cell holds thousands of slots, a search per slot
+     * was quadratic).
+     */
+    private static void removeLights(int[] slots) {
+        if (slots.length == 0) return;
+        java.util.HashSet<Long> touched = new java.util.HashSet<>();
+        for (int slot : slots) {
+            REMOVED[slot] = true;
+            int c = cellsOf(slot);
+            for (int j = 0; j < c; j++) touched.add(CELL_SCRATCH[j]);
+        }
+        for (Long k : touched) {
+            Cell cell = cellMap.get(k);
+            if (cell == null) continue;
+            int n = 0;
+            for (int i = 0; i < cell.n; i++) {
+                int slot = cell.slots[i];
+                if (!REMOVED[slot]) cell.slots[n++] = slot;
             }
-            java.util.Arrays.sort(byDistance);
-            int[] kept = new int[MAX_PER_CELL + 1];
-            kept[0] = MAX_PER_CELL;
-            for (int j = 0; j < MAX_PER_CELL; j++) kept[j + 1] = (int) byDistance[j];
-            e.setValue(kept);
+            if (n != cell.n) {
+                cell.n = n;
+                cell.trimmed = null;
+            }
+            if (n == 0) cellMap.remove(k);
         }
+        for (int slot : slots) {
+            REMOVED[slot] = false;
+            LIGHT_SCRATCH[slot * 8 + 3] = 0.0f;
+            freeSlots[freeTop++] = slot;
+        }
+    }
 
+    /** Fills CELL_SCRATCH with the keys of the cells the light's sphere reaches; returns how many. */
+    private static int cellsOf(int slot) {
+        float[] lx = LIGHT_SCRATCH;
+        float x = lx[slot * 8], y = lx[slot * 8 + 1], z = lx[slot * 8 + 2], r = lx[slot * 8 + 3];
+        int x0 = floorDiv(x - r), x1 = floorDiv(x + r);
+        int y0 = floorDiv(y - r), y1 = floorDiv(y + r);
+        int z0 = floorDiv(z - r), z1 = floorDiv(z + r);
+        int c = 0;
+        for (int cx = x0; cx <= x1; cx++)
+            for (int cy = y0; cy <= y1; cy++)
+                for (int cz = z0; cz <= z1; cz++) {
+                    // Skip cells the light sphere misses.
+                    float qx = clampF(x, cx * CELL, cx * CELL + CELL) - x;
+                    float qy = clampF(y, cy * CELL, cy * CELL + CELL) - y;
+                    float qz = clampF(z, cz * CELL, cz * CELL + CELL) - z;
+                    if (qx * qx + qy * qy + qz * qz > r * r) continue;
+                    CELL_SCRATCH[c++] = key(cx, cy, cz);
+                }
+        return c;
+    }
+
+    /**
+     * A crowded cell (a lava sea reaches each with hundreds of blocks) keeps the lights
+     * nearest to it: those dominate, and the first come were often far away.
+     */
+    private static int[] trimmed(long k, Cell cell) {
+        if (cell.trimmed != null) return cell.trimmed;
+        float[] lx = LIGHT_SCRATCH;
+        float mx = ((int) (k >> 42) + 0.5f) * CELL, my = ((int) (k << 22 >> 43) + 0.5f) * CELL,
+                mz = ((int) (k << 43 >> 43) + 0.5f) * CELL;
+        long[] byDistance = new long[cell.n];
+        for (int j = 0; j < cell.n; j++) {
+            int li = cell.slots[j];
+            float dx = lx[li * 8] - mx, dy = lx[li * 8 + 1] - my, dz = lx[li * 8 + 2] - mz;
+            // Brighter lights count as nearer by their level (a lower falloff at the cell).
+            float score = (float) Math.sqrt(dx * dx + dy * dy + dz * dz) - lx[li * 8 + 3];
+            byDistance[j] = (long) Float.floatToIntBits(score + 64.0f) << 32 | li;
+        }
+        selectSmallest(byDistance, MAX_PER_CELL);
+        int[] kept = new int[MAX_PER_CELL];
+        for (int j = 0; j < MAX_PER_CELL; j++) kept[j] = (int) byDistance[j];
+        cell.trimmed = kept;
+        return kept;
+    }
+
+    /** Moves the k smallest values to the front of {@code a}, in no order (quickselect). */
+    private static void selectSmallest(long[] a, int k) {
+        int lo = 0, hi = a.length - 1;
+        while (lo < hi) {
+            long pivot = a[(lo + hi) >>> 1];
+            int i = lo, j = hi;
+            while (i <= j) {
+                while (a[i] < pivot) i++;
+                while (a[j] > pivot) j--;
+                if (i <= j) {
+                    long t = a[i];
+                    a[i++] = a[j];
+                    a[j--] = t;
+                }
+            }
+            if (k - 1 <= j) hi = j;
+            else if (k - 1 >= i) lo = i;
+            else return;
+        }
+    }
+
+    /** Serializes the slots and the cell hash table and uploads them. */
+    private static void uploadAll(VkCommandBuffer cmd) {
         int tableSize = 64;
-        while (tableSize < cells.size() * 2) tableSize <<= 1;
+        while (tableSize < cellMap.size() * 2) tableSize <<= 1;
         gridMask = tableSize - 1;
         int[] table = new int[tableSize * 4];
         for (int i = 0; i < tableSize; i++) table[i * 4] = EMPTY;
         int indexCount = 0;
-        for (int[] list : cells.values()) indexCount += list[0];
+        for (Cell cell : cellMap.values()) indexCount += Math.min(cell.n, MAX_PER_CELL);
         int[] indices = new int[Math.max(1, indexCount)];
         int at = 0;
-        for (var e : cells.entrySet()) {
+        for (var e : cellMap.entrySet()) {
             long k = e.getKey();
             int cx = (int) (k >> 42), cy = (int) (k << 22 >> 43), cz = (int) (k << 43 >> 43);
-            int[] list = e.getValue();
+            Cell cell = e.getValue();
+            int count = Math.min(cell.n, MAX_PER_CELL);
+            int[] list = cell.n > MAX_PER_CELL ? trimmed(k, cell) : cell.slots;
             int slot = hash(cx, cy, cz) & gridMask;
             while (table[slot * 4] != EMPTY) slot = (slot + 1) & gridMask;
             table[slot * 4] = cx;
             table[slot * 4 + 1] = cy;
             table[slot * 4 + 2] = cz;
-            table[slot * 4 + 3] = at | list[0] << 24;
-            System.arraycopy(list, 1, indices, at, list[0]);
-            at += list[0];
+            table[slot * 4 + 3] = at | count << 24;
+            System.arraycopy(list, 0, indices, at, count);
+            at += count;
         }
 
+        tTable = System.nanoTime();
         release();
-        lights = upload(cmd, floatsToBytes(lx, Math.max(1, n) * 8));
+        lights = upload(cmd, floatsToBytes(LIGHT_SCRATCH, Math.max(1, highWater) * 8));
         grid = upload(cmd, intsToBytes(table, table.length));
         index = upload(cmd, intsToBytes(indices, indices.length));
 
@@ -338,11 +479,31 @@ public final class RtLights {
             b.get(0).sType$Default()
                     .srcStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT).srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
                     .dstStageMask(VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR).dstAccessMask(VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-            vkCmdPipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+            VkCompat.pipelineBarrier2(cmd, org.lwjgl.vulkan.VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
         }
-        if (RtScene.LOG) {
-            Initializer.LOGGER.info("[rt] lights: {} in {} cells ({} refs)", n, cells.size(), indexCount);
+    }
+
+    /** VESU_RT_LIGHTS_CHECK: the incremental cells must equal cells built from scratch. */
+    private static void check() {
+        HashMap<Long, java.util.Set<Integer>> fresh = new HashMap<>();
+        java.util.Set<Integer> free = new java.util.HashSet<>();
+        for (int i = 0; i < freeTop; i++) free.add(freeSlots[i]);
+        int active = 0;
+        for (int slot = 0; slot < highWater; slot++) {
+            if (free.contains(slot)) continue;
+            active++;
+            int c = cellsOf(slot);
+            for (int j = 0; j < c; j++) fresh.computeIfAbsent(CELL_SCRATCH[j], q -> new java.util.HashSet<>()).add(slot);
         }
+        int listed = 0;
+        for (SectionLights sl : bySection.values()) listed += sl.slots().length;
+        boolean ok = fresh.size() == cellMap.size() && listed == active;
+        for (var e : fresh.entrySet()) {
+            Cell cell = cellMap.get(e.getKey());
+            if (cell == null || cell.n != e.getValue().size()) { ok = false; break; }
+            for (int i = 0; i < cell.n; i++) if (!e.getValue().contains(cell.slots[i])) { ok = false; break; }
+        }
+        Initializer.LOGGER.info("[rt] lights check {}: {} lights, {} cells", ok ? "ok" : "FAILED", active, cellMap.size());
     }
 
     private static RtBuffer upload(VkCommandBuffer cmd, ByteBuffer data) {
@@ -403,6 +564,7 @@ public final class RtLights {
         if (index != null) index.destroyNow();
         lights = grid = index = null;
         lightCount = 0;
+        clearSlots();
         dirty = true;
     }
 }

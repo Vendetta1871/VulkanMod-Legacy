@@ -208,6 +208,14 @@ public class AutoTest {
     private static int rtToggleTicks;
 
     /**
+     * {@code VESU_AUTOTEST_FGTOGGLE=1}: in the world, turns frame generation on, off and on
+     * again the way the settings screen does (the swapchain is swapped each time), with a
+     * capture after each step, then quits.
+     */
+    private static final boolean FG_TOGGLE_MODE = Env.get("VESU_AUTOTEST_FGTOGGLE") != null;
+    private static int fgToggleTicks;
+
+    /**
      * {@code VESU_AUTOTEST_TORCH=1}: builds a closed stone room high in the air (no sky
      * light inside) with torches, glowstone and a pillar between them and the camera, moves
      * the player in and captures "torchRoom" twice (early and with the RT history settled).
@@ -468,6 +476,26 @@ public class AutoTest {
         }
     }
 
+    private static void fgToggleStage(Minecraft mc) {
+        int t = ++fgToggleTicks;
+        if (t == 20) {
+            capture(mc, "fgBefore");
+        } else if (t == 30 || t == 130 || t == 210) {
+            Initializer.CONFIG.frameGeneration = t != 130;
+            net.vesu.vulkan.FrameTargets.applySettings();
+            Initializer.LOGGER.info("[autotest] frame generation -> {}", Initializer.CONFIG.frameGeneration);
+        } else if (t == 120) {
+            capture(mc, "fgOn");
+        } else if (t == 200) {
+            capture(mc, "fgOff");
+        } else if (t == 290) {
+            capture(mc, "fgOn2");
+        } else if (t >= 300) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
     private static void rtToggleStage(Minecraft mc) {
         int t = ++rtToggleTicks;
         if (t == 20) {
@@ -677,6 +705,10 @@ public class AutoTest {
                     return;
                 }
 
+                if (FG_TOGGLE_MODE) {
+                    fgToggleStage(mc);
+                    return;
+                }
                 if (RT_TOGGLE_MODE) {
                     rtToggleStage(mc);
                     return;
@@ -2456,7 +2488,8 @@ public class AutoTest {
                 for (String line : java.nio.file.Files.readAllLines(new File(SCENES_FILE).toPath())) {
                     line = line.trim();
                     if (!line.isEmpty() && !line.startsWith("#") && !line.startsWith("world ")) {
-                        scenes.add(line.split("\\s+"));
+                        // Fields after the eighth are the scene's commands, ';'-separated.
+                        scenes.add(line.trim().split("\\s+", 9));
                     }
                 }
             } catch (java.io.IOException e) {
@@ -2489,6 +2522,9 @@ public class AutoTest {
             serverCommand(mc, "weather " + s[7] + " 100000");
             serverCommand(mc, "time set " + s[6]);
             serverCommand(mc, String.format("tp %s %s %s %s %s %s", mc.player.getName(), s[1], s[2], s[3], s[4], s[5]));
+            if (s.length > 8) {
+                for (String c : s[8].split(";")) serverCommand(mc, c.trim());
+            }
         }
         sceneTick++;
         if (sceneTick == SCENE_SETTLE) {

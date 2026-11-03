@@ -1,5 +1,6 @@
 package net.vesu.vulkan.rt;
 
+import net.vesu.vulkan.VkCompat;
 import net.vesu.render.CameraHistory;
 import net.vesu.vulkan.DeviceFeatures;
 import net.vesu.vulkan.Drawer;
@@ -157,7 +158,7 @@ public final class RtEntities {
                 .srcAccessMask(VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT)
                 .dstStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
                 .dstAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre));
 
         int quadBytes = vertexCount / 4 * 8;
         int bytes = quadBytes + vertexCount * 12;
@@ -179,7 +180,7 @@ public final class RtEntities {
                 .srcStageMask(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT).srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
                 .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
                 .dstAccessMask(VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(up));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(up));
 
         IndexBuffer ib = Drawer.getInstance().getQuadsIndexBuffer().getIndexBuffer(vertexCount);
         boolean shortIndices = ib.indexType == IndexBuffer.IndexType.SHORT;

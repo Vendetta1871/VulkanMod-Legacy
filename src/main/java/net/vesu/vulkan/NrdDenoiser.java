@@ -27,7 +27,8 @@ import static org.lwjgl.system.MemoryUtil.NULL;
  */
 final class NrdDenoiser {
 
-    private static final String LIB = "libvesu_nrd.so";
+    private static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
+    private static final String LIB = WINDOWS ? "vesu_nrd.dll" : "libvesu_nrd.so";
     private static final int CREATE_SIZE = 72, FRAME_SIZE = 416, IMAGES = 304;
     /** Image slots in the frame struct, in order. */
     static final int MV = 0, NORMAL_ROUGHNESS = 1, VIEWZ = 2, BLOCK_IN = 3, BLOCK_OUT = 4, GI_IN = 5, GI_OUT = 6;
@@ -44,16 +45,26 @@ final class NrdDenoiser {
     /** The library is present, NRD is not disabled and creation never failed. */
     static boolean available() {
         if (failed || "0".equals(Env.get("VESU_NRD"))) return false;
+        // NRI resolves 1.3 core entry points (vkCmdSetViewportWithCount...) and aborts
+        // the process when one is missing, so a Vulkan 1.2 device keeps the own filter.
+        DeviceInfo info = Vulkan.getDeviceInfo();
+        if (info == null || info.features == null
+                || info.features.apiVersion < org.lwjgl.vulkan.VK13.VK_API_VERSION_1_3) {
+            if (!loggedNo13) Initializer.LOGGER.info("[nrd] needs Vulkan 1.3; RT passes use their own filter");
+            loggedNo13 = true;
+            return false;
+        }
         return load();
     }
+
+    private static boolean loggedNo13;
 
     private static synchronized boolean load() {
         if (loadAttempted) return library != null;
         loadAttempted = true;
-        if (System.getProperty("os.name", "").toLowerCase().contains("win")) return false;
         String path = Env.get("VESU_NRD_LIB");
         if (path == null || path.isEmpty()) {
-            String bundled = net.vesu.vulkan.ffx.FfxApi.extractBundled("linux-x64/" + LIB, LIB);
+            String bundled = net.vesu.vulkan.ffx.FfxApi.extractBundled((WINDOWS ? "windows-x64/" : "linux-x64/") + LIB, LIB);
             if (bundled == null) {
                 Initializer.LOGGER.info("[nrd] not bundled; RT passes use their own filter");
                 return false;

@@ -358,7 +358,10 @@ public class Vulkan {
         if(swapChainImageViews != null) {
             swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
         }
-        if(swapChain != 0L) {
+        if(FrameGeneration.active()) {
+            FrameGeneration.shutdown();
+            swapChain = 0L;
+        } else if(swapChain != 0L) {
             vkDestroySwapchainKHR(device, swapChain, null);
             swapChain = 0L;
         }
@@ -425,6 +428,12 @@ public class Vulkan {
             // B1: the highest version up to 1.3 the loader offers; the device may still be
             // older, DeviceFeatures takes min(instance, device).
             instanceApiVersion = Math.min(VK.getInstanceVersionSupported() & ~0xFFF, VK_API_VERSION_1_3);
+            // VESU_VK_API=1.2 caps the version, to test the 1.2 + KHR path on a 1.3 device.
+            String cap = net.vesu.Env.get("VESU_VK_API");
+            if (cap != null && cap.matches("1\\.[0-3]")) {
+                instanceApiVersion = Math.min(instanceApiVersion,
+                        VK_MAKE_API_VERSION(0, 1, Integer.parseInt(cap.substring(2)), 0));
+            }
             appInfo.apiVersion(instanceApiVersion);
 
             VkInstanceCreateInfo createInfo = VkInstanceCreateInfo.create();
@@ -527,6 +536,7 @@ public class Vulkan {
 
             VkPhysicalDevice currentDevice = null;
             boolean flag = false;
+            StringBuilder rejected = new StringBuilder();
 
             for(int i = 0; i < ppPhysicalDevices.capacity();i++) {
 
@@ -535,7 +545,11 @@ public class Vulkan {
                 VkPhysicalDeviceProperties deviceProperties = VkPhysicalDeviceProperties.create();
                 vkGetPhysicalDeviceProperties(currentDevice, deviceProperties);
 
-                if(isDeviceSuitable(currentDevice)) {
+                String problem = unsuitableReason(currentDevice);
+                if(problem != null) {
+                    rejected.append("\n").append(deviceProperties.deviceNameString()).append(": ").append(problem);
+                }
+                if(problem == null) {
                     if(deviceProperties.deviceType() == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU){
                         flag = true;
                         break;
@@ -551,7 +565,7 @@ public class Vulkan {
                 else if(!otherDevices.isEmpty()) currentDevice = otherDevices.get(0);
                 else {
                     Initializer.LOGGER.error(DeviceInfo.debugString(ppPhysicalDevices, DEVICE_EXTENSIONS, instance));
-                    throw new RuntimeException("Failed to find a suitable GPU");
+                    throw new UnsupportedGpuException("No GPU supports what Vesu needs:" + rejected);
                 }
             }
 
@@ -776,7 +790,26 @@ public class Vulkan {
 
             LongBuffer pSwapChain = stack.longs(VK_NULL_HANDLE);
 
-            int result = vkCreateSwapchainKHR(device, createInfo, null, pSwapChain);
+            // F9: frame generation on or off since the last creation swaps the whole chain.
+            if(FrameGeneration.active() && !FrameGeneration.wanted()) {
+                swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
+                swapChainImageViews = java.util.List.of();
+                FrameGeneration.shutdown();
+                swapChain = 0L;
+                oldSwapchain = VK_NULL_HANDLE;
+                createInfo.oldSwapchain(VK_NULL_HANDLE);
+            }
+
+            int result;
+            if(FrameGeneration.active()) {
+                // The interpolation swapchain is replaced in place (its context lives on).
+                swapChainImageViews.forEach(imageView -> vkDestroyImageView(device, imageView, null));
+                swapChainImageViews = java.util.List.of();
+                result = FrameGeneration.recreate(createInfo, swapChain, pSwapChain);
+                swapChain = 0L;
+            } else {
+                result = vkCreateSwapchainKHR(device, createInfo, null, pSwapChain);
+            }
             if(result != VK_SUCCESS) {
                 // Passing oldSwapchain retired it even though the create failed (R10).
                 if(oldSwapchain != VK_NULL_HANDLE) {
@@ -797,12 +830,23 @@ public class Vulkan {
             swapchainRetired = false;
 
             swapChain = pSwapChain.get(0);
+            if(!FrameGeneration.active() && FrameGeneration.wanted()) {
+                swapChain = FrameGeneration.wrap(createInfo, swapChain);
+            }
 
-            vkGetSwapchainImagesKHR(device, swapChain, imageCount, null);
+            if(FrameGeneration.active()) {
+                FrameGeneration.getImages(swapChain, imageCount, null);
+            } else {
+                vkGetSwapchainImagesKHR(device, swapChain, imageCount, null);
+            }
 
             LongBuffer pSwapchainImages = stack.mallocLong(imageCount.get(0));
 
-            vkGetSwapchainImagesKHR(device, swapChain, imageCount, pSwapchainImages);
+            if(FrameGeneration.active()) {
+                FrameGeneration.getImages(swapChain, imageCount, pSwapchainImages);
+            } else {
+                vkGetSwapchainImagesKHR(device, swapChain, imageCount, pSwapchainImages);
+            }
 
             swapChainImages = new ArrayList<>(imageCount.get(0));
 
@@ -1104,26 +1148,36 @@ public class Vulkan {
         return sdlExtensions;
     }
 
-    private static boolean isDeviceSuitable(VkPhysicalDevice device) {
+    /** Thrown when no device meets the baseline; the message lists each device's reason. */
+    public static final class UnsupportedGpuException extends RuntimeException {
+        UnsupportedGpuException(String message) {
+            super(message);
+        }
+    }
+
+    /** Why the device cannot run the renderer, or null when it can. */
+    private static String unsuitableReason(VkPhysicalDevice device) {
 
         QueueFamilyIndices indices = findQueueFamilies(device);
+        if(!indices.isComplete()) {
+            return "no graphics and present queue";
+        }
 
-        boolean extensionsSupported = checkDeviceExtensionSupport(device);
-        boolean swapChainAdequate = false;
+        if(!checkDeviceExtensionSupport(device)) {
+            return "missing " + String.join(", ", DEVICE_EXTENSIONS);
+        }
 
-        if(extensionsSupported) {
-            try(MemoryStack stack = stackPush()) {
-                SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device, stack);
-                swapChainAdequate = swapChainSupport.formats != null && swapChainSupport.formats.hasRemaining()
-                        && swapChainSupport.presentModes != null && swapChainSupport.presentModes.hasRemaining();
+        try(MemoryStack stack = stackPush()) {
+            SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device, stack);
+            if(swapChainSupport.formats == null || !swapChainSupport.formats.hasRemaining()
+                    || swapChainSupport.presentModes == null || !swapChainSupport.presentModes.hasRemaining()) {
+                return "cannot present to the window";
             }
         }
 
         // Optional features are queried and gated at device creation (DeviceFeatures);
         // only the baseline the frame structure depends on is checked here.
-
-        return indices.isComplete() && extensionsSupported && swapChainAdequate
-                && DeviceFeatures.meetsBaseline(device, instanceApiVersion);
+        return DeviceFeatures.baselineProblem(device, instanceApiVersion, availableDeviceExtensions(device));
     }
 
     private static boolean checkDeviceExtensionSupport(VkPhysicalDevice device) {

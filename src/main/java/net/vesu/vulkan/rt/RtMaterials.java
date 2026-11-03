@@ -89,6 +89,21 @@ public final class RtMaterials {
     private static VulkanImage image;
     private static VulkanImage builtFor;
 
+    /** R11: sprite materials are gathered off the render thread, one build at a time. */
+    private static final java.util.concurrent.ExecutorService WORKER =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "Vesu RT materials");
+                t.setDaemon(true);
+                return t;
+            });
+    private static java.util.concurrent.Future<java.util.List<Rect>> pending;
+    private static VulkanImage pendingFor;
+
+    /** One sprite's material texels, tightly packed RGBA8. */
+    private record Rect(int x, int y, int w, int h, ByteBuffer pixels) {}
+
+    private record Sprite(String name, int x, int y, int w, int h) {}
+
     private RtMaterials() {}
 
     /** The atlas was restitched (resource reload): rebuild on next use. */
@@ -104,46 +119,115 @@ public final class RtMaterials {
         }
     }
 
-    /** The material atlas matching the current block atlas, or null before the atlas exists. */
+    /**
+     * The material atlas matching the current block atlas, or null while it is being
+     * built (the passes then read the all-zero {@link #blank()}) or before the atlas exists.
+     */
     public static VulkanImage image() {
         VulkanImage atlas = TextureBridge.getAtlasImage();
         if (atlas == null) return null;
-        if (dirty || image == null || builtFor != atlas) {
-            build(atlas);
+        if (dirty || (builtFor != atlas && pendingFor != atlas)) {
+            start(atlas);
         }
-        return image;
+        if (pending != null && pending.isDone()) {
+            finish();
+        }
+        return builtFor == atlas ? image : null;
     }
 
-    private static void build(VulkanImage atlas) {
+    /** Snapshots the sprite layout here, reads the textures on the worker. */
+    private static void start(VulkanImage atlas) {
         dirty = false;
-        builtFor = atlas;
-        Minecraft mc = Minecraft.getMinecraft();
-        TextureMap map = mc.getTextureMapBlocks();
+        if (pending != null) dropPending();
+        Map<String, TextureAtlasSprite> sprites =
+                ((net.vesu.mixin.render.TextureMapAccessor) Minecraft.getMinecraft().getTextureMapBlocks())
+                        .vesu$getUploadedSprites();
         int w = atlas.getWidth(), h = atlas.getHeight();
-        ByteBuffer pixels = MemoryUtil.memCalloc(w * h * 4);
-        int packed = 0, defaults = 0;
+        java.util.List<Sprite> layout = new java.util.ArrayList<>(sprites.size());
+        for (TextureAtlasSprite sprite : sprites.values()) {
+            int x0 = sprite.getOriginX(), y0 = sprite.getOriginY();
+            int sw = sprite.getIconWidth(), sh = sprite.getIconHeight();
+            if (x0 < 0 || y0 < 0 || x0 + sw > w || y0 + sh > h) continue;
+            layout.add(new Sprite(sprite.getIconName(), x0, y0, sw, sh));
+        }
+        pendingFor = atlas;
+        pending = WORKER.submit(() -> gather(layout));
+    }
+
+    private static java.util.List<Rect> gather(java.util.List<Sprite> layout) {
+        Minecraft mc = Minecraft.getMinecraft();
+        java.util.List<Rect> rects = new java.util.ArrayList<>();
         try {
-            Map<String, TextureAtlasSprite> sprites =
-                    ((net.vesu.mixin.render.TextureMapAccessor) map).vesu$getUploadedSprites();
-            for (TextureAtlasSprite sprite : sprites.values()) {
-                int x0 = sprite.getOriginX(), y0 = sprite.getOriginY();
-                int sw = sprite.getIconWidth(), sh = sprite.getIconHeight();
-                if (x0 < 0 || y0 < 0 || x0 + sw > w || y0 + sh > h) continue;
-                if (fromPack(mc, sprite.getIconName(), pixels, w, x0, y0, sw, sh)) {
-                    packed++;
-                } else if (fromDefaults(sprite.getIconName(), pixels, w, x0, y0, sw, sh)) {
-                    defaults++;
+            for (Sprite s : layout) {
+                ByteBuffer px = MemoryUtil.memCalloc(s.w * s.h * 4);
+                if (fromPack(mc, s.name, px, s.w, 0, 0, s.w, s.h)
+                        || fromDefaults(s.name, px, s.w, 0, 0, s.w, s.h)) {
+                    rects.add(new Rect(s.x, s.y, s.w, s.h, px));
+                } else {
+                    MemoryUtil.memFree(px);
                 }
             }
-            if (image != null) image.free();
-            image = new VulkanImage(1, w, h, 4, false, true);
-            image.uploadSubTextureAsync(0, w, h, 0, 0, 4, 0, 0, w, pixels);
-            Initializer.LOGGER.info("[rt] materials: {}x{}, {} sprites from packs, {} built-in", w, h, packed, defaults);
-        } catch (Exception | LinkageError e) {
-            Initializer.LOGGER.error("[rt] material atlas failed", e);
-        } finally {
-            MemoryUtil.memFree(pixels);
+        } catch (RuntimeException | LinkageError e) {
+            freeAll(rects);
+            throw e;
         }
+        return rects;
+    }
+
+    /** Uploads a finished build into a new image that replaces the current one. */
+    private static void finish() {
+        VulkanImage atlas = pendingFor;
+        java.util.List<Rect> rects;
+        try {
+            rects = pending.get();
+        } catch (Exception e) {
+            Initializer.LOGGER.error("[rt] material atlas failed", e);
+            pending = null;
+            pendingFor = null;
+            return;
+        }
+        pending = null;
+        pendingFor = null;
+        if (atlas != TextureBridge.getAtlasImage() || atlas.isFreed()) {
+            freeAll(rects);
+            return;
+        }
+        int w = atlas.getWidth(), h = atlas.getHeight();
+        try {
+            VulkanImage next = new VulkanImage(1, w, h, 4, false, true);
+            next.beginTileBatch();
+            next.clearInBatch();
+            for (Rect r : rects) {
+                next.uploadSubTextureAsync(0, r.w, r.h, r.x, r.y, 4, 0, 0, r.w, r.pixels);
+            }
+            next.endTileBatch();
+            if (image != null) image.free();
+            image = next;
+            builtFor = atlas;
+            Initializer.LOGGER.info("[rt] materials: {}x{}, {} sprites", w, h, rects.size());
+        } catch (Exception | LinkageError e) {
+            Initializer.LOGGER.error("[rt] material atlas upload failed", e);
+        } finally {
+            freeAll(rects);
+        }
+    }
+
+    private static void dropPending() {
+        java.util.concurrent.Future<java.util.List<Rect>> f = pending;
+        pending = null;
+        pendingFor = null;
+        // The worker is single-threaded, so this runs after that build and frees its result.
+        WORKER.execute(() -> {
+            try {
+                freeAll(f.get());
+            } catch (Exception ignored) {
+                // Failed: nothing was returned.
+            }
+        });
+    }
+
+    private static void freeAll(java.util.List<Rect> rects) {
+        for (Rect r : rects) MemoryUtil.memFree(r.pixels);
     }
 
     /** Copies {@code <texture>_s.png} (nearest-scaled to the sprite, first animation frame). */
@@ -210,6 +294,7 @@ public final class RtMaterials {
     }
 
     public static void destroy() {
+        if (pending != null) dropPending();
         if (blank != null) {
             blank.free();
             blank = null;

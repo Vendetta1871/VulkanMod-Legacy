@@ -1,5 +1,6 @@
 # Linux x86_64 build of the FidelityFX SDK 1.1.4 "ffx-api" Vulkan library
-# (the equivalent of the Windows amd_fidelityfx_vk.dll).
+# (the equivalent of the Windows amd_fidelityfx_vk.dll). The same sources also
+# cross-build amd_fidelityfx_vk.dll itself with mingw-w64: ./build_windows.sh.
 #
 # Prerequisites (run once, from this directory):
 #   ./prepare_sources.sh   - copies the SDK sources into ./src and applies ./patches
@@ -36,7 +37,11 @@ endif()
 # ---------------------------------------------------------------------- Vulkan
 # System Vulkan headers (/usr/include/vulkan, 1.4.363 at the time of writing)
 # are used; the SDK only requires 1.3.250+ for VK_EXT_swapchain_maintenance1.
-find_package(Vulkan REQUIRED)
+# The Windows cross build gets the headers and a loader import library from
+# build_windows.sh (VESU_VULKAN_INCLUDE, VESU_VULKAN_IMPORT_LIB).
+if(NOT WIN32)
+    find_package(Vulkan REQUIRED)
+endif()
 
 # -------------------------------------------------------------------- sources
 set(FFX_API_SOURCES
@@ -117,19 +122,27 @@ target_compile_definitions(amd_fidelityfx_vk PRIVATE
 # sources (wcscpy_s, _countof, sprintf_s, HANDLE, ...) keep compiling.
 target_compile_options(amd_fidelityfx_vk PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-include${FFX_LINUX_ROOT}/compat/ffx_linux_compat.h>
+    $<$<AND:$<BOOL:${WIN32}>,$<CXX_COMPILER_ID:GNU>>:-include${FFX_LINUX_ROOT}/compat/ffx_mingw_compat.h>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wno-deprecated-declarations>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wno-unused-variable>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wno-unused-but-set-variable>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wno-sign-compare>
 )
 
-target_link_libraries(amd_fidelityfx_vk PRIVATE Vulkan::Vulkan)
-
-set_target_properties(amd_fidelityfx_vk PROPERTIES
-    OUTPUT_NAME amd_fidelityfx_vk
-    VERSION 1.1.4
-    SOVERSION 1
-)
+if(WIN32)
+    target_include_directories(amd_fidelityfx_vk SYSTEM PRIVATE ${VESU_VULKAN_INCLUDE})
+    target_link_libraries(amd_fidelityfx_vk PRIVATE ${VESU_VULKAN_IMPORT_LIB})
+    # No mingw runtime DLLs next to it: libstdc++, libgcc and winpthread go in statically.
+    target_link_options(amd_fidelityfx_vk PRIVATE -static -s)
+    set_target_properties(amd_fidelityfx_vk PROPERTIES PREFIX "" OUTPUT_NAME amd_fidelityfx_vk)
+else()
+    target_link_libraries(amd_fidelityfx_vk PRIVATE Vulkan::Vulkan)
+    set_target_properties(amd_fidelityfx_vk PROPERTIES
+        OUTPUT_NAME amd_fidelityfx_vk
+        VERSION 1.1.4
+        SOVERSION 1
+    )
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS amd_fidelityfx_vk LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})

@@ -384,8 +384,11 @@ public class Drawer {
 
                 IntBuffer pImageIndex = stack.mallocInt(1);
 
-                int vkResult = vkAcquireNextImageKHR(device, Vulkan.getSwapChain(), VUtil.UINT64_MAX,
-                        imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex);
+                int vkResult = FrameGeneration.active()
+                        ? FrameGeneration.acquire(Vulkan.getSwapChain(), VUtil.UINT64_MAX,
+                                imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex)
+                        : vkAcquireNextImageKHR(device, Vulkan.getSwapChain(), VUtil.UINT64_MAX,
+                                imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex);
 
                 if(vkResult == VK_ERROR_OUT_OF_DATE_KHR) {
                     // No image was acquired. Recreate before the next acquire and drop this
@@ -888,7 +891,9 @@ public class Drawer {
 
             presentInfo.pImageIndices(stack.ints(imageIndex));
 
-            vkResult = vkQueuePresentKHR(getPresentQueue(), presentInfo);
+            // F9: the interpolation swapchain presents from the game queue it was given.
+            vkResult = FrameGeneration.active() ? FrameGeneration.present(getGraphicsQueue(), presentInfo)
+                    : vkQueuePresentKHR(getPresentQueue(), presentInfo);
 
             if(vkResult == VK_ERROR_OUT_OF_DATE_KHR || vkResult == VK_SUBOPTIMAL_KHR || shouldRecreate) {
                 recreateSwapChain();

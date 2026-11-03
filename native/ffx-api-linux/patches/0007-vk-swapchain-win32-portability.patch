@@ -75,7 +75,17 @@
          case VK_STRUCTURE_TYPE_SWAPCHAIN_COUNTER_CREATE_INFO_EXT:
              FFX_USE_PNEXT_AS_IS(swapchainCounter, VkSwapchainCounterCreateInfoEXT);
              break;
-@@ -2823,7 +2828,8 @@
+@@ -1647,6 +1652,9 @@
+     // create the semaphore for each image to wait on
+     for (uint32_t i = 0; i < presentInfo.realSwapchainImageCount; ++i)
+     {
++        // Vesu port: the slot already holds the "FrameRenderedSemaphore" created above;
++        // overwriting it leaked one semaphore per image on every swapchain creation.
++        vkDestroySemaphore(device, presentInfo.frameRenderedSemaphores[i], nullptr);
+         res = createSemaphoreFormat(presentInfo.frameRenderedSemaphores[i], "AMD swapchain image semaphore %d", i);
+         EXIT_ON_VKRESULT_NOT_SUCCESS(res);
+     }
+@@ -2823,7 +2831,8 @@
          // if no frame was presented, we still need to update the semaphore
          if (toWait.count > 0)
          {

@@ -71,7 +71,7 @@ public final class GpuTimer {
         int slot = Drawer.getCurrentFrame() % slots;
         if ((written[slot] & (1 << id)) != 0) return;
         written[slot] |= 1 << id;
-        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool, slot * MARKS + id);
+        VkCompat.writeTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool, slot * MARKS + id);
     }
 
     private static void collect(int slot) {

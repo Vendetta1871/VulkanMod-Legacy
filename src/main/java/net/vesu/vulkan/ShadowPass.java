@@ -159,7 +159,7 @@ public final class ShadowPass {
         if (queryPool != 0L) {
             if (queried[slot]) collect(slot);
             vkCmdResetQueryPool(cmd, queryPool, slot * 2, 2);
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queryPool, slot * 2);
+            VkCompat.writeTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queryPool, slot * 2);
             queried[slot] = true;
         }
         translucent = depthCopied = sectionsReady = false;
@@ -209,7 +209,7 @@ public final class ShadowPass {
         }
         int size = config.resolution;
         info.renderArea().extent().set(size, size);
-        vkCmdBeginRendering(cmd, info);
+        VkCompat.beginRendering(cmd, info);
         // Pack space, as everywhere: a positive viewport keeps row 0 at the bottom.
         VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
         viewport.x(0.0f).y(0.0f).width(size).height(size).minDepth(0.0f).maxDepth(1.0f);
@@ -223,7 +223,7 @@ public final class ShadowPass {
     void enterTranslucent(MemoryStack stack) {
         translucent = true;
         if (!plan.shadowDepthCopy || depthCopied) return;
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         copyDepth(stack);
         beginRendering(false, stack);
     }
@@ -263,7 +263,7 @@ public final class ShadowPass {
     void finish(MemoryStack stack) {
         if (recording != this) return;
         recording = null;
-        vkCmdEndRendering(cmd);
+        VkCompat.endRendering(cmd);
         if (plan.shadowDepthCopy && !depthCopied) copyDepth(stack);
         long reader = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
                 | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -286,7 +286,7 @@ public final class ShadowPass {
         }
         FrameTargets.pipelineBarrier(cmd, b.limit(n), stack);
         if (queryPool != 0L) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queryPool,
+            VkCompat.writeTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queryPool,
                     Drawer.getCurrentFrame() % queried.length * 2 + 1);
         }
         Drawer.endShadowCommands();

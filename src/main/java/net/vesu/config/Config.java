@@ -41,6 +41,8 @@ public class Config {
     public static final float RENDER_SCALE_MIN = 0.25f, RENDER_SCALE_MAX = 2.0f;
     /** auto (FSR 3 when scaled with ray tracing on and available, else FSR 1) | fsr3 | fsr1 | blit. */
     public String upscaler = "auto";
+    /** F9: FSR 3 frame generation (needs the FSR 3 upscaler; doubles the presented frames). */
+    public boolean frameGeneration = false;
     /** FSR sharpening 0..1, shared by FSR 1 (RCAS, 2 stops at 0 down to 0 stops at 1) and FSR 3. */
     public float fsrSharpening = 0.5f;
     /** Older per-upscaler sharpness, read once by {@link #migrate}. */
@@ -204,6 +206,12 @@ public class Config {
             case "fsr3", "fsr1", "blit" -> v;
             default -> "auto";
         };
+    }
+
+    /** VESU_FRAMEGEN=1/0 overrides the setting. */
+    public boolean effectiveFrameGeneration() {
+        String env = Env.get("VESU_FRAMEGEN");
+        return env != null ? !env.isEmpty() && env.charAt(0) != '0' : frameGeneration;
     }
 
     /** FSR 1 RCAS sharpness in stops, 0 = strongest; VESU_FSR_SHARPNESS gives stops directly. */

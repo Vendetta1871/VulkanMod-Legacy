@@ -2,6 +2,8 @@
 # Usage: build.sh <sdk-dir> <natives-dir>
 # Fetches NRD (with NRI) into <sdk-dir>, builds it and the Vesu shim, and puts
 # libvesu_nrd.so into <natives-dir>/linux-x64 (pass that dir to gradle as -PffxNatives).
+# With mingw-w64 installed (x86_64-w64-mingw32-g++) it also cross-builds vesu_nrd.dll
+# into <natives-dir>/windows-x64 (windows/CMakeLists.txt, reusing the Linux SPIR-V).
 set -euo pipefail
 NRD_TAG=v4.17.3
 SDK=$(realpath -m "${1:?sdk dir}")
@@ -30,3 +32,13 @@ mkdir -p "$OUT/linux-x64"
 cp "$SDK/shim-build/libvesu_nrd.so" "$OUT/linux-x64/"
 cp "$SDK/NRD/LICENSE.txt" "$OUT/linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt"
 echo "built $OUT/linux-x64/libvesu_nrd.so"
+
+if command -v x86_64-w64-mingw32-g++ > /dev/null; then
+    cmake -S "$HERE/windows" -B "$SDK/shim-build-win" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_TOOLCHAIN_FILE="$HERE/../windows/mingw-w64.cmake" -DNRD_SDK="$SDK/NRD"
+    cmake --build "$SDK/shim-build-win"
+    mkdir -p "$OUT/windows-x64"
+    cp "$SDK/shim-build-win/vesu_nrd.dll" "$OUT/windows-x64/"
+    cp "$SDK/NRD/LICENSE.txt" "$OUT/windows-x64/NVIDIA-RTX-SDKs-LICENSE.txt"
+    echo "built $OUT/windows-x64/vesu_nrd.dll"
+fi

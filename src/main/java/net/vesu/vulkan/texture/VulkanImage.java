@@ -229,6 +229,17 @@ public class VulkanImage {
         transferDstLayout();
     }
 
+    /** Inside a tile batch: zeroes every mip level (a new image's memory is undefined). */
+    public void clearInBatch() {
+        try (MemoryStack stack = stackPush()) {
+            VkClearColorValue zero = VkClearColorValue.calloc(stack);
+            VkImageSubresourceRange range = VkImageSubresourceRange.calloc(stack)
+                    .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(mipLevels)
+                    .baseArrayLayer(0).layerCount(1);
+            vkCmdClearColorImage(transferCmd, id, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, zero, range);
+        }
+    }
+
     /** Closes the group; one barrier returns the image to SHADER_READ_ONLY. */
     public void endTileBatch() {
         if (--tileBatchDepth != 0) {

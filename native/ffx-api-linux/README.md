@@ -31,8 +31,20 @@ mkdir -p natives/linux-x64 && cp -L build/libamd_fidelityfx_vk.so natives/linux-
 
 The jar extracts it to `config/vesu/natives/` at runtime;
 `VESU_FFX_LIB=<path>` overrides the location during development.
-The Windows DLL ships prebuilt and signed in the SDK (`PrebuiltSignedDLL/`)
-and goes to `natives/windows-x64/`.
+## Windows
+
+`./build_windows.sh <natives-dir>` cross-builds `amd_fidelityfx_vk.dll` with
+mingw-w64 (Arch: `mingw-w64-gcc`) from the same `./src` and `./generated` and
+copies it to `<natives-dir>/windows-x64/`. AMD's prebuilt DLL in the SDK
+(`PrebuiltSignedDLL/`) is not used: it keeps `FFX_MAX_QUEUED_FRAMES` at 4 and
+lacks the luma history fix (patches 0004 and 0008). The toolchain file and the
+import library source for `vulkan-1.dll` live in `../windows/`;
+`compat/ffx_mingw_compat.h` adds the includes MSVC gets through `<windows.h>`.
+The DLL depends only on `KERNEL32`, the UCRT and `vulkan-1.dll`.
+
+Checked under wine (winevulkan): the FSR 3.1 upscaler creates its context and
+dispatches with the expected output. Frame generation on Windows (the
+interpolation swapchain) was not run: it needs a window and a real present.
 
 ## Patches
 
@@ -50,7 +62,7 @@ C++ standard library.
 | 0004 context-size, queued frames | 4-byte `wchar_t` in context size math; `FFX_MAX_QUEUED_FRAMES` 4 -> 8 (views live that many `UnregisterResources` calls, and the mod runs two dispatches per frame with up to three frames in flight) |
 | 0005 ffx-message | missing include for `FFX_UNUSED` |
 | 0006 vk-backend-portability | `windows.h`/wide-string APIs; scratch sub-arrays aligned to 32 bytes (GCC emits aligned SSE stores into them, the SDK aligned to 4) |
-| 0007 vk-swapchain-portability | `CreateThread`/events/`WaitForSingleObject`/QPC in the FG swapchain |
+| 0007 vk-swapchain-portability | `CreateThread`/events/`WaitForSingleObject`/QPC in the FG swapchain; SDK bug: the per-image present semaphores overwrote the ones created just before (3 leaked per swapchain creation) |
 | 0008 luma-history-format | SDK bug: `rw_luma_history` declared `rgba8` but the image is RGBA16F |
 
 Known SDK quirk handled on the mod side: the auto-reactive output is declared

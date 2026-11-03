@@ -324,7 +324,7 @@ final class RtLightingPass {
         VkMemoryBarrier2.Buffer b = VkMemoryBarrier2.calloc(1, stack);
         b.get(0).sType$Default().srcStageMask(srcStage).srcAccessMask(srcAccess)
                 .dstStageMask(dstStage).dstAccessMask(dstAccess);
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
     }
 
     static void destroy() {

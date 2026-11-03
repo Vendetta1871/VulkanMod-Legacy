@@ -311,7 +311,7 @@ final class PackResources {
                 .srcAccessMask(VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT)
                 .dstStageMask(SHADER_STAGES | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT)
                 .dstAccessMask(VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
     }
 
     private static void destroy(Gpu g) {

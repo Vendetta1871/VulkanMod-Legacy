@@ -93,7 +93,8 @@ public class Initializer {
     /**
      * Initializes the Vulkan renderer once the game window exists. Called from a mixin
      * at the end of {@code Minecraft.init()} and retried every frame until the window
-     * shows up. On hard failure the game keeps running with the vanilla OpenGL renderer.
+     * shows up. On failure the game does not continue on OpenGL (M2): the renderer's
+     * hooks assume Vulkan, so it shows the reason in a native dialog and exits.
      */
     public static void initVulkan() {
         if (vulkanActive || initGaveUp) {
@@ -152,12 +153,16 @@ public class Initializer {
             }
             if (initAttempts > 1200) {
                 initGaveUp = true;
-                LOGGER.error("No game window after {} attempts, staying on OpenGL", initAttempts);
+                LOGGER.error("No game window after {} attempts", initAttempts);
+                fail("Vesu could not find the game window.");
             }
         } catch (Throwable t) {
             initGaveUp = true;
-            LOGGER.error("Vulkan initialization failed, falling back to OpenGL", t);
-            notifyFallback(t);
+            LOGGER.error("Vulkan initialization failed", t);
+            fail(t instanceof net.vesu.vulkan.Vulkan.UnsupportedGpuException
+                    ? t.getMessage() + "\n\nVesu needs Vulkan 1.3, or Vulkan 1.2 with VK_KHR_dynamic_rendering "
+                            + "and VK_KHR_synchronization2. Update the graphics driver."
+                    : "Vulkan failed to start: " + t + "\n\nSee logs/latest.log.");
             // M20: release whatever init managed to create (device, surface, VMA,
             // instance) before handing the window back to the GL path. A cleanup
             // failure must not mask the original error.
@@ -169,19 +174,21 @@ public class Initializer {
         }
     }
 
-    /** Tells the player the game runs on OpenGL now (a toast on the main menu). */
-    private static void notifyFallback(Throwable cause) {
-        String reason = String.valueOf(cause.getMessage()).contains("suitable GPU")
-                ? "Needs Vulkan 1.3 (dynamic rendering, sync2)" : "Vulkan failed to start, see the log";
-        try {
-            Minecraft mc = Minecraft.getMinecraft();
-            mc.addScheduledTask(() -> mc.getToastGui().add(new net.minecraft.client.gui.toasts.SystemToast(
-                    net.minecraft.client.gui.toasts.SystemToast.Type.TUTORIAL_HINT,
-                    new net.minecraft.util.text.TextComponentString("Vesu: using OpenGL"),
-                    new net.minecraft.util.text.TextComponentString(reason))));
-        } catch (Throwable ignored) {
-            // The log line above already reports it.
+    /**
+     * Shows why Vulkan did not start in an SDL message box (it needs neither GL nor
+     * Vulkan) and exits. Autotest runs only log it: nobody would close the box.
+     */
+    private static void fail(String reason) {
+        LOGGER.error("Vesu cannot start: {}", reason);
+        if (Env.get("VESU_AUTOTEST") == null) {
+            try {
+                org.lwjgl.sdl.SDLMessageBox.SDL_ShowSimpleMessageBox(org.lwjgl.sdl.SDLMessageBox.SDL_MESSAGEBOX_ERROR,
+                        "Vesu cannot start", reason, capturedWindowHandle);
+            } catch (Throwable t) {
+                LOGGER.error("Could not show the message box", t);
+            }
         }
+        net.minecraftforge.fml.common.FMLCommonHandler.instance().exitJava(1, false);
     }
 
     public static boolean isVulkanActive() {

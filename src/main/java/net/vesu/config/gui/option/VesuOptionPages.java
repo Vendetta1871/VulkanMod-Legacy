@@ -102,6 +102,14 @@ public final class VesuOptionPages {
                                         + "Below 100% it is upscaled and faster; above 100% it is supersampled: smoother edges, much slower.")
                                 .impact(Impact.HIGH),
                         scaling,
+                        new Option.Toggle("Frame Generation", Storage.VESU, () -> cfg().frameGeneration,
+                                v -> cfg().frameGeneration = v)
+                                .tooltip("FSR 3 inserts a generated frame between every two rendered ones: smoother motion at "
+                                        + "about the same input latency as without it. Works while FSR 3 upscales the world "
+                                        + "(Scaling Method FSR 3, or Auto with ray tracing); menus and shader packs show rendered frames only.")
+                                .impact(Impact.LOW)
+                                .availableWhen(() -> fsr3 && !scaling.pending().equals("blit") && !scaling.pending().equals("fsr1"),
+                                        () -> fsr3 ? "Needs FSR 3 as the scaling method." : "The FSR 3 library could not be loaded."),
                         vesuSlider("FSR Sharpening", 0.0f, 1.0f, 0.05f, v -> v <= 0.0f ? "Off" : Math.round(v * 100.0f) + "%",
                                 () -> cfg().fsrSharpening, v -> cfg().fsrSharpening = v)
                                 .tooltip("Sharpening after FSR 1 and FSR 3.")

@@ -14,14 +14,16 @@ presentation layer is Vulkan.
 
 - Minecraft 1.12.2 with [Cleanroom](https://github.com/CleanroomMC/Cleanroom) (LWJGL3 and the Kirino
   GL-state tracking are provided by Cleanroom; this port was developed against Cleanroom 0.7.12-alpha)
-- A Vulkan-capable GPU and driver (developed and tested on Linux/NVIDIA)
+- A GPU and driver with Vulkan 1.3, or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and
+  `VK_KHR_synchronization2` (developed and tested on Linux/NVIDIA)
 
 ## Install
 
 1. Install Cleanroom for Minecraft 1.12.2.
 2. Drop `Vesu_1.12.2-<version>.jar` into your `mods/` folder.
-3. Launch the game. If the Vulkan renderer fails to initialize, the mod logs the error and you can
-   fall back by setting the environment variable `VESU_DISABLE=1`.
+3. Launch the game. If the Vulkan renderer cannot start, the game shows the reason (for example,
+   which Vulkan version or extension the GPU lacks) and can only be quit; it does not continue on
+   OpenGL. `VESU_DISABLE=1` runs the game without Vesu's renderer.
 
 ## Configuration
 
@@ -42,6 +44,7 @@ Vanilla options still go to `options.txt`, Vesu's own to `config/vesu_settings.j
 | `precipitation`      | `fancy` | `fancy` or `off`                                              |
 | `rtPreset`           | `off`   | Ray tracing: `off`, `potato`, `low`, `medium`, `high`, `ultra`, `nasa`, `custom` |
 | `shaderPack`         | none    | Selected pack in `shaderpacks/`, or `builtin:sample_post`, `builtin:vibrant_visuals` |
+| `frameGeneration`    | `false` | FSR 3 frame generation: a generated frame between every two rendered ones, while FSR 3 upscales |
 | `frameQueueSize`     | `3`     | Frames in flight; read at startup                             |
 
 Settings and caches of versions named VulkanMod (`config/vulkanmod_settings.json`,
@@ -50,6 +53,10 @@ Settings and caches of versions named VulkanMod (`config/vulkanmod_settings.json
 Environment variables (the older `VULKANMOD_*` spellings still work):
 
 - `VESU_DISABLE=1` - keep the original OpenGL path (useful for bisecting issues).
+- `VESU_VK_API=1.2` - cap the Vulkan version, to test the Vulkan 1.2 path on a newer driver.
+  NRD needs Vulkan 1.3; on 1.2 the RT passes use their own denoiser.
+- `VESU_FRAMEGEN=1` / `0` - force frame generation on or off; `VESU_FRAMEGEN_LOG=1` logs
+  rendered against presented frames, `VESU_FRAMEGEN_DEBUG=1` draws FSR's debug overlays.
 - `VESU_BATCH=1` - opt-in chunk batching: uploads all visible chunk sections into one arena
   buffer and draws them with indirect commands.
 

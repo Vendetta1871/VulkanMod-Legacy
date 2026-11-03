@@ -128,7 +128,8 @@ processResources {
         from(ffxNatives) {
             include 'linux-x64/libamd_fidelityfx_vk.so', 'windows-x64/amd_fidelityfx_vk.dll',
                     // NRD (native/nrd-linux) and the license it must ship with
-                    'linux-x64/libvesu_nrd.so', 'linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt'
+                    'linux-x64/libvesu_nrd.so', 'linux-x64/NVIDIA-RTX-SDKs-LICENSE.txt',
+                    'windows-x64/vesu_nrd.dll', 'windows-x64/NVIDIA-RTX-SDKs-LICENSE.txt'
             into 'natives'
         }
     }

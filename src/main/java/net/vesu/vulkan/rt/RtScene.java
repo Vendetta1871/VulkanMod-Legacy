@@ -1,5 +1,6 @@
 package net.vesu.vulkan.rt;
 
+import net.vesu.vulkan.VkCompat;
 import net.vesu.Env;
 
 import net.vesu.Initializer;
@@ -281,9 +282,10 @@ public final class RtScene {
                 .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
                 .dstAccessMask(VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR
                         | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(pre));
 
-        boolean built = buildBlases(cmd);
+        boolean built = RtCompaction.compact(cmd);
+        built |= buildBlases(cmd);
         RtEntities.build(cmd, stack);
         built |= RtEntities.ready();
         if (built) breadcrumb(cmd, stack, 2);
@@ -293,6 +295,7 @@ public final class RtScene {
                     VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                     VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+            RtCompaction.writeQueries(cmd);
         }
         buildTlas(cmd);
         RtLights.update(cmd, sections, CameraHistory.camX(), CameraHistory.camY(), CameraHistory.camZ());
@@ -362,7 +365,7 @@ public final class RtScene {
         VkMemoryBarrier2.Buffer b = VkMemoryBarrier2.calloc(1, stack);
         b.get(0).sType$Default().srcStageMask(srcStage).srcAccessMask(srcAccess)
                 .dstStageMask(dstStage).dstAccessMask(dstAccess);
-        vkCmdPipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
+        VkCompat.pipelineBarrier2(cmd, VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(b));
     }
 
     /** Builds up to MAX_BUILDS_PER_FRAME queued, placed BLASes in one call. */
@@ -426,7 +429,9 @@ public final class RtScene {
 
                 VkAccelerationStructureBuildGeometryInfoKHR info = infos.get(i).sType$Default()
                         .type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                        .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+                        // R10: compacted once the build is done (RtCompaction).
+                        .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                                | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
                         .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
                         .geometryCount(1)
                     .pGeometries(geometry);
@@ -464,6 +469,7 @@ public final class RtScene {
                 infos.get(i).scratchData().deviceAddress(scratchBase + scratchOffsets[i]);
             }
             vkCmdBuildAccelerationStructuresKHR(cmd, infos, ranges);
+            for (Section s : batch) RtCompaction.onBuilt(s);
             if (LOG) {
                 int maxVerts = 0;
                 for (Section s : batch) maxVerts = Math.max(maxVerts, s.vertexCount);
@@ -729,6 +735,7 @@ public final class RtScene {
             if (instanceBuffers[i] != null) { instanceBuffers[i].destroyNow(); instanceBuffers[i] = null; }
             if (instanceDataBuffers[i] != null) { instanceDataBuffers[i].destroyNow(); instanceDataBuffers[i] = null; }
         }
+        RtCompaction.destroy();
         RtLights.destroy();
         RtEntities.destroy();
         RtMaterials.destroy();

@@ -134,6 +134,7 @@ public abstract class EntityRendererM implements net.vesu.render.IHandInScene {
 
     @Inject(method = "updateCameraAndRender", at = @At("HEAD"))
     private void vesu$beginFrame(float partialTicks, long finishTimeNano, CallbackInfo ci) {
+        if (!Initializer.isVulkanActive()) return;
         FrameProfiler.renderBegin();
         GuiRenderer.recordFrameBegin();
         GuiRenderer.setGuiPass(false);

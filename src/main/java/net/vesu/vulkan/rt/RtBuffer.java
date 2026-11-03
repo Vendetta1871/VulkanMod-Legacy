@@ -88,6 +88,10 @@ final class RtBuffer {
     private static final ArrayDeque<Object[]> pending = new ArrayDeque<>();
     private static long frame;
 
+    static long frame() { return frame; }
+
+    static int delayFrames() { return delay(); }
+
     /** Queues {@code release} to run once no in-flight frame can use the object. */
     static void defer(Runnable release) {
         pending.add(new Object[]{frame + delay(), release});
