@@ -1,0 +1,21 @@
+#version 450
+// LOD Hi-Z (AUDIT 5.11): each level keeps the farthest depth of its 2x2 footprint below.
+// Reverse-Z: far is 0, so farthest = min. Pixels without geometry stay 0 and never occlude.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D src;           // the scene depth (level 0) or the previous level
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D dst;
+layout(push_constant) uniform P { ivec2 srcSize; } pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dst);
+    if (any(greaterThanEqual(p, size))) return;
+    ivec2 s = p * 2;
+    ivec2 m = pc.srcSize - 1;
+    float d = min(min(texelFetch(src, min(s, m), 0).r, texelFetch(src, min(s + ivec2(1, 0), m), 0).r),
+                  min(texelFetch(src, min(s + ivec2(0, 1), m), 0).r, texelFetch(src, min(s + ivec2(1, 1), m), 0).r));
+    // Odd sizes: the last column/row also covers the texel past the pair.
+    if ((pc.srcSize.x & 1) == 1 && p.x == size.x - 1) d = min(d, min(texelFetch(src, min(s + ivec2(2, 0), m), 0).r, texelFetch(src, min(s + ivec2(2, 1), m), 0).r));
+    if ((pc.srcSize.y & 1) == 1 && p.y == size.y - 1) d = min(d, min(texelFetch(src, min(s + ivec2(0, 2), m), 0).r, texelFetch(src, min(s + ivec2(1, 2), m), 0).r));
+    imageStore(dst, p, vec4(d));
+}

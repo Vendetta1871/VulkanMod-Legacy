@@ -220,17 +220,38 @@ public final class LodSession {
             viewProj.frustumPlane(i, planes[i]);
         }
         buildCover(mc);
+        candOpaque = 0;
+        candTranslucent = 0;
         select(mc);
         writeUniforms(mc);
         renderer.endUploads();
-        renderer.drawOpaque();
+        if (renderer.gpuCull) {
+            // Translucent candidates go far to near; the GPU keeps that order.
+            Integer[] idx = new Integer[candTranslucent];
+            for (int i = 0; i < candTranslucent; i++) idx[i] = i;
+            java.util.Arrays.sort(idx, (a, b) -> Float.compare(transDist[b], transDist[a]));
+            int[] sorted = new int[candTranslucent];
+            for (int i = 0; i < candTranslucent; i++) sorted[i] = transSlots[idx[i]];
+            renderer.setCandidates(opaqueSlots, candOpaque, sorted, candTranslucent);
+            org.lwjgl.vulkan.VkCommandBuffer cmd = net.vesu.vulkan.Drawer.currentCommandBuffer();
+            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                net.vesu.vulkan.FrameTargets.suspendSceneForCompute(cmd, stack);
+                renderer.cull(cmd, net.vesu.vulkan.FrameTargets.scene.depthView(),
+                        net.vesu.vulkan.FrameTargets.scene.width(), net.vesu.vulkan.FrameTargets.scene.height());
+                net.vesu.vulkan.FrameTargets.resumeScene(cmd, stack);
+            }
+            renderer.drawOpaqueGpu();
+        } else {
+            renderer.drawOpaque();
+        }
         if ((frame & 255) == 0) cleanup();
     }
 
     void renderTranslucent() {
         if (!frameOpen || renderer == null) return;
         frameOpen = false;
-        renderer.drawTranslucent();
+        if (renderer.gpuCull) renderer.drawTranslucentGpu();
+        else renderer.drawTranslucent();
     }
 
     private void applyResults() {
@@ -270,6 +291,7 @@ public final class LodSession {
                 n.slot = renderer.allocSlot();
                 if (n.slot >= 0) renderer.writeSection(n.slot, n.x << (5 + n.lvl), n.y << (5 + n.lvl), n.z << (5 + n.lvl), n.lvl);
             }
+            if (n.slot >= 0) renderer.writeMeta(n.slot, Math.max(0, start), r.aabb, r.counts);
         }
     }
 
@@ -394,9 +416,27 @@ public final class LodSession {
         draw(n, x0, y0, z0, size);
     }
 
+    private int[] opaqueSlots = new int[4096], transSlots = new int[1024];
+    private float[] transDist = new float[1024];
+    private int candOpaque, candTranslucent;
+
     private void draw(Node n, double x0, double y0, double z0, double size) {
         if (n.quadStart < 0 || n.slot < 0) return;
         drawnSections++;
+        if (renderer.gpuCull) {
+            if (candOpaque == opaqueSlots.length) opaqueSlots = java.util.Arrays.copyOf(opaqueSlots, candOpaque * 2);
+            opaqueSlots[candOpaque++] = n.slot;
+            if (n.counts[MeshResult.G_TRANSLUCENT] > 0) {
+                if (candTranslucent == transSlots.length) {
+                    transSlots = java.util.Arrays.copyOf(transSlots, candTranslucent * 2);
+                    transDist = java.util.Arrays.copyOf(transDist, candTranslucent * 2);
+                }
+                double cxr = x0 + size / 2 - camX, cyr = y0 + size / 2 - camY, czr = z0 + size / 2 - camZ;
+                transDist[candTranslucent] = (float) (cxr * cxr + cyr * cyr + czr * czr);
+                transSlots[candTranslucent++] = n.slot;
+            }
+            return;
+        }
         long q = n.quadStart;
         double cxr = x0 + size / 2 - camX, cyr = y0 + size / 2 - camY, czr = z0 + size / 2 - camZ;
         float dist = (float) Math.sqrt(cxr * cxr + cyr * cyr + czr * czr);

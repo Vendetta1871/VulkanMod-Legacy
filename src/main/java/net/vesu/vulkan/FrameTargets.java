@@ -286,6 +286,19 @@ public final class FrameTargets {
         depthReadable = false;
     }
 
+    /** LOD culling (AUDIT 5.15): leaves scene rendering with the depth readable by compute. */
+    public static void suspendSceneForCompute(VkCommandBuffer cmd, MemoryStack stack) {
+        VkCompat.endRendering(cmd);
+        sceneDepthToShaderRead(cmd, stack);
+    }
+
+    /** Resumes scene rendering after {@link #suspendSceneForCompute}, everything loaded. */
+    public static void resumeScene(VkCommandBuffer cmd, MemoryStack stack) {
+        depthBackToAttachment(cmd, stack);
+        Drawer.invalidateBoundPipeline(cmd);
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+    }
+
     /**
      * Before the translucent layer of a pack frame: leaves rendering when the pack has a
      * reason to (depth copy, {@code DEFERRED}), and resumes with everything loaded.

@@ -47,6 +47,18 @@ public final class LodRenderer {
     private long tintsBuf, tintsAlloc, tintsPtr;
     private final long[] uboBuf, uboAlloc, uboPtr, cmdBuf, cmdAlloc, cmdPtr, coverBuf, coverAlloc, coverPtr, stagingBuf, stagingAlloc, stagingPtr;
 
+    // GPU culling (L6): per-slot meta, per-frame candidates, device-written commands and counts, Hi-Z.
+    private long metaBuf, metaAlloc, metaPtr;
+    private final long[] candBuf, candAlloc, candPtr, gpuCmdBuf, gpuCmdAlloc, countBuf, countAlloc;
+    private long hizImage, hizAlloc, hizView, hizSampler, depthSampler;
+    private long[] hizLevelViews = new long[0];
+    private int hizW, hizH, hizLevels;
+    private long hizLayout;
+    private long[][] hizSets;
+    private net.vesu.vulkan.ComputePipeline cullPipeline, hizPipeline;
+    private int opaqueCandidates, translucentCandidates;
+    public final boolean gpuCull;
+
     private VulkanImage atlas;
     private int atlasRows;
     private final java.util.List<int[][]> tiles = new java.util.ArrayList<>();
@@ -91,6 +103,26 @@ public final class LodRenderer {
             MemoryUtil.memSet(modelsPtr, 0, 65536L * 64);
             r = hostBuffer(stack, (long) Bakery.TINT_STRIDE * Bakery.TINT_SLOTS * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             tintsBuf = r[0]; tintsAlloc = r[1]; tintsPtr = r[2];
+        }
+        gpuCull = Vulkan.getDeviceInfo().features.drawIndirectCount && net.vesu.Env.get("VESU_LOD_CPU") == null;
+        candBuf = new long[frames]; candAlloc = new long[frames]; candPtr = new long[frames];
+        gpuCmdBuf = new long[frames]; gpuCmdAlloc = new long[frames];
+        countBuf = new long[frames]; countAlloc = new long[frames];
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            long[] r = hostBuffer(stack, (long) MAX_SECTIONS * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            metaBuf = r[0]; metaAlloc = r[1]; metaPtr = r[2];
+            for (int i = 0; i < frames; i++) {
+                r = hostBuffer(stack, (long) MAX_SECTIONS * 2 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                candBuf[i] = r[0]; candAlloc[i] = r[1]; candPtr[i] = r[2];
+                LongBuffer pb = stack.mallocLong(1);
+                PointerBuffer pa = stack.mallocPointer(1);
+                MemoryManager.createBuffer((long) MAX_DRAWS * 16 * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pb, pa);
+                gpuCmdBuf[i] = pb.get(0); gpuCmdAlloc[i] = pa.get(0);
+                MemoryManager.createBuffer(64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+                        | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pb, pa);
+                countBuf[i] = pb.get(0); countAlloc[i] = pa.get(0);
+            }
         }
         uboBuf = new long[frames]; uboAlloc = new long[frames]; uboPtr = new long[frames];
         cmdBuf = new long[frames]; cmdAlloc = new long[frames]; cmdPtr = new long[frames];
@@ -232,6 +264,28 @@ public final class LodRenderer {
         MemoryUtil.memPutInt(p + 12, lvl);
     }
 
+    /** Culling data of a slot: quad start, AABB and the eight group counts. */
+    public void writeMeta(int slot, long quadStart, int aabb, int[] counts) {
+        long p = metaPtr + (long) slot * 32;
+        MemoryUtil.memPutInt(p, (int) quadStart);
+        MemoryUtil.memPutInt(p + 4, aabb);
+        for (int g = 0; g < 8; g++) {
+            MemoryUtil.memPutShort(p + 8 + g * 2L, (short) Math.min(0xFFFF, counts[g]));
+        }
+        MemoryUtil.memPutLong(p + 24, 0);
+    }
+
+    /** GPU path: this frame's candidate sections, opaque ones then translucent ones far to near. */
+    public void setCandidates(int[] opaque, int nOpaque, int[] translucent, int nTranslucent) {
+        int n = Math.min(nOpaque, MAX_SECTIONS);
+        int m = Math.min(nTranslucent, MAX_SECTIONS);
+        long p = candPtr[frame];
+        for (int i = 0; i < n; i++) MemoryUtil.memPutInt(p + i * 4L, opaque[i]);
+        for (int i = 0; i < m; i++) MemoryUtil.memPutInt(p + (n + i) * 4L, translucent[i]);
+        opaqueCandidates = n;
+        translucentCandidates = m;
+    }
+
     public void freeSlot(int slot) {
         if (slot >= 0) pendingFrees.add(new long[]{frameNo, 0, slot, 0});
     }
@@ -353,7 +407,7 @@ public final class LodRenderer {
 
     private void writeSet(int i) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(8, stack);
+            VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(gpuCull ? 13 : 8, stack);
             long[] bufs = {uboBuf[i], arena, sectionsBuf, modelsBuf, tintsBuf};
             int[] types = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
@@ -374,6 +428,18 @@ public final class LodRenderer {
             VkDescriptorBufferInfo.Buffer ci = VkDescriptorBufferInfo.calloc(1, stack).buffer(coverBuf[i]).offset(0).range(VK_WHOLE_SIZE);
             w.get(7).sType$Default().dstSet(sets[i]).dstBinding(7).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                     .descriptorCount(1).pBufferInfo(ci);
+            if (gpuCull) {
+                long[] extra = {metaBuf, candBuf[i], gpuCmdBuf[i], countBuf[i]};
+                for (int b = 0; b < 4; b++) {
+                    VkDescriptorBufferInfo.Buffer bi = VkDescriptorBufferInfo.calloc(1, stack).buffer(extra[b]).offset(0).range(VK_WHOLE_SIZE);
+                    w.get(8 + b).sType$Default().dstSet(sets[i]).dstBinding(8 + b).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                            .descriptorCount(1).pBufferInfo(bi);
+                }
+                VkDescriptorImageInfo.Buffer hi = VkDescriptorImageInfo.calloc(1, stack).sampler(hizSampler)
+                        .imageView(hizView).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
+                w.get(12).sType$Default().dstSet(sets[i]).dstBinding(12).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(1).pImageInfo(hi);
+            }
             vkUpdateDescriptorSets(device, w, null);
         }
     }
@@ -382,19 +448,22 @@ public final class LodRenderer {
 
     private void createLayout() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(8, stack);
-            int vf = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            int n = gpuCull ? 13 : 8;
+            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(n, stack);
+            int vf = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
             int[] types = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-            for (int i = 0; i < 8; i++) b.get(i).binding(i).descriptorType(types[i]).descriptorCount(1).stageFlags(vf);
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER};
+            for (int i = 0; i < n; i++) b.get(i).binding(i).descriptorType(types[i]).descriptorCount(1).stageFlags(vf);
             LongBuffer p = stack.mallocLong(1);
             check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(b), null, p), "set layout");
             setLayout = p.get(0);
             VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(3, stack);
             sizes.get(0).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(frames * 2);
-            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 10);
-            sizes.get(2).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(frames * 4);
+            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 20);
+            sizes.get(2).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(frames * 8);
             check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
                     .flags(VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT).maxSets(frames * 2).pPoolSizes(sizes), null, p), "pool");
             pool = p.get(0);
@@ -555,10 +624,208 @@ public final class LodRenderer {
         }
     }
 
+    // ---- GPU culling (L6) ----
+
+    private void ensureHiz(int sceneW, int sceneH) {
+        int w = Math.max(1, (sceneW + 1) / 2), h = Math.max(1, (sceneH + 1) / 2);
+        if (w == hizW && h == hizH && hizImage != 0) return;
+        destroyHiz();
+        hizW = w;
+        hizH = h;
+        hizLevels = 1 + (int) Math.floor(Math.log(Math.max(w, h)) / Math.log(2));
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            LongBuffer pi = stack.mallocLong(1);
+            PointerBuffer pa = stack.mallocPointer(1);
+            MemoryManager.createImage(w, h, hizLevels, VK_FORMAT_R32_SFLOAT, VK_IMAGE_TILING_OPTIMAL,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pi, pa);
+            hizImage = pi.get(0);
+            hizAlloc = pa.get(0);
+            hizView = view(stack, 0, hizLevels);
+            hizLevelViews = new long[hizLevels];
+            for (int l = 0; l < hizLevels; l++) hizLevelViews[l] = view(stack, l, 1);
+            if (hizSampler == 0) {
+                VkSamplerCreateInfo si = VkSamplerCreateInfo.calloc(stack).sType$Default()
+                        .magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                        .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                        .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).minLod(0).maxLod(16);
+                check(vkCreateSampler(device, si, null, pi), "hiz sampler");
+                hizSampler = pi.get(0);
+                depthSampler = hizSampler;
+            }
+            if (hizLayout == 0) {
+                VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(2, stack);
+                b.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+                b.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+                check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(b), null, pi), "hiz layout");
+                hizLayout = pi.get(0);
+                VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
+                sizes.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(frames * 16);
+                sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(frames * 16);
+                check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
+                        .maxSets(frames * 16).pPoolSizes(sizes), null, pi), "hiz pool");
+                hizPool = pi.get(0);
+                LongBuffer layouts = stack.mallocLong(16);
+                for (int i = 0; i < 16; i++) layouts.put(i, hizLayout);
+                hizSets = new long[frames][16];
+                for (int f = 0; f < frames; f++) {
+                    LongBuffer out = stack.mallocLong(16);
+                    check(vkAllocateDescriptorSets(device, VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
+                            .descriptorPool(hizPool).pSetLayouts(layouts), out), "hiz sets");
+                    for (int i = 0; i < 16; i++) hizSets[f][i] = out.get(i);
+                }
+            }
+        }
+        setsFresh = false;
+    }
+
+    private long hizPool;
+
+    private long view(MemoryStack stack, int base, int count) {
+        VkImageViewCreateInfo vi = VkImageViewCreateInfo.calloc(stack).sType$Default().image(hizImage)
+                .viewType(VK_IMAGE_VIEW_TYPE_2D).format(VK_FORMAT_R32_SFLOAT);
+        vi.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(base).levelCount(count).baseArrayLayer(0).layerCount(1);
+        LongBuffer p = stack.mallocLong(1);
+        check(vkCreateImageView(device, vi, null, p), "hiz view");
+        return p.get(0);
+    }
+
+    private void destroyHiz() {
+        if (hizImage == 0) return;
+        long img = hizImage, alloc = hizAlloc, full = hizView;
+        long[] views = hizLevelViews.clone();
+        MemoryManager.addToFreeable(() -> {
+            for (long v : views) vkDestroyImageView(device, v, null);
+            vkDestroyImageView(device, full, null);
+            MemoryManager.freeImage(img, alloc);
+        });
+        hizImage = 0;
+    }
+
+    private void ensureComputePipelines() {
+        if (cullPipeline != null) return;
+        ShaderSPIRVUtils.SPIRV cull = ShaderSPIRVUtils.compileShaderFile("lod/cull.comp", ShaderSPIRVUtils.ShaderKind.COMPUTE_SHADER);
+        ShaderSPIRVUtils.SPIRV hiz = ShaderSPIRVUtils.compileShaderFile("lod/hiz.comp", ShaderSPIRVUtils.ShaderKind.COMPUTE_SHADER);
+        if (cull == null || hiz == null) throw new IllegalStateException("LOD compute shaders failed to compile");
+        cullPipeline = new net.vesu.vulkan.ComputePipeline(cull, new long[]{setLayout}, 32);
+        hizPipeline = new net.vesu.vulkan.ComputePipeline(hiz, new long[]{hizLayout}, 8);
+    }
+
+    /**
+     * Outside scene rendering, with the scene depth readable: builds the Hi-Z of this frame's
+     * vanilla depth, then culls the candidates and writes the indirect draws.
+     */
+    public void cull(VkCommandBuffer cmd, long depthView, int sceneW, int sceneH) {
+        ensureHiz(sceneW, sceneH);
+        ensureComputePipelines();
+        if (!setsFresh) {
+            for (int i = 0; i < frames; i++) writeSet(i);
+            setsFresh = true;
+        }
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            // Hi-Z: UNDEFINED -> GENERAL, then one dispatch per level.
+            VkImageMemoryBarrier.Buffer ib = VkImageMemoryBarrier.calloc(1, stack).sType$Default()
+                    .srcAccessMask(0).dstAccessMask(VK_ACCESS_SHADER_WRITE_BIT)
+                    .oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL)
+                    .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).image(hizImage);
+            ib.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(hizLevels).layerCount(1);
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, null, null, ib);
+            vkCmdFillBuffer(cmd, countBuf[frame], 0, 64, 0);
+
+            hizPipeline.bind(cmd);
+            int levels = Math.min(hizLevels, 16);
+            VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(levels * 2, stack);
+            for (int l = 0; l < levels; l++) {
+                long set = hizSets[frame][l];
+                VkDescriptorImageInfo.Buffer src = VkDescriptorImageInfo.calloc(1, stack).sampler(depthSampler)
+                        .imageView(l == 0 ? depthView : hizLevelViews[l - 1])
+                        .imageLayout(l == 0 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL);
+                VkDescriptorImageInfo.Buffer dst = VkDescriptorImageInfo.calloc(1, stack).imageView(hizLevelViews[l])
+                        .imageLayout(VK_IMAGE_LAYOUT_GENERAL);
+                w.get(l * 2).sType$Default().dstSet(set).dstBinding(0).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(1).pImageInfo(src);
+                w.get(l * 2 + 1).sType$Default().dstSet(set).dstBinding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                        .descriptorCount(1).pImageInfo(dst);
+            }
+            vkUpdateDescriptorSets(device, w, null);
+            int sw = sceneW, sh = sceneH;
+            for (int l = 0; l < levels; l++) {
+                int lw = Math.max(1, hizW >> l), lh = Math.max(1, hizH >> l);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hizPipeline.layout(), 0, stack.longs(hizSets[frame][l]), null);
+                vkCmdPushConstants(cmd, hizPipeline.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, stack.ints(sw, sh));
+                vkCmdDispatch(cmd, (lw + 7) / 8, (lh + 7) / 8, 1);
+                VkMemoryBarrier.Buffer mb = VkMemoryBarrier.calloc(1, stack).sType$Default()
+                        .srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)
+                        .dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, mb, null, null);
+                sw = lw;
+                sh = lh;
+            }
+
+            int total = opaqueCandidates + translucentCandidates;
+            if (total > 0) {
+                cullPipeline.bind(cmd);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline.layout(), 0, stack.longs(sets[frame]), null);
+                ByteBuffer pc = stack.malloc(32);
+                pc.putInt(0, opaqueCandidates).putInt(4, translucentCandidates).putInt(8, MAX_DRAWS).putInt(12, levels)
+                        .putFloat(16, hizW).putFloat(20, hizH).putFloat(24, sceneW).putFloat(28, sceneH);
+                vkCmdPushConstants(cmd, cullPipeline.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
+                vkCmdDispatch(cmd, (total + 63) / 64, 1, 1);
+            }
+            VkMemoryBarrier.Buffer mb = VkMemoryBarrier.calloc(1, stack).sType$Default()
+                    .srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)
+                    .dstAccessMask(VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, mb, null, null);
+        }
+    }
+
+    public void drawOpaqueGpu() {
+        if (opaqueCandidates == 0) return;
+        VkCommandBuffer cmd = Drawer.currentCommandBuffer();
+        if (opaquePipeline == 0 || pipelineDepthFormat != FrameTargets.depthFormat()) createPipelines();
+        bind(cmd, opaquePipeline);
+        VK12.vkCmdDrawIndirectCount(cmd, gpuCmdBuf[frame], 0, countBuf[frame], 0, MAX_DRAWS, 16);
+        Drawer.forgetBoundPipeline(cmd);
+    }
+
+    public void drawTranslucentGpu() {
+        if (translucentCandidates == 0) return;
+        VkCommandBuffer cmd = Drawer.currentCommandBuffer();
+        bind(cmd, translucentPipeline);
+        long offset = (long) MAX_DRAWS * 16;
+        for (int done = 0; done < translucentCandidates; done += maxDrawIndirect) {
+            vkCmdDrawIndirect(cmd, gpuCmdBuf[frame], offset + done * 16L, Math.min(maxDrawIndirect, translucentCandidates - done), 16);
+        }
+        Drawer.forgetBoundPipeline(cmd);
+    }
+
+    public int candidates() {
+        return opaqueCandidates + translucentCandidates;
+    }
+
     public void destroy() {
         long[] all = {arena, arenaAlloc, sectionsBuf, sectionsAlloc, modelsBuf, modelsAlloc, tintsBuf, tintsAlloc};
         // The image defers its own destruction; queued tasks must not queue more tasks.
         atlas.free();
+        destroyHiz();
+        net.vesu.vulkan.ComputePipeline cp = cullPipeline, hp = hizPipeline;
+        long hl = hizLayout, hpool = hizPool, hs = hizSampler, mb = metaBuf, ma = metaAlloc;
+        long[] cb = candBuf.clone(), ca = candAlloc.clone(), gb = gpuCmdBuf.clone(), ga = gpuCmdAlloc.clone(),
+                kb = countBuf.clone(), ka = countAlloc.clone();
+        MemoryManager.addToFreeable(() -> {
+            if (cp != null) cp.cleanUp();
+            if (hp != null) hp.cleanUp();
+            if (hpool != 0) vkDestroyDescriptorPool(device, hpool, null);
+            if (hl != 0) vkDestroyDescriptorSetLayout(device, hl, null);
+            if (hs != 0) vkDestroySampler(device, hs, null);
+            MemoryManager.freeBuffer(mb, ma);
+            for (int i = 0; i < cb.length; i++) {
+                MemoryManager.freeBuffer(cb[i], ca[i]);
+                MemoryManager.freeBuffer(gb[i], ga[i]);
+                MemoryManager.freeBuffer(kb[i], ka[i]);
+            }
+        });
         MemoryManager.addToFreeable(() -> {
             destroyPipelines();
             vkDestroyPipelineLayout(device, pipelineLayout, null);

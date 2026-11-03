@@ -1,0 +1,111 @@
+#version 450
+// LOD culling and draw generation (AUDIT 5.11, 5.15): per candidate section, frustum and
+// Hi-Z tests against this frame's vanilla depth, then one indirect draw per face group that
+// can face the camera. Opaque draws are appended (drawn with an indirect count); translucent
+// ones keep the CPU's far-to-near order in place, culled ones get zero vertices.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lod_common.glsl"
+
+layout(std430, set = 0, binding = 2) readonly buffer Sections { ivec4 sections[]; };
+layout(std430, set = 0, binding = 8) readonly buffer Meta { uvec4 meta[]; };          // 2 per slot
+layout(std430, set = 0, binding = 9) readonly buffer Candidates { uint candidates[]; };
+layout(std430, set = 0, binding = 10) buffer Commands { uvec4 commands[]; };
+layout(std430, set = 0, binding = 11) buffer Counts { uint opaqueCount; uint visibleCount; uint pad0; uint pad1; };
+layout(set = 0, binding = 12) uniform sampler2D hiz;
+
+layout(push_constant) uniform P {
+    uint opaqueCandidates;   // candidates[0 .. opaqueCandidates) are opaque sections
+    uint translucentCandidates;
+    uint translucentBase;    // first command slot of the translucent region
+    uint hizLevels;
+    vec2 hizSize;            // size of Hi-Z level 0
+    vec2 viewport;           // scene size in pixels (Hi-Z level 0 is half of it)
+} pc;
+
+bool occluded(vec3 lo, vec3 hi) {
+    if (pc.hizLevels == 0u) return false;
+    vec2 mn = vec2(1e9), mx = vec2(-1e9);
+    float nearest = 0.0;
+    for (int i = 0; i < 8; i++) {
+        vec3 c = vec3((i & 1) != 0 ? hi.x : lo.x, (i & 2) != 0 ? hi.y : lo.y, (i & 4) != 0 ? hi.z : lo.z);
+        vec4 h = viewProj * vec4(c, 1.0);
+        if (h.w <= 0.0) return false;   // crosses the camera plane
+        vec3 n = h.xyz / h.w;
+        // Viewport flips Y: NDC +1 is the top row.
+        vec2 uv = vec2(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5);
+        mn = min(mn, uv);
+        mx = max(mx, uv);
+        nearest = max(nearest, n.z);    // reverse-Z: nearer is larger
+    }
+    mn = clamp(mn, 0.0, 1.0);
+    mx = clamp(mx, 0.0, 1.0);
+    if (mx.x <= mn.x || mx.y <= mn.y) return false;
+    if (mx.x - mn.x >= 0.99 && mx.y - mn.y >= 0.99) return false;   // never cull a full-screen box
+    vec2 px = (mx - mn) * pc.hizSize;
+    float lvl = clamp(ceil(log2(max(max(px.x, px.y), 1.0))) - 1.0, 0.0, float(pc.hizLevels - 1u));
+    vec2 levelSize = max(floor(pc.hizSize / exp2(lvl)), vec2(1.0));
+    ivec2 a = ivec2(mn * levelSize), b = min(ivec2(mx * levelSize), ivec2(levelSize) - 1);
+    float farthest = 1.0;
+    for (int y = a.y; y <= b.y; y++)
+        for (int x = a.x; x <= b.x; x++)
+            farthest = min(farthest, texelFetch(hiz, ivec2(x, y), int(lvl)).r);
+    return nearest < farthest;
+}
+
+bool inFrustum(vec3 lo, vec3 hi) {
+    // Clip-space test of the 8 corners against x, y in [-w, w] and z <= w.
+    bvec4 outside = bvec4(true);
+    bool behind = true;
+    for (int i = 0; i < 8; i++) {
+        vec3 c = vec3((i & 1) != 0 ? hi.x : lo.x, (i & 2) != 0 ? hi.y : lo.y, (i & 4) != 0 ? hi.z : lo.z);
+        vec4 h = viewProj * vec4(c, 1.0);
+        outside = bvec4(outside.x && h.x < -h.w, outside.y && h.x > h.w, outside.z && h.y < -h.w, outside.w && h.y > h.w);
+        behind = behind && h.w <= 0.0;
+    }
+    return !any(outside) && !behind;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint total = pc.opaqueCandidates + pc.translucentCandidates;
+    if (i >= total) return;
+    bool translucent = i >= pc.opaqueCandidates;
+    uint slot = candidates[i];
+    ivec4 sec = sections[slot];
+    uvec4 m0 = meta[slot * 2u], m1 = meta[slot * 2u + 1u];
+    uint quadStart = m0.x;
+    uint aabb = m0.y;
+    uint counts[8] = uint[](m0.z & 0xFFFFu, m0.z >> 16, m0.w & 0xFFFFu, m0.w >> 16,
+                            m1.x & 0xFFFFu, m1.x >> 16, m1.y & 0xFFFFu, m1.y >> 16);
+    float scale = float(1 << sec.w);
+    vec3 origin = vec3(sec.xyz - camBlock.xyz) - camFrac.xyz;
+    vec3 lo = origin + vec3(float(aabb & 31u), float((aabb >> 5) & 31u), float((aabb >> 10) & 31u)) * scale;
+    vec3 hi = lo + (vec3(float((aabb >> 15) & 31u), float((aabb >> 20) & 31u), float((aabb >> 25) & 31u)) + 2.0) * scale;
+    bool vis = inFrustum(lo, hi) && !occluded(lo, hi);
+    if (translucent) {
+        uint k = pc.translucentBase + (i - pc.opaqueCandidates);
+        commands[k] = uvec4(vis ? counts[0] * 6u : 0u, 1u, quadStart * 6u, slot);
+        return;
+    }
+    if (!vis) return;
+    atomicAdd(visibleCount, 1u);
+    uint q = quadStart + counts[0];
+    for (int g = 1; g < 8; g++) {
+        uint c = counts[g];
+        if (c != 0u) {
+            bool facing = true;
+            if (g >= 2) {
+                int face = g - 2;
+                // Camera position relative to the section box (camera at the origin).
+                facing = face == 0 ? 0.0 < hi.y : face == 1 ? 0.0 > lo.y : face == 2 ? 0.0 < hi.z
+                       : face == 3 ? 0.0 > lo.z : face == 4 ? 0.0 < hi.x : 0.0 > lo.x;
+            }
+            if (facing) {
+                uint k = atomicAdd(opaqueCount, 1u);
+                if (k < pc.translucentBase) commands[k] = uvec4(c * 6u, 1u, q * 6u, slot);
+            }
+        }
+        q += c;
+    }
+}
