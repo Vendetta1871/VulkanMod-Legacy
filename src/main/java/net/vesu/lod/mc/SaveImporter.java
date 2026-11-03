@@ -35,23 +35,30 @@ final class SaveImporter implements WorkerPool.Service {
     private final File regionDir;
     private final short[] remap = new short[4096];
     private final ConcurrentLinkedQueue<File> regions = new ConcurrentLinkedQueue<>();
+    /** Single columns the generation producer found on disk (AUDIT 5.7), {@code x << 32 | z}. */
+    private final ConcurrentLinkedQueue<Long> singles = new ConcurrentLinkedQueue<>();
+    private LodGenerator generator;
     private final AtomicInteger regionsLeft = new AtomicInteger();
     private final AtomicLong chunks = new AtomicLong(), progressTotal = new AtomicLong();
     private volatile boolean cancelled;
 
     SaveImporter(LodSession session, File saveDir, int dimension) {
+        this(session, saveDir, dimension, true);
+    }
+
+    private SaveImporter(LodSession session, File saveDir, int dimension, boolean all) {
         this.session = session;
         File dimDir = dimension == 0 ? saveDir : new File(saveDir, "DIM" + dimension);
         this.regionDir = new File(dimDir, "region");
         buildRemap(new File(saveDir, "level.dat"));
-        File[] files = regionDir.listFiles((d, n) -> n.startsWith("r.") && n.endsWith(".mca"));
+        File[] files = all ? regionDir.listFiles((d, n) -> n.startsWith("r.") && n.endsWith(".mca")) : null;
         if (files != null) {
             Arrays.sort(files);
             regions.addAll(Arrays.asList(files));
         }
         regionsLeft.set(regions.size());
         progressTotal.set(1024L * regions.size());
-        Initializer.LOGGER.info("[lod] importing {} regions from {}", regions.size(), regionDir);
+        if (all) Initializer.LOGGER.info("[lod] importing {} regions from {}", regions.size(), regionDir);
     }
 
     private void buildRemap(File levelDat) {
@@ -83,6 +90,18 @@ final class SaveImporter implements WorkerPool.Service {
         }
     }
 
+    /** Reads one column from its region file on a worker, then marks it done for the generator. */
+    void readChunkLater(LodGenerator generator, int cx, int cz) {
+        this.generator = generator;
+        singles.add((long) cx << 32 | (cz & 0xFFFFFFFFL));
+        WorkerPool.signalAll();
+    }
+
+    /** No regions queued: an importer kept only for the generation producer's reads. */
+    static SaveImporter forReads(LodSession session, File saveDir, int dimension) {
+        return new SaveImporter(session, saveDir, dimension, false);
+    }
+
     void cancel() {
         cancelled = true;
         regions.clear();
@@ -104,11 +123,21 @@ final class SaveImporter implements WorkerPool.Service {
     @Override
     public boolean hasWork() {
         // Backpressure: wait while ingest holds many chunks already.
-        return !regions.isEmpty() && session.ingest.queued() < 2000;
+        return (!regions.isEmpty() || !singles.isEmpty()) && !session.ingest.full();
     }
 
     @Override
     public boolean runOne() {
+        Long single = singles.poll();
+        if (single != null) {
+            int cx = (int) (single >> 32), cz = (int) (long) single;
+            try {
+                if (readSingle(cx, cz) && generator != null) generator.markDone(cx, cz);
+            } catch (IOException | RuntimeException e) {
+                // A chunk being written right now: the producer comes back to it.
+            }
+            return true;
+        }
         File f = regions.poll();
         if (f == null) return false;
         try {
@@ -123,40 +152,52 @@ final class SaveImporter implements WorkerPool.Service {
         return true;
     }
 
+    private boolean readSingle(int cx, int cz) throws IOException {
+        File f = new File(regionDir, "r." + (cx >> 5) + "." + (cz >> 5) + ".mca");
+        if (!f.isFile()) return false;
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            int i = (cz & 31) << 5 | (cx & 31);
+            return readEntry(raf, raf.length(), i);
+        }
+    }
+
     private void readRegion(File f) throws IOException {
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
             long size = raf.length();
             if (size < 8192) return;
-            byte[] header = new byte[4096];
-            raf.readFully(header);
-            for (int i = 0; i < 1024 && !cancelled; i++) {
-                int e = (header[i * 4] & 255) << 24 | (header[i * 4 + 1] & 255) << 16 | (header[i * 4 + 2] & 255) << 8 | header[i * 4 + 3] & 255;
-                if (e == 0) continue;
-                long start = (long) (e >>> 8) * 4096;
-                int sectors = e & 0xFF;
-                if (start < 8192 || start + 5 > size || start + (long) sectors * 4096 > size) continue;
-                raf.seek(start);
-                int len = raf.readInt();
-                if (len <= 1 || start + 4 + len > size) continue;
-                int type = raf.readByte();
-                byte[] data = new byte[len - 1];
-                raf.readFully(data);
-                InputStream in = new ByteArrayInputStream(data);
-                in = type == 1 ? new GZIPInputStream(in) : type == 2 ? new InflaterInputStream(in) : null;
-                if (in == null) continue;
-                NBTTagCompound root;
-                try (DataInputStream din = new DataInputStream(new BufferedInputStream(in))) {
-                    root = CompressedStreamTools.read(din, NBTSizeTracker.INFINITE);
-                } catch (IOException | RuntimeException ex) {
-                    continue;
-                }
-                convert(root.getCompoundTag("Level"));
-            }
+            for (int i = 0; i < 1024 && !cancelled; i++) readEntry(raf, size, i);
         }
     }
 
-    private void convert(NBTTagCompound level) {
-        if (!level.getBoolean("TerrainPopulated")) return;
+    /** Reads entry {@code i} of an open region file; true when a populated chunk was ingested. */
+    private boolean readEntry(RandomAccessFile raf, long size, int i) throws IOException {
+        if (size < 8192) return false;
+        raf.seek(i * 4L);
+        int e = raf.readInt();
+        if (e == 0) return false;
+        long start = (long) (e >>> 8) * 4096;
+        int sectors = e & 0xFF;
+        if (start < 8192 || start + 5 > size || start + (long) sectors * 4096 > size) return false;
+        raf.seek(start);
+        int len = raf.readInt();
+        if (len <= 1 || start + 4 + len > size) return false;
+        int type = raf.readByte();
+        byte[] data = new byte[len - 1];
+        raf.readFully(data);
+        InputStream in = new ByteArrayInputStream(data);
+        in = type == 1 ? new GZIPInputStream(in) : type == 2 ? new InflaterInputStream(in) : null;
+        if (in == null) return false;
+        NBTTagCompound root;
+        try (DataInputStream din = new DataInputStream(new BufferedInputStream(in))) {
+            root = CompressedStreamTools.read(din, NBTSizeTracker.INFINITE);
+        } catch (IOException | RuntimeException ex) {
+            return false;
+        }
+        return convert(root.getCompoundTag("Level"));
+    }
+
+    private boolean convert(NBTTagCompound level) {
+        if (!level.getBoolean("TerrainPopulated")) return false;
         int cx = level.getInteger("xPos"), cz = level.getInteger("zPos");
         byte[] biomes = level.getByteArray("Biomes");
         if (biomes.length != 256) biomes = null;
@@ -180,5 +221,6 @@ final class SaveImporter implements WorkerPool.Service {
         }
         chunks.incrementAndGet();
         session.ingest(c);
+        return true;
     }
 }

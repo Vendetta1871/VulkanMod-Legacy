@@ -74,12 +74,32 @@ public final class Bakery {
         onBatch = r;
     }
 
-    /** The block atlas as ARGB, read back on the client thread. */
+    private volatile boolean resetPending;
+
+    /** The block atlas as ARGB, read back on the client thread. A second atlas means a resource reload: everything re-bakes. */
     void setAtlas(int[] argb, int w, int h) {
+        if (atlas != null) resetPending = true;
         atlasW = w;
         atlasH = h;
         atlas = argb;
+        requests.add(0);
     }
+
+    /** Bake thread: forgets every model so the states bake again against the new atlas. */
+    private void reset() {
+        resetPending = false;
+        tables.clear();
+        dedup.clear();
+        tintStates.clear();
+        tintIndices.clear();
+        modelCount = 0;
+        tintBiomes = 0;
+        uploads.clear();
+        resets++;
+    }
+
+    /** Bumped per reset; the session re-meshes when it moves. */
+    public volatile int resets;
 
     public int modelCount() {
         return modelCount;
@@ -104,6 +124,7 @@ public final class Bakery {
             try {
                 Integer id = requests.poll(250, TimeUnit.MILLISECONDS);
                 if (id == null) continue;
+                if (resetPending) reset();
                 if (atlas == null) {
                     // No atlas yet: try again shortly.
                     requests.add(id);

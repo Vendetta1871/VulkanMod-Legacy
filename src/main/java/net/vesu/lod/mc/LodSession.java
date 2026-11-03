@@ -75,7 +75,7 @@ public final class LodSession {
     private LodRenderer renderer;
     private int frame;
     private volatile double camX, camY, camZ;
-    private int tintVersion = -1;
+    private int tintVersion = -1, bakeryResets;
     private int drawnSections, visitedNodes;
     private final boolean sky;
 
@@ -128,7 +128,24 @@ public final class LodSession {
         meshes.submit(key, (int) Math.min(1_000_000, d / s * 64));
     }
 
-    private SaveImporter importer;
+    private SaveImporter importer, reads;
+    private LodGenerator generator;
+
+    /** Singleplayer: the generation producer and the importer that reads its on-disk columns. */
+    LodGenerator generator() {
+        if (generator == null) {
+            File save = dir.getParentFile() == null ? null : dir.getParentFile().getParentFile();
+            if (save == null) return null;
+            reads = SaveImporter.forReads(this, save, dimension);
+            WorkerPool.register(reads);
+            generator = new LodGenerator(this, world.storage());
+        }
+        return generator;
+    }
+
+    SaveImporter readsImporter() {
+        return reads;
+    }
 
     /** Starts importing a save's region files for this dimension (AUDIT 5.8). */
     void startImport(File saveDir) {
@@ -147,6 +164,10 @@ public final class LodSession {
 
     void close() {
         cancelImport();
+        if (reads != null) {
+            reads.cancel();
+            WorkerPool.unregister(reads);
+        }
         WorkerPool.unregister(ingest);
         WorkerPool.unregister(meshes);
         ingest.clear();
@@ -180,6 +201,10 @@ public final class LodSession {
         camY = CameraHistory.camY();
         camZ = CameraHistory.camZ();
 
+        if (bakery.resets != bakeryResets) {
+            bakeryResets = bakery.resets;
+            reload();
+        }
         Bakery.Upload up;
         while ((up = bakery.uploads.poll()) != null) renderer.uploadModel(up);
         if (bakery.tintVersion != tintVersion) {
@@ -485,6 +510,7 @@ public final class LodSession {
         }
         l.add(String.format("LOD ingest %d, save %d", ingest.queued(), world.saveService().queued()));
         if (importer != null) l.add(importer.progress());
+        if (generator != null && Initializer.CONFIG.lodGenerationDistance > 0) l.add(generator.progress());
         return l;
     }
 

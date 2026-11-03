@@ -9,6 +9,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class SaveService implements WorkerPool.Service {
     public static final int BLOCKING_LIMIT = 5000;
+    /** Queued sections stay resident: producers pause past a sixteenth of the heap in them. */
+    public static final int SOFT_LIMIT = (int) Math.max(64, Math.min(BLOCKING_LIMIT,
+            Runtime.getRuntime().maxMemory() / 16 / (WorldSection.SIZE * 8L)));
     private static final int BATCH = 64;
 
     private final LodWorld world;
@@ -39,6 +42,11 @@ public final class SaveService implements WorkerPool.Service {
 
     public int queued() {
         return size.get();
+    }
+
+    /** Producers wait while this holds. */
+    public boolean backlogged() {
+        return size.get() >= SOFT_LIMIT;
     }
 
     @Override

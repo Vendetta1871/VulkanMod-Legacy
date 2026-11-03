@@ -5,7 +5,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Global free list of voxel arrays (AUDIT 5.3): about 100 MB kept, no GC churn. */
 public final class SectionPool {
-    public static final int KEEP = 400;
+    /** About 1/32 of the heap, at most 400 arrays (100 MB, AUDIT 5.3), at least 32. */
+    public static final int KEEP = (int) Math.max(32, Math.min(400, Runtime.getRuntime().maxMemory() / 32 / (WorldSection.SIZE * 8L)));
     private static final ConcurrentLinkedDeque<long[]> FREE = new ConcurrentLinkedDeque<>();
     private static final AtomicInteger FREE_COUNT = new AtomicInteger();
 

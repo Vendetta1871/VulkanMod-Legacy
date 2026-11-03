@@ -31,6 +31,11 @@ final class IngestService implements WorkerPool.Service {
         return size.get();
     }
 
+    /** Chunk copies are ~100 KB each: producers that can wait do so past this many. */
+    boolean full() {
+        return size.get() >= 128;
+    }
+
     @Override
     public int weight() {
         return 5000;
@@ -39,7 +44,7 @@ final class IngestService implements WorkerPool.Service {
     @Override
     public boolean hasWork() {
         // Saving must keep up: past the blocking limit ingest waits for the save queue.
-        return size.get() > 0 && world.saveService().queued() < SaveService.BLOCKING_LIMIT;
+        return size.get() > 0 && !world.saveService().backlogged();
     }
 
     @Override

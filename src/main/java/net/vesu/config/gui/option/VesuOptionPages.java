@@ -181,8 +181,15 @@ public final class VesuOptionPages {
                                     default -> "Off";
                                 }, () -> cfg().lodFog, v -> cfg().lodFog = v)
                                 .tooltip("Fog follows the LOD distance instead of the render distance; the fade blends the outer edge into the sky."),
-                        placeholder("LOD Generation Distance", "Off",
-                                "How far around you the world is generated in advance to build the simplified terrain."))));
+                        vesuSlider("LOD Generation Distance", 0, 512, 16.0f,
+                                v -> Math.round(v) == 0 ? "Off" : chunks(v), () -> (float) cfg().lodGenerationDistance,
+                                v -> cfg().lodGenerationDistance = Math.round(v / 16.0f) * 16)
+                                .tooltip("Singleplayer: chunks out to this distance are generated in the background so distant terrain "
+                                        + "exists before you go there. They are saved into the world, as a pregenerator would. "
+                                        + "Servers decide this for themselves.")
+                                .impact(Impact.MEDIUM)
+                                .availableWhen(() -> Minecraft.getMinecraft().world == null
+                                        || Minecraft.getMinecraft().isIntegratedServerRunning(), "Singleplayer only"))));
     }
 
     private static OptionPage rayTracing(boolean rt, Option.Cycle<String> general) {

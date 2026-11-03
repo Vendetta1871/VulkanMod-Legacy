@@ -25,7 +25,10 @@ final class SectionCache {
     SectionCache(LodWorld world) {
         this.world = world;
         for (int i = 0; i < SHARDS; i++) shards[i] = new Shard();
-        secondaryCap = Runtime.getRuntime().maxMemory() >= (4L << 30) ? 2048 : 1024;
+        // AUDIT 5.4 keeps 1024/2048 arrays (256/512 MB); the 1.12 heap is often 1-4 GB, so a
+        // sixteenth of it is the cap.
+        secondaryCap = (int) Math.max(64, Math.min(Runtime.getRuntime().maxMemory() >= (4L << 30) ? 2048 : 1024,
+                Runtime.getRuntime().maxMemory() / 16 / (WorldSection.SIZE * 8L)));
         secondary = new LinkedHashMap<>(secondaryCap * 2, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<Long, WorldSection> eldest) {

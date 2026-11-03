@@ -40,6 +40,9 @@ public final class LodSystem {
         net.minecraftforge.client.ClientCommandHandler.instance.registerCommand(new LodCommand());
         LodWorld.LOG = msg -> Initializer.LOGGER.warn("[lod] {}", msg);
         WorkerPool.errorHandler = t -> Initializer.LOGGER.error("[lod] worker failed", t);
+        // VESU_LOD_GEN=<chunks>: generation distance for test runs.
+        String gen = net.vesu.Env.get("VESU_LOD_GEN");
+        if (gen != null) Initializer.CONFIG.lodGenerationDistance = Integer.parseInt(gen.trim());
     }
 
     /** VESU_LOD=0/1 overrides the setting (comparison runs). */
@@ -92,6 +95,7 @@ public final class LodSystem {
     public static void onWorldLoad(WorldEvent.Load e) {
         if (!(e.getWorld() instanceof WorldClient world)) return;
         close();
+        atlasDirty = false;
         if (!enabled()) return;
         int threads = Initializer.CONFIG.lodThreads > 0 ? Initializer.CONFIG.lodThreads : WorkerPool.defaultThreads();
         WorkerPool.start(threads);
@@ -203,6 +207,10 @@ public final class LodSystem {
         VRenderSystem.fogScaleFrom = mc.gameSettings.renderDistanceChunks * 16.0f;
         boolean scaleFog = s != null && Initializer.CONFIG.lodRendering && Initializer.CONFIG.lodFog.startsWith("fog");
         VRenderSystem.fogScale = scaleFog ? (float) (distanceBlocks() / VRenderSystem.fogScaleFrom) : 1.0f;
+        if (s != null && atlasDirty) {
+            atlasDirty = false;
+            downloadAtlas();
+        }
         if (s == null || mc.world == null || pendingEdits.isEmpty()) return;
         long now = System.currentTimeMillis();
         Map<Long, Integer> chunks = new HashMap<>();
@@ -289,6 +297,30 @@ public final class LodSystem {
         } catch (RuntimeException t) {
             Initializer.LOGGER.error("[lod] render failed; LOD drawing stops", t);
             Initializer.CONFIG.lodRendering = false;
+        }
+    }
+
+    /** Resource reload (F3+T, packs): the atlas is read again on the next tick and the models re-bake. */
+    @SubscribeEvent
+    public static void onStitch(net.minecraftforge.client.event.TextureStitchEvent.Post e) {
+        if (e.getMap() == Minecraft.getMinecraft().getTextureMapBlocks()) atlasDirty = true;
+    }
+
+    private static boolean atlasDirty;
+
+    /** The generation producer runs on the integrated server's thread (AUDIT 5.7). */
+    @SubscribeEvent
+    public static void onServerTick(TickEvent.ServerTickEvent e) {
+        if (e.phase != TickEvent.Phase.END || Initializer.CONFIG.lodGenerationDistance <= 0) return;
+        LodSession s = session;
+        Minecraft mc = Minecraft.getMinecraft();
+        if (s == null || !mc.isIntegratedServerRunning() || mc.getIntegratedServer() == null) return;
+        try {
+            LodGenerator g = s.generator();
+            if (g != null) g.tick(mc.getIntegratedServer());
+        } catch (RuntimeException t) {
+            Initializer.LOGGER.error("[lod] generation stopped", t);
+            Initializer.CONFIG.lodGenerationDistance = 0;
         }
     }
 

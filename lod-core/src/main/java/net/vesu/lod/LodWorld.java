@@ -58,6 +58,10 @@ public final class LodWorld implements AutoCloseable {
         return cache.acquire(SectionKey.of(lvl, x, y, z));
     }
 
+    public LodStorage storage() {
+        return storage;
+    }
+
     public SaveService saveService() {
         return save;
     }
