@@ -10,7 +10,8 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 2) readonly buffer Sections { ivec4 sections[]; };
 layout(std430, set = 0, binding = 8) readonly buffer Meta { uvec4 meta[]; };          // 2 per slot
 layout(std430, set = 0, binding = 9) readonly buffer Candidates { uint candidates[]; };
-layout(std430, set = 0, binding = 10) buffer Commands { uvec4 commands[]; };
+// VkDrawIndexedIndirectCommand, 5 uints: the quad index buffer from vertexOffset = 4 x the first quad.
+layout(std430, set = 0, binding = 10) buffer Commands { uint commands[]; };
 layout(std430, set = 0, binding = 11) buffer Counts { uint opaqueCount; uint visibleCount; uint pad0; uint pad1; };
 layout(set = 0, binding = 12) uniform sampler2D hiz;
 
@@ -66,6 +67,15 @@ bool inFrustum(vec3 lo, vec3 hi) {
     return !any(outside) && !behind;
 }
 
+void writeCommand(uint k, uint quads, uint firstQuad, uint slot) {
+    uint b = k * 5u;
+    commands[b] = quads * 6u;
+    commands[b + 1u] = 1u;
+    commands[b + 2u] = 0u;
+    commands[b + 3u] = firstQuad * 4u;
+    commands[b + 4u] = slot;
+}
+
 void main() {
     uint i = gl_GlobalInvocationID.x;
     uint total = pc.opaqueCandidates + pc.translucentCandidates;
@@ -85,7 +95,7 @@ void main() {
     bool vis = inFrustum(lo, hi) && !occluded(lo, hi);
     if (translucent) {
         uint k = pc.translucentBase + (i - pc.opaqueCandidates);
-        commands[k] = uvec4(vis ? counts[0] * 6u : 0u, 1u, quadStart * 6u, slot);
+        writeCommand(k, vis ? counts[0] : 0u, quadStart, slot);
         return;
     }
     if (!vis) return;
@@ -103,7 +113,7 @@ void main() {
             }
             if (facing) {
                 uint k = atomicAdd(opaqueCount, 1u);
-                if (k < pc.translucentBase) commands[k] = uvec4(c * 6u, 1u, q * 6u, slot);
+                if (k < pc.translucentBase) writeCommand(k, c, q, slot);
             }
         }
         q += c;

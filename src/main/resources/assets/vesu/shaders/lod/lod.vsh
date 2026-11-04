@@ -1,6 +1,7 @@
 #version 450
-// LOD terrain vertex stage (AUDIT 5.15): vertex pulling. gl_VertexIndex / 6 is the quad in
-// the arena, the remainder its corner; gl_InstanceIndex the section record.
+// LOD terrain vertex stage (AUDIT 5.15): vertex pulling through the quad index buffer.
+// gl_VertexIndex / 4 is the quad in the arena, the remainder its corner; gl_InstanceIndex
+// the section record.
 #extension GL_GOOGLE_include_directive : require
 #include "lod_common.glsl"
 
@@ -12,12 +13,12 @@ layout(location = 0) out vec3 vRel;
 layout(location = 1) out vec2 vUv;
 layout(location = 2) flat out uvec4 vInfo;   // model, face | lvl << 4, light, tint (ARGB, 0 = none)
 
-const int CU[6] = int[](0, 1, 1, 1, 0, 0);
-const int CV[6] = int[](0, 0, 1, 1, 1, 0);
+const int CU[4] = int[](0, 1, 1, 0);
+const int CV[4] = int[](0, 0, 1, 1);
 
 void main() {
-    int q = gl_VertexIndex / 6;
-    int c = gl_VertexIndex - q * 6;
+    int q = gl_VertexIndex >> 2;
+    int c = gl_VertexIndex & 3;
     uvec2 qd = quads[q];
     uint lo = qd.x, hi = qd.y;
     int face = int(lo & 7u);

@@ -33,18 +33,19 @@ layout(std430, binding = 4) readonly buffer LodTints { uint lodTints[]; };
 layout(std430, binding = 6) readonly buffer LodPackIds { uint lodPackIds[]; };
 
 //vkm-host-prelude-begin
-const int VKM_LOD_CU[6] = int[](0, 1, 1, 1, 0, 0);
-const int VKM_LOD_CV[6] = int[](0, 0, 1, 1, 1, 0);
+const int VKM_LOD_CU[4] = int[](0, 1, 1, 0);
+const int VKM_LOD_CV[4] = int[](0, 0, 1, 1);
 const vec3 VKM_LOD_NORMALS[6] = vec3[](vec3(0, -1, 0), vec3(0, 1, 0), vec3(0, 0, -1), vec3(0, 0, 1), vec3(-1, 0, 0), vec3(1, 0, 0));
 
-uvec2 vkm_lodQuad() { return lodQuads[gl_VertexIndex / 6]; }
+// Drawn through the quad index buffer: 4 vertices per quad.
+uvec2 vkm_lodQuad() { return lodQuads[gl_VertexIndex >> 2]; }
 int vkm_lodFace() { return int(vkm_lodQuad().x & 7u); }
 uint vkm_lodModel() { uvec2 q = vkm_lodQuad(); return (q.x >> 26) | ((q.y & 0x3FFFu) << 6); }
 
 vec3 vkm_lodPosition() {
     uvec2 qd = vkm_lodQuad();
     uint lo = qd.x;
-    int c = gl_VertexIndex - (gl_VertexIndex / 6) * 6;
+    int c = gl_VertexIndex & 3;
     int face = int(lo & 7u);
     int w = int((lo >> 3) & 15u) + 1;
     int h = int((lo >> 7) & 15u) + 1;

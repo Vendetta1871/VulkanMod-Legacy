@@ -19,11 +19,12 @@ import static org.lwjgl.vulkan.VK13.*;
 public final class GpuTimer {
 
     /** Marks in frame order; a frame may skip some (no RT, no upscale). */
-    public static final int FRAME_START = 0, RT_SCENE = 1, LIGHT_TRACE = 2, LIGHT_DENOISE = 3, RT_LIGHTING = 4,
-            RT_REFLECT_OPAQUE = 5, SCENE_END = 6, RT_REFLECT_TRANSLUCENT = 7, PACK = 8, UPSCALE = 9, FRAME_END = 10;
+    public static final int FRAME_START = 0, LOD_START = 1, LOD_CULL = 2, LOD_DRAW = 3, LOD_SSAO = 4, RT_SCENE = 5,
+            LIGHT_TRACE = 6, LIGHT_DENOISE = 7, RT_LIGHTING = 8, RT_REFLECT_OPAQUE = 9, SCENE_END = 10,
+            RT_REFLECT_TRANSLUCENT = 11, PACK = 12, UPSCALE = 13, FRAME_END = 14;
     /** Each entry names the work between the previous written mark and this one. */
-    private static final String[] NAMES = {"start", "opaque+tlas", "lightTrace", "nrd+mv", "composite",
-            "reflOpaque", "translucent", "reflTransl", "pack", "upscale", "hud+copy"};
+    private static final String[] NAMES = {"start", "opaque", "lodCull", "lodDraw", "lodSsao", "opaque+tlas", "lightTrace",
+            "nrd+mv", "composite", "reflOpaque", "translucent", "reflTransl", "pack", "upscale", "hud+copy"};
     private static final int MARKS = NAMES.length, LOG_EVERY = 120;
 
     private static long pool;

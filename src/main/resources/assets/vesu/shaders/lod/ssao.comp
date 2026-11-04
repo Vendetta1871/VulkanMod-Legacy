@@ -5,6 +5,7 @@
 // BASIC/BETTER/BEST differ by the sample count of a golden-angle hemisphere around the
 // face normal, which is rebuilt from the depth and snapped to the nearest axis (terrain
 // is made of axis-aligned faces). Samples landing on vanilla pixels read the main depth too.
+// It runs at half resolution, one texel per 2x2 block; texels without a LOD pixel hold -1.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(std140, set = 0, binding = 0) uniform Frame {
@@ -22,7 +23,7 @@ layout(std430, set = 0, binding = 3) readonly buffer Cover { uint coverBits[]; }
 
 layout(push_constant) uniform P {
     mat4 invViewProj;
-    ivec4 params;   // x, y: size; z: samples; w: 1 for reverse-Z
+    ivec4 params;   // x, y: scene size; z: samples; w: 1 for reverse-Z
 } pc;
 
 bool reverseZ() { return pc.params.w != 0; }
@@ -57,22 +58,24 @@ vec3 axisNormal(vec3 n) {
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, imageSize(aoOut)))) return;
     ivec2 size = pc.params.xy;
-    if (any(greaterThanEqual(px, size))) return;
+    ivec2 m = size - 1;
+    // The scene pixel this texel stands for: the top-left one of its 2x2 block.
+    ivec2 sp = min(px * 2, m);
     vec2 texel = 1.0 / vec2(size);
-    vec2 uv = (vec2(px) + 0.5) * texel;
-    float d = texelFetch(depthTex, px, 0).r;
-    if (isFar(d)) { imageStore(aoOut, px, vec4(1.0)); return; }
+    vec2 uv = (vec2(sp) + 0.5) * texel;
+    float d = texelFetch(depthTex, sp, 0).r;
+    if (isFar(d)) { imageStore(aoOut, px, vec4(-1.0)); return; }
     vec3 p = unproject(uv, d);
     // Half a block toward the camera keeps a face on the shared plane inside its own voxel.
-    if (covered(p - normalize(p) * 0.05)) { imageStore(aoOut, px, vec4(1.0)); return; }
+    if (covered(p - normalize(p) * 0.05)) { imageStore(aoOut, px, vec4(-1.0)); return; }
 
     // Normal from the neighbor with the smaller depth step on each axis (no smearing over edges).
-    ivec2 m = size - 1;
-    float dl = texelFetch(depthTex, clamp(px - ivec2(1, 0), ivec2(0), m), 0).r;
-    float dr = texelFetch(depthTex, clamp(px + ivec2(1, 0), ivec2(0), m), 0).r;
-    float du = texelFetch(depthTex, clamp(px - ivec2(0, 1), ivec2(0), m), 0).r;
-    float dd = texelFetch(depthTex, clamp(px + ivec2(0, 1), ivec2(0), m), 0).r;
+    float dl = texelFetch(depthTex, clamp(sp - ivec2(1, 0), ivec2(0), m), 0).r;
+    float dr = texelFetch(depthTex, clamp(sp + ivec2(1, 0), ivec2(0), m), 0).r;
+    float du = texelFetch(depthTex, clamp(sp - ivec2(0, 1), ivec2(0), m), 0).r;
+    float dd = texelFetch(depthTex, clamp(sp + ivec2(0, 1), ivec2(0), m), 0).r;
     vec3 ex = abs(dr - d) < abs(d - dl) ? unproject(uv + vec2(texel.x, 0), dr) - p : p - unproject(uv - vec2(texel.x, 0), dl);
     vec3 ey = abs(dd - d) < abs(d - du) ? unproject(uv + vec2(0, texel.y), dd) - p : p - unproject(uv - vec2(0, texel.y), du);
     vec3 n = cross(ex, ey);

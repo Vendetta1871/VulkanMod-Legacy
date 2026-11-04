@@ -224,7 +224,9 @@ public final class LodSsao {
      */
     public void record(VkCommandBuffer cmd, int frame, long ubo, long cover, Matrix4f viewProj, int samples) {
         int w = FrameTargets.scene.width(), h = FrameTargets.scene.height();
-        ensureImage(w, h);
+        // Half resolution: one occlusion texel per 2x2 pixels.
+        int aw = (w + 1) / 2, ah = (h + 1) / 2;
+        ensureImage(aw, ah);
         ensurePipelines();
         viewProj.invert(inv);
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -258,7 +260,7 @@ public final class LodSsao {
             inv.get(0, pc);
             pc.putInt(64, w).putInt(68, h).putInt(72, samples).putInt(76, VRenderSystem.reverseZ ? 1 : 0);
             vkCmdPushConstants(cmd, compute.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
-            vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+            vkCmdDispatch(cmd, (aw + 7) / 8, (ah + 7) / 8, 1);
 
             ib.srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT).dstAccessMask(VK_ACCESS_SHADER_READ_BIT)
                     .oldLayout(VK_IMAGE_LAYOUT_GENERAL).newLayout(VK_IMAGE_LAYOUT_GENERAL);

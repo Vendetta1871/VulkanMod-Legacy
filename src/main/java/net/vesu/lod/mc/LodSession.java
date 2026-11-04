@@ -288,6 +288,7 @@ public final class LodSession {
         rtRing = false;
         writeUniforms(mc);
         renderer.endUploads();
+        net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_START);
         if (renderer.gpuCull) {
             // Translucent candidates go far to near; the GPU keeps that order.
             Integer[] idx = new Integer[candTranslucent];
@@ -295,6 +296,9 @@ public final class LodSession {
             java.util.Arrays.sort(idx, (a, b) -> Float.compare(transDist[b], transDist[a]));
             int[] sorted = new int[candTranslucent];
             for (int i = 0; i < candTranslucent; i++) sorted[i] = transSlots[idx[i]];
+            // Opaque near to far: the shader discards, so depth rejects only what nearer draws wrote first.
+            java.util.Arrays.sort(opaqueOrder, 0, candOpaque);
+            for (int i = 0; i < candOpaque; i++) opaqueSlots[i] = (int) opaqueOrder[i];
             renderer.setCandidates(opaqueSlots, candOpaque, sorted, candTranslucent);
             org.lwjgl.vulkan.VkCommandBuffer cmd = net.vesu.vulkan.Drawer.currentCommandBuffer();
             try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
@@ -303,12 +307,15 @@ public final class LodSession {
                         net.vesu.vulkan.FrameTargets.scene.width(), net.vesu.vulkan.FrameTargets.scene.height());
                 net.vesu.vulkan.FrameTargets.resumeScene(cmd, stack);
             }
+            net.vesu.vulkan.GpuTimer.mark(cmd, net.vesu.vulkan.GpuTimer.LOD_CULL);
             renderer.drawOpaqueGpu();
         } else {
             renderer.drawOpaque();
         }
+        net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_DRAW);
         int ao = renderer.ssao().samples();
         if (ao > 0 && drawnSections > 0) renderer.recordSsao(viewProj, ao);
+        net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_SSAO);
         if ((frame & 255) == 0) cleanup();
     }
 
@@ -585,6 +592,7 @@ public final class LodSession {
     }
 
     private int[] opaqueSlots = new int[4096], transSlots = new int[1024];
+    private long[] opaqueOrder = new long[4096];
     private float[] transDist = new float[1024];
     private int candOpaque, candTranslucent;
 
@@ -597,8 +605,13 @@ public final class LodSession {
             submit(n.key);
         }
         if (renderer.gpuCull && !packMode) {
-            if (candOpaque == opaqueSlots.length) opaqueSlots = java.util.Arrays.copyOf(opaqueSlots, candOpaque * 2);
-            opaqueSlots[candOpaque++] = n.slot;
+            if (candOpaque == opaqueSlots.length) {
+                opaqueSlots = java.util.Arrays.copyOf(opaqueSlots, candOpaque * 2);
+                opaqueOrder = java.util.Arrays.copyOf(opaqueOrder, candOpaque * 2);
+            }
+            double ox = x0 + size / 2 - camX, oy = y0 + size / 2 - camY, oz = z0 + size / 2 - camZ;
+            // Near to far by the squared distance of the center (positive float bits sort as ints).
+            opaqueOrder[candOpaque++] = (long) Float.floatToIntBits((float) (ox * ox + oy * oy + oz * oz)) << 32 | (n.slot & 0xFFFFFFFFL);
             if (n.counts[MeshResult.G_TRANSLUCENT] > 0) {
                 if (candTranslucent == transSlots.length) {
                     transSlots = java.util.Arrays.copyOf(transSlots, candTranslucent * 2);

@@ -31,6 +31,13 @@ import static org.lwjgl.vulkan.VK13.*;
 public final class LodRenderer {
     public static final int MAX_SECTIONS = 1 << 17;
     public static final int MAX_DRAWS = 1 << 18;
+    /**
+     * A VkDrawIndexedIndirectCommand: the shared quad index buffer, vertexOffset = 4 x the
+     * first quad, so each quad runs the vertex stage for its 4 corners, not 6 vertices.
+     */
+    private static final int CMD = 20;
+    /** Quads one command can draw: the counts of a face group are 16 bits. */
+    private static final int MAX_QUADS_PER_DRAW = 1 << 16;
     private static final int UBO_SIZE = 256;
     private static final long STAGING = 32L << 20;
     private static final int COVER_BYTES = 70 * 70 * 16 / 8 + 64;
@@ -83,6 +90,7 @@ public final class LodRenderer {
     private int opaqueDraws, translucentDraws;
     private long[] translucentSort = new long[1024];
     private int[] translucentCmd = new int[1024 * 4];
+    private long[] translucentQuad = new long[1024];
     private int translucentCount;
     private boolean uploadedThisFrame;
 
@@ -121,7 +129,7 @@ public final class LodRenderer {
                 candBuf[i] = r[0]; candAlloc[i] = r[1]; candPtr[i] = r[2];
                 LongBuffer pb = stack.mallocLong(1);
                 PointerBuffer pa = stack.mallocPointer(1);
-                MemoryManager.createBuffer((long) MAX_DRAWS * 16 * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                MemoryManager.createBuffer((long) MAX_DRAWS * CMD * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pb, pa);
                 gpuCmdBuf[i] = pb.get(0); gpuCmdAlloc[i] = pa.get(0);
                 MemoryManager.createBuffer(64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
@@ -137,7 +145,7 @@ public final class LodRenderer {
             for (int i = 0; i < frames; i++) {
                 long[] r = hostBuffer(stack, UBO_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
                 uboBuf[i] = r[0]; uboAlloc[i] = r[1]; uboPtr[i] = r[2];
-                r = hostBuffer(stack, (long) MAX_DRAWS * 16 * 2, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+                r = hostBuffer(stack, (long) MAX_DRAWS * CMD * 2, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
                 cmdBuf[i] = r[0]; cmdAlloc[i] = r[1]; cmdPtr[i] = r[2];
                 r = hostBuffer(stack, COVER_BYTES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
                 coverBuf[i] = r[0]; coverAlloc[i] = r[1]; coverPtr[i] = r[2];
@@ -366,27 +374,45 @@ public final class LodRenderer {
 
     public void addOpaque(long firstQuad, int count, int slot) {
         if (opaqueDraws >= MAX_DRAWS || count <= 0) return;
-        long p = cmdPtr[frame] + (long) opaqueDraws * 16;
-        MemoryUtil.memPutInt(p, count * 6);
-        MemoryUtil.memPutInt(p + 4, 1);
-        MemoryUtil.memPutInt(p + 8, (int) (firstQuad * 6));
-        MemoryUtil.memPutInt(p + 12, slot);
+        putCommand(cmdPtr[frame] + (long) opaqueDraws * CMD, count, firstQuad, slot);
         opaqueDraws++;
     }
 
     /** Draws into the pack's shadow map, at the end of the translucent region (lodPackShadows). */
     private static final int SHADOW_DRAWS = 16384;
-    private static final long SHADOW_OFFSET = (long) (2 * MAX_DRAWS - SHADOW_DRAWS) * 16;
+    private static final long SHADOW_OFFSET = (long) (2 * MAX_DRAWS - SHADOW_DRAWS) * CMD;
     private int shadowDraws;
 
     public void addShadow(long firstQuad, int count, int slot) {
         if (shadowDraws >= SHADOW_DRAWS || count <= 0) return;
-        long p = cmdPtr[frame] + SHADOW_OFFSET + (long) shadowDraws * 16;
-        MemoryUtil.memPutInt(p, count * 6);
-        MemoryUtil.memPutInt(p + 4, 1);
-        MemoryUtil.memPutInt(p + 8, (int) (firstQuad * 6));
-        MemoryUtil.memPutInt(p + 12, slot);
+        putCommand(cmdPtr[frame] + SHADOW_OFFSET + (long) shadowDraws * CMD, count, firstQuad, slot);
         shadowDraws++;
+    }
+
+    private static void putCommand(long p, int quads, long firstQuad, int slot) {
+        MemoryUtil.memPutInt(p, quads * 6);
+        MemoryUtil.memPutInt(p + 4, 1);
+        MemoryUtil.memPutInt(p + 8, 0);
+        MemoryUtil.memPutInt(p + 12, (int) (firstQuad * 4));
+        MemoryUtil.memPutInt(p + 16, slot);
+    }
+
+    /** The translucent draws, far to near, into the translucent region; their count. */
+    private int writeTranslucent() {
+        java.util.Arrays.sort(translucentSort, 0, translucentCount);
+        long base = cmdPtr[frame] + (long) MAX_DRAWS * CMD;
+        int n = Math.min(translucentCount, MAX_DRAWS - SHADOW_DRAWS);
+        for (int k = 0; k < n; k++) {
+            int i = (int) translucentSort[k];
+            putCommand(base + (long) k * CMD, translucentCmd[i * 4], translucentQuad[i], translucentCmd[i * 4 + 2]);
+        }
+        return n;
+    }
+
+    /** The shared quad index buffer (0,1,2, 2,3,0 per 4 vertices), sized for one command. */
+    private void bindQuadIndices(VkCommandBuffer cmd) {
+        net.vesu.vulkan.memory.IndexBuffer ib = Drawer.getInstance().getQuadsIndexBuffer().getIndexBuffer(MAX_QUADS_PER_DRAW * 4);
+        vkCmdBindIndexBuffer(cmd, ib.getId(), ib.getOffset(), ib.indexType.vkType);
     }
 
     /** Translucent draws are sorted far to near before drawing; {@code distance} in blocks. */
@@ -396,10 +422,11 @@ public final class LodRenderer {
             translucentSort = java.util.Arrays.copyOf(translucentSort, translucentCount * 2);
             translucentCmd = java.util.Arrays.copyOf(translucentCmd, translucentCount * 8);
         }
+        if (translucentCount == translucentQuad.length) translucentQuad = java.util.Arrays.copyOf(translucentQuad, translucentCount * 2);
         int i = translucentCount++;
         translucentSort[i] = (long) (Integer.MAX_VALUE - Float.floatToIntBits(Math.max(0, distance))) << 32 | i;
-        translucentCmd[i * 4] = count * 6;
-        translucentCmd[i * 4 + 1] = (int) (firstQuad * 6);
+        translucentCmd[i * 4] = count;
+        translucentQuad[i] = firstQuad;
         translucentCmd[i * 4 + 2] = slot;
     }
 
@@ -627,32 +654,23 @@ public final class LodRenderer {
 
     public void drawTranslucent() {
         if (translucentCount == 0) return;
-        java.util.Arrays.sort(translucentSort, 0, translucentCount);
-        long base = cmdPtr[frame] + (long) MAX_DRAWS * 16;
-        int n = Math.min(translucentCount, MAX_DRAWS - SHADOW_DRAWS);
-        for (int k = 0; k < n; k++) {
-            int i = (int) translucentSort[k];
-            long p = base + (long) k * 16;
-            MemoryUtil.memPutInt(p, translucentCmd[i * 4]);
-            MemoryUtil.memPutInt(p + 4, 1);
-            MemoryUtil.memPutInt(p + 8, translucentCmd[i * 4 + 1]);
-            MemoryUtil.memPutInt(p + 12, translucentCmd[i * 4 + 2]);
-        }
+        int n = writeTranslucent();
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         if (opaquePipeline == 0 || pipelineDepthFormat != FrameTargets.depthFormat()) createPipelines();
         bind(cmd, translucentPipeline);
-        drawIndirect(cmd, (long) MAX_DRAWS * 16, n);
+        drawIndirect(cmd, (long) MAX_DRAWS * CMD, n);
         Drawer.forgetBoundPipeline(cmd);
     }
 
     private void drawIndirect(VkCommandBuffer cmd, long offset, int count) {
+        bindQuadIndices(cmd);
         if (Vulkan.multiDrawIndirectSupported) {
             int max = maxDrawIndirect;
             for (int done = 0; done < count; done += max) {
-                vkCmdDrawIndirect(cmd, cmdBuf[frame], offset + done * 16L, Math.min(max, count - done), 16);
+                vkCmdDrawIndexedIndirect(cmd, cmdBuf[frame], offset + (long) done * CMD, Math.min(max, count - done), CMD);
             }
         } else {
-            for (int i = 0; i < count; i++) vkCmdDrawIndirect(cmd, cmdBuf[frame], offset + i * 16L, 1, 16);
+            for (int i = 0; i < count; i++) vkCmdDrawIndexedIndirect(cmd, cmdBuf[frame], offset + (long) i * CMD, 1, CMD);
         }
     }
 
@@ -817,7 +835,8 @@ public final class LodRenderer {
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         if (opaquePipeline == 0 || pipelineDepthFormat != FrameTargets.depthFormat()) createPipelines();
         bind(cmd, opaquePipeline);
-        VK12.vkCmdDrawIndirectCount(cmd, gpuCmdBuf[frame], 0, countBuf[frame], 0, MAX_DRAWS, 16);
+        bindQuadIndices(cmd);
+        VK12.vkCmdDrawIndexedIndirectCount(cmd, gpuCmdBuf[frame], 0, countBuf[frame], 0, MAX_DRAWS, CMD);
         Drawer.forgetBoundPipeline(cmd);
     }
 
@@ -825,9 +844,11 @@ public final class LodRenderer {
         if (translucentCandidates == 0) return;
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         bind(cmd, translucentPipeline);
-        long offset = (long) MAX_DRAWS * 16;
+        long offset = (long) MAX_DRAWS * CMD;
+        bindQuadIndices(cmd);
         for (int done = 0; done < translucentCandidates; done += maxDrawIndirect) {
-            vkCmdDrawIndirect(cmd, gpuCmdBuf[frame], offset + done * 16L, Math.min(maxDrawIndirect, translucentCandidates - done), 16);
+            vkCmdDrawIndexedIndirect(cmd, gpuCmdBuf[frame], offset + (long) done * CMD,
+                    Math.min(maxDrawIndirect, translucentCandidates - done), CMD);
         }
         Drawer.forgetBoundPipeline(cmd);
     }
@@ -1023,18 +1044,8 @@ public final class LodRenderer {
      */
     public void drawPackTranslucent() {
         if (packTranslucent == 0) return;
-        java.util.Arrays.sort(translucentSort, 0, translucentCount);
-        long base = cmdPtr[frame] + (long) MAX_DRAWS * 16;
-        int n = Math.min(translucentCount, MAX_DRAWS - SHADOW_DRAWS);
-        for (int k = 0; k < n; k++) {
-            int i = (int) translucentSort[k];
-            long p = base + (long) k * 16;
-            MemoryUtil.memPutInt(p, translucentCmd[i * 4]);
-            MemoryUtil.memPutInt(p + 4, 1);
-            MemoryUtil.memPutInt(p + 8, translucentCmd[i * 4 + 1]);
-            MemoryUtil.memPutInt(p + 12, translucentCmd[i * 4 + 2]);
-        }
-        drawPackPass(packTranslucent, true, (long) MAX_DRAWS * 16, n, 17);
+        int n = writeTranslucent();
+        drawPackPass(packTranslucent, true, (long) MAX_DRAWS * CMD, n, 17);
     }
 
     /**
