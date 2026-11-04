@@ -49,6 +49,8 @@ public final class LodSession {
         int requestedAt = -1000;
         /** The frame its mesh arrived: its copy runs after the shadow map's commands. */
         int meshFrame = -1;
+        /** The frame a mesh was asked again for the RT scene. */
+        int rtAsked = -100000;
 
         Node(long key) {
             this.key = key;
@@ -175,6 +177,7 @@ public final class LodSession {
         meshes.clear();
         bakery.stop();
         world.close();
+        net.vesu.vulkan.rt.RtLod.clear();
         if (renderer != null) renderer.destroy();
         renderer = null;
         Initializer.LOGGER.info("[lod] closed {}", dir);
@@ -279,7 +282,10 @@ public final class LodSession {
         buildCover(mc);
         candOpaque = 0;
         candTranslucent = 0;
+        rtRing = net.vesu.vulkan.rt.RtScene.enabled() && Initializer.CONFIG.lodRtRing > 0;
+        if (rtRing) net.vesu.vulkan.rt.RtLod.setTables(renderer.modelsPtr(), renderer.tintsPtr());
         select(mc);
+        rtRing = false;
         writeUniforms(mc);
         renderer.endUploads();
         if (renderer.gpuCull) {
@@ -351,6 +357,13 @@ public final class LodSession {
             n.quadStart = start;
             n.quadCount = r.quads.length;
             n.meshFrame = frame;
+            if (n.lvl >= 1 && inRtRing(n)) {
+                int t = r.counts[MeshResult.G_TRANSLUCENT];
+                net.vesu.vulkan.rt.RtLod.offer(n.key, n.x << (5 + n.lvl), n.y << (5 + n.lvl), n.z << (5 + n.lvl), 1 << n.lvl,
+                        r.quads, t, r.quads.length - t);
+            } else {
+                net.vesu.vulkan.rt.RtLod.release(n.key);
+            }
             System.arraycopy(r.counts, 0, n.counts, 0, MeshResult.GROUPS);
             n.childMask = r.childMask;
             if (n.slot < 0 && r.quads.length > 0) {
@@ -377,6 +390,7 @@ public final class LodSession {
 
     private void dropNode(Node n) {
         nodes.remove(n.key);
+        net.vesu.vulkan.rt.RtLod.release(n.key);
         router.unwatch(n.key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
         if (n.quadStart >= 0) renderer.freeQuads(n.quadStart, n.quadCount);
         if (n.slot >= 0) renderer.freeSlot(n.slot);
@@ -555,6 +569,21 @@ public final class LodSession {
         }
     }
 
+    // ---- The RT scene (AUDIT 5.17) ----
+
+    /** This frame's selection feeds the RT scene. */
+    private boolean rtRing;
+
+    /** Within lodRtRing top-level sections past the vanilla distance (nearer counts too). */
+    private boolean inRtRing(Node n) {
+        if (!net.vesu.vulkan.rt.RtScene.enabled() || Initializer.CONFIG.lodRtRing <= 0) return false;
+        double size = 32 << n.lvl, x0 = n.x * size, z0 = n.z * size;
+        double nx = Math.max(x0, Math.min(camX, x0 + size)) - camX;
+        double nz = Math.max(z0, Math.min(camZ, z0 + size)) - camZ;
+        double ring = Minecraft.getMinecraft().gameSettings.renderDistanceChunks * 16.0 + Initializer.CONFIG.lodRtRing * 512.0;
+        return nx * nx + nz * nz <= ring * ring;
+    }
+
     private int[] opaqueSlots = new int[4096], transSlots = new int[1024];
     private float[] transDist = new float[1024];
     private int candOpaque, candTranslucent;
@@ -562,6 +591,11 @@ public final class LodSession {
     private void draw(Node n, double x0, double y0, double z0, double size) {
         if (n.quadStart < 0 || n.slot < 0) return;
         drawnSections++;
+        if (rtRing && n.lvl >= 1 && inRtRing(n) && !net.vesu.vulkan.rt.RtLod.touch(n.key) && frame - n.rtAsked > 600) {
+            // Meshed before it entered the ring: its quads are needed again for the BLAS.
+            n.rtAsked = frame;
+            submit(n.key);
+        }
         if (renderer.gpuCull && !packMode) {
             if (candOpaque == opaqueSlots.length) opaqueSlots = java.util.Arrays.copyOf(opaqueSlots, candOpaque * 2);
             opaqueSlots[candOpaque++] = n.slot;

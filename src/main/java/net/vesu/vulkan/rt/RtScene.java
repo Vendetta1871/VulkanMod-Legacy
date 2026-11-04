@@ -288,6 +288,7 @@ public final class RtScene {
         built |= buildBlases(cmd);
         RtEntities.build(cmd, stack);
         built |= RtEntities.ready();
+        built |= RtLod.build(cmd, stack);
         if (built) breadcrumb(cmd, stack, 2);
         if (built) {
             // The TLAS build reads the new BLASes and reuses the scratch buffer.
@@ -572,6 +573,7 @@ public final class RtScene {
             for (Section s : sections) if (inTlas(s)) count++;
             boolean entities = RtEntities.ready();
             if (entities) count++;
+            count += RtLod.readyCount();
 
             instanceRingIndex = (instanceRingIndex + 1) % INSTANCE_RING;
             RtBuffer instances = instanceBuffers[instanceRingIndex];
@@ -636,6 +638,7 @@ public final class RtScene {
                 dataCpu.putLong(n * 8, RtEntities.dataAddress());
                 n++;
             }
+            n = RtLod.writeInstances(m, dataCpu, n, INSTANCE_BYTES, cx, cy, cz);
             tlasInstanceCount = n;
             translucentInstances = translucent;
             if (n > 0) {
@@ -738,6 +741,7 @@ public final class RtScene {
         RtCompaction.destroy();
         RtLights.destroy();
         RtEntities.destroy();
+        RtLod.destroy();
         RtMaterials.destroy();
         synchronized (CRUMB_LOCK) {
             if (crumbs != null) { crumbs.destroyNow(); crumbs = null; }

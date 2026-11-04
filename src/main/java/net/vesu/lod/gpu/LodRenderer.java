@@ -420,6 +420,15 @@ public final class LodRenderer {
         for (int i = 0; i < coverWords; i++) MemoryUtil.memPutInt(coverPtr[frame] + i * 4L, coverBits[i]);
     }
 
+    /** Host copies of the model table (64 bytes per model) and the biome tints, for RT. */
+    public long modelsPtr() {
+        return modelsPtr;
+    }
+
+    public long tintsPtr() {
+        return tintsPtr;
+    }
+
     public float atlasWidth() {
         return ATLAS_W;
     }
