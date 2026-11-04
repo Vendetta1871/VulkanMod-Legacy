@@ -276,7 +276,8 @@ public class AutoTest {
      * {@code VESU_AUTOTEST_VV=1}: Vibrant Visuals parity scene - a quartz platform in the
      * sky with a two-deep water pool and a chicken plus a zombie on the dry floor, under a
      * low morning sun. Captures the pool at a grazing angle toward the sun ("vvPoolMorning"),
-     * the chicken's drop shadow ("vvChicken") and the pool again at sunset
+     * the pool straight from above to show the floor and caustics ("vvPoolTopDown"), the
+     * chicken's drop shadow ("vvChicken") and the pool again at sunset
      * ("vvPoolSunset"), for side-by-side comparison against the Bedrock reference.
      */
     private static final boolean VV_MODE = Env.get("VESU_AUTOTEST_VV") != null;
@@ -334,16 +335,28 @@ public class AutoTest {
         } else if (t == 150) {
             capture(mc, "vvPoolMorning");
         } else if (t == 155) {
+            // Straight down at the pool: Fresnel is ~2% here, so the floor - and the caustics
+            // modulating it - are fully visible.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 0 90", mc.player.getName(), bx + 11.5, vvBy + 8.0, bz + 11.5));
+        } else if (t == 270) {
+            capture(mc, "vvPoolTopDown");
+        } else if (t == 275) {
+            // Eyes just under the surface (it sits at vvBy+3), looking along the pool: caustics
+            // must stay on the floor.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 0 18", mc.player.getName(), bx + 8.0, vvBy + 2.6, bz + 11.5));
+        } else if (t == 390) {
+            capture(mc, "vvPoolUnderwater");
+        } else if (t == 395) {
             // South of the chicken looking north: the drop shadow blob on quartz.
             serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 30", mc.player.getName(), bx + 18.5, vvBy + 2.6, bz + 23.5));
-        } else if (t == 280) {
+        } else if (t == 520) {
             capture(mc, "vvChicken");
-        } else if (t == 285) {
+        } else if (t == 525) {
             serverCommand(mc, "time set 11800");
             serverCommand(mc, String.format("tp %s %.1f %.1f %.1f -90 18", mc.player.getName(), bx + 1.5, vvBy + 4.0, bz + 11.5));
-        } else if (t == 400) {
+        } else if (t == 650) {
             capture(mc, "vvPoolSunset");
-        } else if (t >= 410) {
+        } else if (t >= 660) {
             Initializer.LOGGER.info("[autotest] done, shutting down");
             mc.shutdown();
         }

@@ -7,8 +7,9 @@ and strings in `libminecraftpe.so`. Every formula below is quoted from that sour
 
 **The headline: the water surface is flat.** Bedrock never displaces water geometry. There is no
 Gerstner vertex animation, no tessellation and no refraction distortion of what lies under the
-surface. "Water waves" is an optional *fragment-shader normal perturbation* that is **off** in the
-vanilla preset, so out of the box the surface is a perfectly flat Fresnel-blend sheet: sky and sun
+surface. "Water waves" is an optional *fragment-shader normal perturbation*: the vanilla preset
+data ships it off, yet the shipped game evaluates the wave normal anyway at default VV quality, so
+in practice the surface is a flat sheet that shimmers with fine, pixel-sized ripples — sky and sun
 specular on top, the undistorted scene through it, tinted by depth absorption.
 
 ## Data: `water.json`
@@ -27,9 +28,10 @@ vanilla preset:
                   "frequency_scaling": 1.2, "speed_scaling": 1.03 } } }
 ```
 
-`waves.enabled` is **false** by default. There is no video-settings toggle for it in this build
-(no `gfx_*` key exists); waves are driven by this data, by the per-biome override and by the
-scripting API (`ScriptModuleServerGraphics::ScriptBiomeWater::setWavesDepth/Shape/Speed/Pull/Mix/Octaves`),
+`waves.enabled` is **false** in the data, but the shipped game turns wave normals on anyway at
+default VV quality: the reference instance shows fine, pixel-sized ripples over every surface.
+There is no `gfx_*` video-settings key for it in this build; waves are driven by this data, by the
+per-biome override and by the scripting API (`ScriptModuleServerGraphics::ScriptBiomeWater::setWavesDepth/Shape/Speed/Pull/Mix/Octaves`),
 plus editor sliders (`editor.agfx.water.waves.*`). A preset is bound to biomes through
 `minecraft:water_identifier`; `minecraft:water_appearance` supplies `surface_color` /
 `surface_opacity`, and `biomes_client.json` still carries the classic `water_surface_color` /
@@ -58,7 +60,10 @@ Five materials are involved. Order per frame:
    the block's material/normal texture, then, if `WaterSurfaceEnabledAndExtinctionDistShift.x > 0`,
    replaces the normal with the analytic wave normal (next section). The result is written as an
    octahedral normal plus motion vectors into the prepass targets; water depth goes to its own
-   depth buffer (`s_WaterDepth`).
+   depth buffer (`s_WaterDepth`). The reference screenshots show the wave pattern as visible
+   squares, so this evaluation runs at reduced resolution (the renderer's other passes carry
+   "MixedResolution" in their names for exactly this reason); the shading pass then reads those
+   coarse normals per pixel.
 2. **`WaterExtinction`** — fullscreen pass. For every pixel it unprojects both the scene depth and
    the water depth and writes the Beer-Lambert absorption of the water column *behind* the surface:
    `exp(-coeff.rgb * (min(sceneViewDist, fogFar) - min(waterViewDist, fogFar) + shift))`.
@@ -70,7 +75,8 @@ Five materials are involved. Order per frame:
    `pow(2 * texel.r * clamp(N.y, 0, 1), power) * (power + 1)`. The texture is
    `renderer/caustics.png`, a 32x2048 stack = 64 frames of 32x32, advanced every `frame_length`
    (0.09 s) seconds. The output modulates scene lighting on submerged floors — caustics belong to
-   the *floor*, not to the surface.
+   the *floor*, not to the surface. `DeferredShading` carries the same snippet inline and
+   multiplies the directional light source by it (`light *= modulation`), leaving ambient alone.
 4. **`DeferredWater`** — the deferred lighting pass for water pixels (a `DeferredShadingBase`
    variant). It reads the G-buffer normal written in step 1 and shades it like any other surface:
    GGX sun specular (roughness 0.08), sky ambient, shadow cascades, point lights, volumetrics.
@@ -121,16 +127,31 @@ Notes:
 - The final `mix(..., geomNormal.y)` means the perturbation only applies to horizontal surfaces:
   water sides (the vertical quads of a waterfall edge, for instance) keep their plain normal.
 - With `waves.enabled = false` the loop never runs and the surface normal is the geometric one:
-  flat.
+  flat. The shipped game nevertheless evaluates it (see the note under `WaterPrepass`), and because
+  that evaluation happens on a coarse grid the ripples read as pixels rather than ripples.
 
 ## What this means for our preset
 
-- `vibrant_visuals/water/water.json` must keep `waves.enabled: false` to match the vanilla default;
-  the analytic normal in `BedrockPrograms.WATER` (`vv_waveNormal`) is already a faithful port of
-  the loop above and stays available for packs that enable waves.
+- `vibrant_visuals/water/water.json` enables waves with the vanilla parameter block, because that
+  is what the shipped game displays; `vv_waveSlope` in `BedrockPrograms.WATER` is a faithful port
+  of the loop above. To reproduce the coarse evaluation each pixel quantizes its sample position
+  to a screen-sized cell grid and averages the slope over a 3x3 stencil, and the resulting tilt is
+  clamped - the raw loop nearly diverges at `s = -1` and would read as broken glass.
 - The surface look to reproduce is: flat plane, Fresnel alpha blend `0.02 + 0.98(1-cos)^5` over the
   *undistorted* scene, Beer-Lambert extinction of the water column, sun specular at roughness 0.08,
-  sky reflection by IBL, caustics projected onto submerged floors along the sun direction.
-- Our refraction "bend" of the backbuffer and our SSR march are additions with no counterpart in
-  the original; with flat normals the bend is a no-op, and the SSR only adds reflections of terrain
-  that Bedrock approximates with its IBL records.
+  sky reflection by IBL, caustics on submerged floors.
+- Caustics (`vv_causticModulation`, shared by `water.fsh` and `lighting.fsh`): the original
+  multiplies only the floor's *directional* light, which dominates its shading there. Our floors are
+  ambient-heavy, so multiplying the sun term alone is invisible and multiplying the raw modulation
+  of the whole color crushes the web gaps to black; we therefore modulate the whole floor color
+  with the strength blended toward one (`mix(1, m, 0.45 * N.y)`), which keeps vertical faces
+  untouched. The strip is sampled with nearest filtering at one texel per block (the data scale is
+  normalized, hence the doubling in `waterDefines`) and in absolute world XZ, so the pattern stays
+  pinned to the world. Two mutually exclusive applications mirror the original's two passes: the
+  water surface pass modulates the scene behind the surface while the camera is above water, and
+  the deferred lighting pass modulates the floor itself while `isEyeInWater` - from under water no
+  surface pixel exists to carry the caustics.
+- The old refraction "bend" of the backbuffer had no counterpart in the original and produced a
+  doubled image under the surface; it is gone, the scene is sampled at the pixel's own position.
+  The SSR march over the sky reflection stays: Bedrock approximates the same information with its
+  IBL records, so terrain reflections in the surface are not a deviation.

@@ -11,12 +11,13 @@
     },
     "caustics": {
       "enabled": true,
+      "texture": "textures/caustics.png",
       "frame_length": 0.09,
       "scale": 0.5,
       "power": 1
     },
     "waves": {
-      "enabled": false,
+      "enabled": true,
       "frequency": 1,
       "octaves": 28,
       "depth": 1,

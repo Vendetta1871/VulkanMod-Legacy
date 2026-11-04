@@ -167,8 +167,14 @@ public final class BedrockFrontend {
         ir.addProperty("name", name(id));
         JsonObject gbuffers = ir.getAsJsonObject("gbuffers");
         if (causticPath != null) {
-            ir.getAsJsonArray("textures").add(fileTexture("causticsMap", causticPath, true));
+            ir.getAsJsonArray("textures").add(fileTexture("causticsMap", causticPath, true, "nearest"));
+            // From above the water surface pass draws the caustics of the floor behind it; from below
+            // the lighting pass modulates the submerged floor's sun light, as the original's two passes.
             gbuffers.getAsJsonObject("water").getAsJsonArray("inputs").add("causticsMap");
+            for (JsonElement causticList : ir.getAsJsonArray("commandLists"))
+                for (JsonElement p : causticList.getAsJsonObject().getAsJsonArray("passes"))
+                    if ("lighting".equals(p.getAsJsonObject().get("name").getAsString()))
+                        p.getAsJsonObject().getAsJsonArray("inputs").add("causticsMap");
         }
         if (cubemap) {
             for (int i = 0; i < 6; i++) {
@@ -325,11 +331,16 @@ public final class BedrockFrontend {
     }
 
     private JsonObject fileTexture(String name, String path, boolean repeat) throws IOException {
+        return fileTexture(name, path, repeat, "linear");
+    }
+
+    private JsonObject fileTexture(String name, String path, boolean repeat, String filter) throws IOException {
         int[] size = pngSize(path);
         JsonObject t = new JsonObject();
         t.addProperty("name", name);
         t.addProperty("format", "RGBA8");
         t.addProperty("file", path);
+        t.addProperty("filter", filter);
         JsonArray s = new JsonArray();
         s.add(size[0]);
         s.add(size[1]);
@@ -522,7 +533,9 @@ public final class BedrockFrontend {
         }
         if (caustics == null || !caustics.has("enabled") || caustics.get("enabled").getAsBoolean()) {
             d.append("#define VV_CAUSTICS\n");
-            d.append("#define VV_CAUSTIC_SCALE ").append(number(caustics, "scale", 0.5)).append('\n');
+            // The data scale is normalized: one 32-texel tile of the strip spans 2 blocks. The reference
+            // shows caustic cells of roughly a block, hence the doubling to one world unit per texel.
+            d.append("#define VV_CAUSTIC_SCALE ").append(2 * number(caustics, "scale", 0.5)).append('\n');
             d.append("#define VV_CAUSTIC_POWER ").append(number(caustics, "power", 2.0)).append('\n');
             d.append("#define VV_CAUSTIC_FRAME ").append(number(caustics, "frame_length", 0.05)).append('\n');
         }

@@ -296,6 +296,44 @@ final class BedrockPrograms {
             }
             """;
 
+    /** Caustic sampling, shared by the two passes that can show it: water surface and deferred lighting. */
+    private static final String CAUSTICS = """
+            #ifdef VV_CAUSTICS
+            #ifdef VV_CAUSTIC_FRAMES
+            /** The original frame strip: 64 tiles of 32x32 sampled at worldXZ * scale. */
+            float vv_caustic(vec2 p) {
+                vec2 at = p * VV_CAUSTIC_SCALE;
+                float frame = mod(floor(frameTimeCounter / VV_CAUSTIC_FRAME), VV_CAUSTIC_FRAMES);
+                return texture(causticsMap, vec2(at.x, (at.y + frame) / VV_CAUSTIC_FRAMES)).r;
+            }
+            #else
+            /** Light gathered by a moving surface: an iterated interference pattern, tiling every 2 pi. */
+            float vv_caustic(vec2 p) {
+                float t = floor(frameTimeCounter / VV_CAUSTIC_FRAME) * VV_CAUSTIC_FRAME * 0.5 + 23.0, c = 1.0;
+                vec2 q = mod(p * VV_CAUSTIC_SCALE * 6.2831853, 6.2831853) - 250.0, i = q;
+                for (int n = 0; n < 5; n++) {
+                    float s = t * (1.0 - 3.5 / float(n + 1));
+                    i = q + vec2(cos(s - i.x) + sin(s + i.y), sin(s - i.y) + cos(s + i.x));
+                    c += 1.0 / length(vec2(q.x / (sin(i.x + s) / 0.005), q.y / (cos(i.y + s) / 0.005)));
+                }
+                c = 1.17 - pow(c / 5.0, 1.4);
+                return pow(abs(c), 8.0);
+            }
+            #endif
+            /**
+             * The original modulation, quoted: pow(2 * texel * clamp(N.y, 0, 1), power) * (power + 1).
+             * It weights only the sun light there; we weight the whole surface shading, whose gaps
+             * would fall to black, so the strength is blended toward one - the floor stays bright
+             * and the web reads as a shimmer, as in the reference. Vertical faces are untouched.
+             */
+            float vv_causticModulation(vec2 floorXZ, float upness) {
+                float up = clamp(upness, 0.0, 1.0);
+                float m = pow(2.0 * vv_caustic(floorXZ) * up, VV_CAUSTIC_POWER) * (VV_CAUSTIC_POWER + 1.0);
+                return mix(1.0, m, 0.45 * up);
+            }
+            #endif
+            """;
+
     /** Translucent blocks share this program; only blocks with id 1 are water. */
     private static final String WATER = """
             layout(location = 0) in vec4 color;
@@ -308,7 +346,7 @@ final class BedrockPrograms {
                     VV_ABSORB_SEDIMENT = vec3(0.002, 0.004, 0.008), VV_ABSORB_CDOM = vec3(0.0, 0.02, 0.08);
             #ifdef VV_WAVES
             /** Bedrock's sharp waves: analytic slopes, accumulated once per octave. */
-            vec3 vv_waveNormal(vec3 n, vec2 p) {
+            vec2 vv_waveSlope(vec2 p) {
                 float frequency = VV_WAVE_FREQUENCY, speed = VV_WAVE_SPEED, weight = 1.0, total = 0.0, angle = 0.0;
                 vec2 slope = vec2(0.0);
                 for (int i = 0; i < VV_WAVE_OCTAVES; i++) {
@@ -323,27 +361,7 @@ final class BedrockPrograms {
                     speed *= VV_WAVE_SPEED_SCALING;
                     angle += radians(VV_WAVE_DIRECTION);
                 }
-                slope /= max(total, 1e-4);
-                return normalize(mix(n, normalize(vec3(slope.x, 1.0, slope.y)), n.y));
-            }
-            #endif
-            #ifdef VV_CAUSTICS
-            /** Light gathered by a moving surface: an iterated interference pattern, tiling every 2 pi. */
-            float vv_caustic(vec2 p) {
-            #ifdef VV_CAUSTIC_FRAMES
-                vec2 at = fract(p * VV_CAUSTIC_SCALE);
-                float frame = mod(floor(frameTimeCounter / VV_CAUSTIC_FRAME), VV_CAUSTIC_FRAMES);
-                return texture(causticsMap, vec2(at.x, (at.y + frame) / VV_CAUSTIC_FRAMES)).r;
-            #endif
-                float t = floor(frameTimeCounter / VV_CAUSTIC_FRAME) * VV_CAUSTIC_FRAME * 0.5 + 23.0, c = 1.0;
-                vec2 q = mod(p * VV_CAUSTIC_SCALE * 6.2831853, 6.2831853) - 250.0, i = q;
-                for (int n = 0; n < 5; n++) {
-                    float s = t * (1.0 - 3.5 / float(n + 1));
-                    i = q + vec2(cos(s - i.x) + sin(s + i.y), sin(s - i.y) + cos(s + i.x));
-                    c += 1.0 / length(vec2(q.x / (sin(i.x + s) / 0.005), q.y / (cos(i.y + s) / 0.005)));
-                }
-                c = 1.17 - pow(c / 5.0, 1.4);
-                return pow(abs(c), 8.0);
+                return slope / max(total, 1e-4);
             }
             #endif
             float vv_waterShadow(vec3 world, vec3 n) {
@@ -389,28 +407,35 @@ final class BedrockPrograms {
                     vkmOut_lit = vec4(mix(mix(own, vv_sky(reflect(-v, n)) * light, sheen) + pointSpecular, vv_fogColor(normalize(worldPos)), fog), max(max(c.a, sheen), fog));
                     return;
                 }
-            #ifdef VV_WAVES
-                n = vv_waveNormal(n, worldPos.xz + cameraPosition.xz);
-            #endif
                 vec2 size = vec2(textureSize(lit, 0)), screen = gl_FragCoord.xy / size;
-                vec3 view = (gbufferModelView * vec4(worldPos, 1.0)).xyz, viewNormal = normalize(mat3(gbufferModelView) * n);
-                vec2 bent = screen + viewNormal.xy * 0.02 / max(-view.z * 0.1, 1.0);
-                // A bent sample in front of the water would show what floats above it.
-                if (texture(depthtex1, bent).r < gl_FragCoord.z) bent = screen;
-                float behindDepth = texture(depthtex1, bent).r;
-                vec3 behind = (gbufferModelViewInverse * vec4(vkm_screenToView(bent, behindDepth), 1.0)).xyz;
+                vec3 view = (gbufferModelView * vec4(worldPos, 1.0)).xyz;
+            #ifdef VV_WAVES
+                // Bedrock evaluates the surface in a low-resolution prepass: one normal per coarse cell
+                // of a screen-sized grid, averaged over the cell. That is what makes its ripples read
+                // as pixels; the quantized position and the 3x3 average reproduce it.
+                float cell = max(0.0625, 12.0 * (-view.z) / size.y);
+                vec2 wavePos = floor((worldPos.xz + cameraPosition.xz) / cell + 0.5) * cell;
+                vec2 slope = vec2(0.0);
+                for (int i = 0; i < 9; i++)
+                    slope += vv_waveSlope(wavePos + (vec2(float(i % 3), float(i / 3)) - 1.0) * cell * 0.34);
+                slope /= 3.0;
+                // The loop's raw slopes reach several units (its 1/(s+1) term nearly diverges); the
+                // coarse prepass keeps the visible tilt modest, the clamp reproduces that.
+                slope /= max(length(slope) / 0.1, 1.0);
+                n = normalize(mix(n, normalize(vec3(slope.x, 1.0, slope.y)), n.y));
+            #endif
+                vec3 viewNormal = normalize(mat3(gbufferModelView) * n);
+                // The original never bends the sample: what lies under the surface shows through undistorted.
+                float behindDepth = texture(depthtex1, screen).r;
+                vec3 behind = (gbufferModelViewInverse * vec4(vkm_screenToView(screen, behindDepth), 1.0)).xyz;
                 float thickness = behindDepth >= 1.0 ? 64.0 : length(behind - worldPos);
-                vec3 scene = texture(lit, bent).rgb;
+                vec3 scene = texture(lit, screen).rgb;
             #ifdef VV_CAUSTICS
-                if (behindDepth < 1.0) {
-                    vec3 sun = vv_sunVector();
-                    if (sun.y > 0.0 && rainStrength < 1.0 && light > 0.0) {
-                        float below = max(worldPos.y - behind.y, 0.0);
-                        vec3 bed = behind + cameraPosition + sun * below / max(sun.y, 0.1);
-                        vec3 bedNormal = normalize(texture(gnormalCopy, bent).xyz);
-                        float sunlit = clamp(bedNormal.y, 0.0, 1.0) * vv_waterShadow(behind, bedNormal);
-                        scene *= 1.0 + vv_caustic(bed.xz) * VV_CAUSTIC_POWER * exp(-below * 0.12) * light * (1.0 - rainStrength) * sunlit;
-                    }
+                // From above, the surface pixel carries the caustics of the floor beneath it; from
+                // below, the lighting pass of the floor itself does (see lighting.fsh).
+                if (behindDepth < 1.0 && isEyeInWater == 0 && vv_sunVector().y > 0.0 && rainStrength < 1.0) {
+                    vec3 bedNormal = normalize(texture(gnormalCopy, screen).xyz);
+                    scene *= vv_causticModulation(behind.xz + cameraPosition.xz, bedNormal.y);
                 }
             #endif
                 vec4 row = VV_ROW(13);
@@ -427,8 +452,6 @@ final class BedrockPrograms {
                     if (hit.z > 0.0) reflected = mix(reflected, texture(lit, hit.xy).rgb, hit.z);
                 }
                 vec3 surface = mix(body, reflected, f) + pointSpecular + vv_waterSun(worldPos, n, v);
-                // The scene is already refracted here, so apply surface opacity as an effect weight rather than blending twice.
-                surface = mix(texture(lit, screen).rgb, surface, clamp(VV_WATER_ALPHA, 0.0, 1.0));
                 vkmOut_lit = vec4(mix(surface, vv_fogColor(normalize(worldPos)), fog), 1.0);
             }
             """;
@@ -749,7 +772,7 @@ final class BedrockPrograms {
                     vkmOut_lit = vec4(vv_ambient() * vec3(0.8, 0.9, 1.2), c.a * 0.5);
                 }
                 """);
-        out.put(dir + "lighting.fsh", settings + LIGHT + "#define VV_POINT_SHADOWS\n" + POINT_LIGHTS + """
+        out.put(dir + "lighting.fsh", settings + LIGHT + "#define VV_POINT_SHADOWS\n" + POINT_LIGHTS + CAUSTICS + """
                 layout(location = 0) out vec4 outColor;
                 const float PI = 3.14159265;
                 float ggx(float nh, float a) {
@@ -818,6 +841,14 @@ final class BedrockPrograms {
                     vec3 ambient = max(vv_ambient() * sky + vv_blockAmbient(lightTint) * pow(m.a, 3.0), vv_ambientColor() * vv_ambientIlluminance());
                     vec3 glow = mix(base, vec3(dot(base, vec3(0.2126, 0.7152, 0.0722))), VV_ROW(14).y);
                     vec3 color = direct + pointDiffuse + pointSpecular + base * (1.0 - metal) * ambient + glow * emissive * VV_EMISSIVE;
+                #ifdef VV_CAUSTICS
+                    // Under water no surface pixel exists to carry the caustics. The original modulates
+                    // the floor's directional light, which dominates its shading there; our floor is
+                    // ambient-heavy, so the whole color is modulated to read the same. The pattern is
+                    // sampled in absolute XZ, so it stays pinned to the world.
+                    if (isEyeInWater == 1 && sun.y > 0.0 && rainStrength < 1.0)
+                        color *= vv_causticModulation(world.xz + cameraPosition.xz, n.y);
+                #endif
                     outColor = vec4(mix(color, vv_fogColor(normalize(world)), vv_fog(length(world))), 1.0);
                 }
                 """);
@@ -838,7 +869,7 @@ final class BedrockPrograms {
                     block = mc_Entity.x;
                 }
                 """);
-        out.put(dir + "water.fsh", settings + LIGHT + TRACE + POINT_LIGHTS + WATER);
+        out.put(dir + "water.fsh", settings + LIGHT + TRACE + POINT_LIGHTS + CAUSTICS + WATER);
         out.put(dir + "reflections.fsh", settings + LIGHT + TRACE + """
                 layout(location = 0) out vec4 outColor;
                 vec3 vv_clampToHistory(vec3 c, vec2 uv) {
