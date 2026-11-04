@@ -296,9 +296,50 @@ public final class LodRenderer {
         int m = Math.min(nTranslucent, MAX_SECTIONS);
         long p = candPtr[frame];
         for (int i = 0; i < n; i++) MemoryUtil.memPutInt(p + i * 4L, opaque[i]);
-        for (int i = 0; i < m; i++) MemoryUtil.memPutInt(p + (n + i) * 4L, translucent[i]);
+        for (int i = 0; i < m; i++) MemoryUtil.memPutInt(p + ((long) MAX_SECTIONS + i) * 4L, translucent[i]);
         opaqueCandidates = n;
         translucentCandidates = m;
+        traversed = false;
+    }
+
+    /**
+     * The traversal wrote this frame's candidates and their counts on the GPU; the cull pass
+     * covers at most {@code bound} of each kind.
+     */
+    public void traversedCandidates(int bound) {
+        traversed = true;
+        candidateBound = Math.min(bound, MAX_SECTIONS);
+    }
+
+    private boolean traversed;
+    /** The traversal sorts at most this many translucent candidates (tsort.comp). */
+    private static final int MAX_SORTED_TRANSLUCENT = 2048;
+    private int candidateBound;
+
+    // ---- GPU traversal (AUDIT 5.11) ----
+
+    private LodTraversal traversal;
+
+    public LodTraversal traversal() {
+        if (traversal == null) traversal = new LodTraversal();
+        return traversal;
+    }
+
+    /** The set of this frame and its layout, for the traversal (uniforms, coverage, candidates, counts). */
+    public void recordTraversal(VkCommandBuffer cmd, int rootCount, int frameId, float pixelScale, float quality,
+                                float lodBlocks, int requestBudget) {
+        // The set holds the Hi-Z too: it must exist before the set is written.
+        ensureHiz(FrameTargets.scene.width(), FrameTargets.scene.height());
+        if (!setsFresh) {
+            for (int i = 0; i < frames; i++) writeSet(i);
+            setsFresh = true;
+        }
+        traversal().record(cmd, frame, setLayout, sets[frame], countBuf[frame], rootCount, frameId, pixelScale, quality,
+                lodBlocks, requestBudget);
+    }
+
+    public int frameSlot() {
+        return frame;
     }
 
     public void freeSlot(int slot) {
@@ -779,7 +820,9 @@ public final class LodRenderer {
                     .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).image(hizImage);
             ib.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(hizLevels).layerCount(1);
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, null, null, ib);
-            vkCmdFillBuffer(cmd, countBuf[frame], 0, 64, 0);
+            // The draw counters; the candidate counts (16, 20) come from the traversal or the CPU.
+            vkCmdFillBuffer(cmd, countBuf[frame], 0, 16, 0);
+            if (!traversed) vkCmdUpdateBuffer(cmd, countBuf[frame], 16, stack.ints(opaqueCandidates, translucentCandidates));
 
             hizPipeline.bind(cmd);
             int levels = Math.min(hizLevels, 16);
@@ -812,7 +855,7 @@ public final class LodRenderer {
                 sh = lh;
             }
 
-            int total = opaqueCandidates + translucentCandidates;
+            int total = traversed ? candidateBound * 2 : opaqueCandidates + translucentCandidates;
             if (total > 0) {
                 cullPipeline.bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline.layout(), 0, stack.longs(sets[frame]), null);
@@ -831,7 +874,7 @@ public final class LodRenderer {
     }
 
     public void drawOpaqueGpu() {
-        if (opaqueCandidates == 0) return;
+        if (!traversed && opaqueCandidates == 0) return;
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         if (opaquePipeline == 0 || pipelineDepthFormat != FrameTargets.depthFormat()) createPipelines();
         bind(cmd, opaquePipeline);
@@ -841,11 +884,17 @@ public final class LodRenderer {
     }
 
     public void drawTranslucentGpu() {
-        if (translucentCandidates == 0) return;
+        if (!traversed && translucentCandidates == 0) return;
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         bind(cmd, translucentPipeline);
         long offset = (long) MAX_DRAWS * CMD;
         bindQuadIndices(cmd);
+        if (traversed) {
+            // One command per translucent candidate, culled ones empty; the count is the traversal's.
+            VK12.vkCmdDrawIndexedIndirectCount(cmd, gpuCmdBuf[frame], offset, countBuf[frame], 20, MAX_SORTED_TRANSLUCENT, CMD);
+            Drawer.forgetBoundPipeline(cmd);
+            return;
+        }
         for (int done = 0; done < translucentCandidates; done += maxDrawIndirect) {
             vkCmdDrawIndexedIndirect(cmd, gpuCmdBuf[frame], offset + (long) done * CMD,
                     Math.min(maxDrawIndirect, translucentCandidates - done), CMD);
@@ -1122,6 +1171,8 @@ public final class LodRenderer {
     }
 
     public void destroy() {
+        if (traversal != null) traversal.destroy();
+        traversal = null;
         if (ssao != null) ssao.destroy();
         destroyPackPipeline();
         if (packSetLayout != 0) {

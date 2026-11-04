@@ -12,12 +12,18 @@ layout(std430, set = 0, binding = 8) readonly buffer Meta { uvec4 meta[]; };    
 layout(std430, set = 0, binding = 9) readonly buffer Candidates { uint candidates[]; };
 // VkDrawIndexedIndirectCommand, 5 uints: the quad index buffer from vertexOffset = 4 x the first quad.
 layout(std430, set = 0, binding = 10) buffer Commands { uint commands[]; };
-layout(std430, set = 0, binding = 11) buffer Counts { uint opaqueCount; uint visibleCount; uint pad0; uint pad1; };
+// The candidate counts come from the traversal (or the CPU selection): opaque candidates at
+// the start of the list, translucent ones from TRANS_OFF on, far to near.
+layout(std430, set = 0, binding = 11) buffer Counts {
+    uint opaqueCount; uint visibleCount; uint pad0; uint pad1;
+    uint opaqueCandidates; uint translucentCandidates;
+};
+const uint TRANS_OFF = 131072u;
 layout(set = 0, binding = 12) uniform sampler2D hiz;
 
 layout(push_constant) uniform P {
-    uint opaqueCandidates;   // candidates[0 .. opaqueCandidates) are opaque sections
-    uint translucentCandidates;
+    uint unused0;
+    uint unused1;
     uint translucentBase;    // first command slot of the translucent region
     uint hizLevels;
     vec2 hizSize;            // size of Hi-Z level 0
@@ -78,10 +84,11 @@ void writeCommand(uint k, uint quads, uint firstQuad, uint slot) {
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
-    uint total = pc.opaqueCandidates + pc.translucentCandidates;
+    uint nOpaque = min(opaqueCandidates, TRANS_OFF);
+    uint total = nOpaque + translucentCandidates;
     if (i >= total) return;
-    bool translucent = i >= pc.opaqueCandidates;
-    uint slot = candidates[i];
+    bool translucent = i >= nOpaque;
+    uint slot = translucent ? candidates[TRANS_OFF + (i - nOpaque)] : candidates[i];
     ivec4 sec = sections[slot];
     uvec4 m0 = meta[slot * 2u], m1 = meta[slot * 2u + 1u];
     uint quadStart = m0.x;
@@ -94,7 +101,7 @@ void main() {
     vec3 hi = lo + (vec3(float((aabb >> 15) & 31u), float((aabb >> 20) & 31u), float((aabb >> 25) & 31u)) + 2.0) * scale;
     bool vis = inFrustum(lo, hi) && !occluded(lo, hi);
     if (translucent) {
-        uint k = pc.translucentBase + (i - pc.opaqueCandidates);
+        uint k = pc.translucentBase + (i - nOpaque);
         writeCommand(k, vis ? counts[0] : 0u, quadStart, slot);
         return;
     }

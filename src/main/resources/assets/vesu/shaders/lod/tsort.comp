@@ -1,0 +1,42 @@
+#version 450
+// The translucent candidates of the traversal, far to near (AUDIT 5.15): one workgroup
+// sorts up to 2048 distance keys in shared memory (bitonic, descending) and writes their
+// slots after the opaque ones. Past 2048 the rest stay out.
+layout(local_size_x = 1024) in;
+
+layout(std430, set = 0, binding = 9) buffer Candidates { uint candidates[]; };
+layout(std430, set = 0, binding = 11) buffer Counts {
+    uint opaqueCount; uint visibleCount; uint pad0; uint pad1;
+    uint opaqueCandidates; uint translucentCandidates;
+};
+layout(std430, set = 1, binding = 6) buffer Trav { uvec4 args; uint qcount[2]; uint sortCount; uint pad; };
+layout(std430, set = 1, binding = 7) readonly buffer SortKeys { uvec2 sortKeys[]; };
+
+const uint N = 2048u, TRANS_OFF = 131072u;
+shared uvec2 s[N];
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint n = min(sortCount, N);
+    // Padding keys (distance 0) sort to the end.
+    for (uint i = t; i < N; i += 1024u) s[i] = i < n ? sortKeys[i] : uvec2(0u);
+    barrier();
+    for (uint k = 2u; k <= N; k <<= 1u) {
+        for (uint j = k >> 1u; j > 0u; j >>= 1u) {
+            for (uint i = t; i < N; i += 1024u) {
+                uint l = i ^ j;
+                if (l > i) {
+                    bool down = (i & k) == 0u;
+                    uvec2 a = s[i], b = s[l];
+                    if ((a.x < b.x) == down) {
+                        s[i] = b;
+                        s[l] = a;
+                    }
+                }
+            }
+            barrier();
+        }
+    }
+    for (uint i = t; i < n; i += 1024u) candidates[TRANS_OFF + i] = s[i].y;
+    if (t == 0u) translucentCandidates = n;
+}

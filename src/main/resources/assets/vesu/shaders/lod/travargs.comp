@@ -1,0 +1,19 @@
+#version 450
+// Between two traversal levels: the dispatch size of the next level from the queue the
+// last one filled, and an empty queue for the next level to fill.
+layout(local_size_x = 1) in;
+
+layout(std430, set = 1, binding = 6) buffer Trav { uvec4 args; uint qcount[2]; uint sortCount; uint pad; };
+
+layout(push_constant) uniform P {
+    uint readQueue;
+    uint writeQueue;
+} pc;
+
+const uint QUEUE = 200000u;
+
+void main() {
+    uint n = min(qcount[pc.readQueue], QUEUE);
+    args = uvec4((n + 63u) / 64u, 1u, 1u, 0u);
+    qcount[pc.writeQueue] = 0u;
+}

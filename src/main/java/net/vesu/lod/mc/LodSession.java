@@ -14,6 +14,7 @@ import net.vesu.lod.MemoryStorage;
 import net.vesu.lod.SectionKey;
 import net.vesu.lod.WorkerPool;
 import net.vesu.lod.gpu.LodRenderer;
+import net.vesu.lod.gpu.LodTraversal;
 import net.vesu.lod.mesh.MeshResult;
 import net.vesu.lod.mesh.MeshService;
 import net.vesu.render.CameraHistory;
@@ -51,6 +52,8 @@ public final class LodSession {
         int meshFrame = -1;
         /** The frame a mesh was asked again for the RT scene. */
         int rtAsked = -100000;
+        /** Its id in the GPU node table and its block of child ids (0: none). */
+        int gpuId, block;
 
         Node(long key) {
             this.key = key;
@@ -215,6 +218,15 @@ public final class LodSession {
             renderer.uploadTints(bakery.tintTable);
         }
         applyResults();
+        LodTraversal tr = traversal();
+        if (tr != null) {
+            tr.beginFrame();
+            int n = tr.takeRequests(renderer.frameSlot(), requestIds);
+            for (int i = 0; i < n; i++) {
+                int id = requestIds[i];
+                if (id > 0 && id < byId.length && byId[id] != null) answer(byId[id]);
+            }
+        }
     }
 
     private final Matrix4f dhProj = new Matrix4f();
@@ -284,7 +296,13 @@ public final class LodSession {
         candTranslucent = 0;
         rtRing = net.vesu.vulkan.rt.RtScene.enabled() && Initializer.CONFIG.lodRtRing > 0;
         if (rtRing) net.vesu.vulkan.rt.RtLod.setTables(renderer.modelsPtr(), renderer.tintsPtr());
-        select(mc);
+        boolean gpuSelect = traversal() != null;
+        if (gpuSelect) {
+            selectRoots(mc);
+            if (rtRing && frame % 30 == 0) rtRingFromStamps();
+        } else {
+            select(mc);
+        }
         rtRing = false;
         writeUniforms(mc);
         renderer.endUploads();
@@ -300,9 +318,17 @@ public final class LodSession {
             java.util.Arrays.sort(opaqueOrder, 0, candOpaque);
             for (int i = 0; i < candOpaque; i++) opaqueSlots[i] = (int) opaqueOrder[i];
             renderer.setCandidates(opaqueSlots, candOpaque, sorted, candTranslucent);
+            if (gpuSelect) renderer.traversedCandidates(nodes.size());
             org.lwjgl.vulkan.VkCommandBuffer cmd = net.vesu.vulkan.Drawer.currentCommandBuffer();
             try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
                 net.vesu.vulkan.FrameTargets.suspendSceneForCompute(cmd, stack);
+                if (gpuSelect) {
+                    // The emptier the mesh queue, the more descent requests (AUDIT 5.11).
+                    double room = Math.max(0, (4000 - meshes.queued()) / 4000.0);
+                    int budget = (int) Math.ceil(LodTraversal.MAX_REQUESTS * room * room);
+                    renderer.recordTraversal(cmd, rootCount, frame, (float) pixelScale, Initializer.CONFIG.lodQuality,
+                            (float) lodBlocks, budget);
+                }
                 renderer.cull(cmd, net.vesu.vulkan.FrameTargets.scene.depthView(),
                         net.vesu.vulkan.FrameTargets.scene.width(), net.vesu.vulkan.FrameTargets.scene.height());
                 net.vesu.vulkan.FrameTargets.resumeScene(cmd, stack);
@@ -314,7 +340,7 @@ public final class LodSession {
         }
         net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_DRAW);
         int ao = renderer.ssao().samples();
-        if (ao > 0 && drawnSections > 0) renderer.recordSsao(viewProj, ao);
+        if (ao > 0 && (gpuSelect || drawnSections > 0)) renderer.recordSsao(viewProj, ao);
         net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_SSAO);
         if ((frame & 255) == 0) cleanup();
     }
@@ -378,6 +404,7 @@ public final class LodSession {
                 if (n.slot >= 0) renderer.writeSection(n.slot, n.x << (5 + n.lvl), n.y << (5 + n.lvl), n.z << (5 + n.lvl), n.lvl);
             }
             if (n.slot >= 0) renderer.writeMeta(n.slot, Math.max(0, start), r.aabb, r.counts);
+            writeGpu(n);
         }
     }
 
@@ -387,6 +414,12 @@ public final class LodSession {
             n = new Node(key);
             nodes.put(key, n);
             n.requestedAt = frame;
+            LodTraversal tr = traversal();
+            if (tr != null) {
+                n.gpuId = tr.allocNode();
+                if (n.gpuId != 0) byId[n.gpuId] = n;
+                writeGpu(n);
+            }
             router.watch(key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
         } else if (!n.ready() && frame - n.requestedAt > 600) {
             n.requestedAt = frame;
@@ -396,6 +429,17 @@ public final class LodSession {
     }
 
     private void dropNode(Node n) {
+        LodTraversal tr = traversal();
+        if (tr != null && n.gpuId != 0) {
+            if (n.lvl < SectionKey.MAX_LEVEL) {
+                Node parent = nodes.get(SectionKey.parent(n.key));
+                if (parent != null) tr.setChild(parent.block, SectionKey.octantInParent(n.key), 0);
+            }
+            tr.freeBlock(n.block);
+            tr.freeNode(n.gpuId);
+            byId[n.gpuId] = null;
+            n.gpuId = n.block = 0;
+        }
         nodes.remove(n.key);
         net.vesu.vulkan.rt.RtLod.release(n.key);
         router.unwatch(n.key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
@@ -407,6 +451,7 @@ public final class LodSession {
 
     /** Frees the meshes drawn longest ago until {@code quads} fit (not those of the last frames). */
     private void evictFor(int quads) {
+        syncStamps();
         evict.clear();
         nodes.forEachValue(n -> {
             if (n.quadStart >= 0 && n.lastSeen < frame - 2) evict.add(n);
@@ -421,6 +466,7 @@ public final class LodSession {
     }
 
     private void cleanup() {
+        syncStamps();
         evict.clear();
         nodes.forEachValue(n -> {
             if (n.lastSeen < frame - 1200) evict.add(n);
@@ -574,6 +620,96 @@ public final class LodSession {
             if (c > 0 && g != MeshResult.G_TRANSLUCENT) renderer.addShadow(q, c, n.slot);
             q += c;
         }
+    }
+
+    // ---- GPU traversal (AUDIT 5.11) ----
+
+    private final Node[] byId = new Node[LodTraversal.MAX_NODES];
+    private final int[] requestIds = new int[LodTraversal.MAX_REQUESTS];
+    private int rootCount, stampsSynced = -1;
+
+    /** The renderer's traversal, or null where the CPU selects (no indirect count, VESU_LOD_CPU_SELECT). */
+    private LodTraversal traversal() {
+        if (renderer == null || !renderer.gpuCull || net.vesu.Env.get("VESU_LOD_CPU_SELECT") != null) return null;
+        return renderer.traversal();
+    }
+
+    private void writeGpu(Node n) {
+        LodTraversal tr = traversal();
+        if (tr == null || n.gpuId == 0) return;
+        int slot = n.quadStart >= 0 && n.slot >= 0 ? n.slot : LodTraversal.NO_SLOT;
+        tr.writeNode(n.gpuId, n.block, slot, Math.max(0, n.childMask), n.ready(), n.counts[MeshResult.G_TRANSLUCENT] > 0,
+                n.lvl, n.x, n.y, n.z);
+    }
+
+    /**
+     * A request of the traversal: a node without its mesh asks again (when the last request
+     * is old), a node that wants to descend gets its children, created as needed.
+     */
+    private void answer(Node n) {
+        if (!n.ready()) {
+            node(n.key);
+            return;
+        }
+        if (n.childMask <= 0) return;
+        LodTraversal tr = traversal();
+        if (n.block == 0) {
+            n.block = tr.allocBlock();
+            if (n.block == 0) return;
+        }
+        for (int o = 0; o < 8; o++) {
+            if ((n.childMask & 1 << o) == 0) continue;
+            Node c = node(SectionKey.child(n.key, o));
+            c.lastSeen = Math.max(c.lastSeen, frame);
+            tr.setChild(n.block, o, c.gpuId);
+        }
+        writeGpu(n);
+    }
+
+    /** The top-level nodes in range, for the traversal to start from. */
+    private void selectRoots(Minecraft mc) {
+        rootCount = 0;
+        drawnSections = 0;
+        visitedNodes = 0;
+        if (!Initializer.CONFIG.lodRendering) return;
+        int h = Math.max(1, net.vesu.vulkan.FrameTargets.scene.height());
+        pixelScale = h / (2.0 * Math.tan(CameraHistory.fovY() * 0.5));
+        lodBlocks = Initializer.CONFIG.lodDistance * 16.0;
+        LodTraversal tr = traversal();
+        int r = (int) Math.ceil(lodBlocks / 512.0);
+        int cx = (int) Math.floor(camX / 512.0), cz = (int) Math.floor(camZ / 512.0);
+        for (int dz = -r; dz <= r; dz++) {
+            for (int dx = -r; dx <= r; dx++) {
+                long key = SectionKey.of(4, cx + dx, 0, cz + dz);
+                if (!inRange((cx + dx) * 512.0, (cz + dz) * 512.0, 512)) continue;
+                Node n = node(key);
+                n.lastSeen = frame;
+                if (n.gpuId != 0 && rootCount < tr.maxRoots()) tr.setRoot(renderer.frameSlot(), rootCount++, n.gpuId);
+            }
+        }
+    }
+
+    /** The visibility stamps of the traversal become the nodes' last-seen frames. */
+    private void syncStamps() {
+        LodTraversal tr = traversal();
+        if (tr == null || stampsSynced == frame) return;
+        stampsSynced = frame;
+        nodes.forEachValue(n -> {
+            int v = tr.visited(n.gpuId);
+            if (v > n.lastSeen) n.lastSeen = v;
+        });
+    }
+
+    /** The RT ring from the nodes the traversal drew lately (it has no per-node draw on the CPU). */
+    private void rtRingFromStamps() {
+        LodTraversal tr = traversal();
+        nodes.forEachValue(n -> {
+            if (n.lvl < 1 || n.quadStart < 0 || tr.drawn(n.gpuId) < frame - 35 || !inRtRing(n)) return;
+            if (!net.vesu.vulkan.rt.RtLod.touch(n.key) && frame - n.rtAsked > 600) {
+                n.rtAsked = frame;
+                submit(n.key);
+            }
+        });
     }
 
     // ---- The RT scene (AUDIT 5.17) ----

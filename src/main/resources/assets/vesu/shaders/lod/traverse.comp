@@ -1,0 +1,175 @@
+#version 450
+// LOD node traversal (AUDIT 5.11), one level per dispatch: level 4 from the top-level list,
+// levels 3..0 from the queue the level above filled. Per node: the LOD distance, the
+// frustum, the vanilla coverage near the camera, then the screen size decides between
+// descending into the children (when every child in range has its mesh) and drawing the
+// node itself. Missing or unbuilt children become requests for the node thread. Drawn
+// nodes go to the candidate list the cull pass turns into draws; translucent ones also
+// get a distance key for the far-to-near sort.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lod_common.glsl"
+
+layout(std430, set = 0, binding = 7) readonly buffer Cover { uint coverBits[]; };
+layout(std430, set = 0, binding = 9) buffer Candidates { uint candidates[]; };
+layout(std430, set = 0, binding = 11) buffer Counts {
+    uint opaqueCount; uint visibleCount; uint pad0; uint pad1;
+    uint opaqueCandidates; uint translucentCandidates;
+};
+
+// a: children block (0: none), mesh slot (~0: none), childMask | ready << 8 | translucent << 9 | lvl << 12
+// b: node coordinates (blocks / (32 << lvl))
+struct Node { uvec4 a; ivec4 b; };
+layout(std430, set = 1, binding = 0) readonly buffer Nodes { Node nodes[]; };
+layout(std430, set = 1, binding = 1) readonly buffer Children { uint children[]; };   // 8 node ids per block
+layout(std430, set = 1, binding = 2) buffer Stamps { uint stamps[]; };              // per node: visited, drawn frame
+layout(std430, set = 1, binding = 3) buffer Requests { uint requestCount; uint requests[]; };
+layout(std430, set = 1, binding = 4) readonly buffer Roots { uint roots[]; };
+layout(std430, set = 1, binding = 5) buffer Queues { uint queue[]; };
+layout(std430, set = 1, binding = 6) buffer Trav { uvec4 args; uint qcount[2]; uint sortCount; uint pad; };
+layout(std430, set = 1, binding = 7) buffer SortKeys { uvec2 sortKeys[]; };
+
+layout(push_constant) uniform P {
+    uint source;        // 0: the top-level list, 1 + q: queue q
+    uint rootCount;
+    uint frameId;
+    uint requestBudget;
+    float pixelScale;   // pixels per block at distance 1
+    float quality;      // a node larger than this on screen (pixels) descends
+    float lodBlocks2;   // the LOD distance squared, XZ
+    uint pad;
+} pc;
+
+const uint QUEUE = 200000u, SORT_MAX = 2048u, TRANS_OFF = 131072u;
+
+bool inRange(vec3 lo, vec3 hi) {
+    vec2 n = clamp(vec2(0.0), lo.xz, hi.xz);
+    return dot(n, n) <= pc.lodBlocks2;
+}
+
+bool inFrustum(vec3 lo, vec3 hi) {
+    // The four side planes and the camera plane of viewProj (Gribb-Hartmann), against the
+    // box corner farthest along each plane normal.
+    vec4 r0 = vec4(viewProj[0][0], viewProj[1][0], viewProj[2][0], viewProj[3][0]);
+    vec4 r1 = vec4(viewProj[0][1], viewProj[1][1], viewProj[2][1], viewProj[3][1]);
+    vec4 r3 = vec4(viewProj[0][3], viewProj[1][3], viewProj[2][3], viewProj[3][3]);
+    vec4 planes[5] = vec4[](r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3);
+    for (int i = 0; i < 5; i++) {
+        vec4 p = planes[i];
+        vec3 v = vec3(p.x >= 0.0 ? hi.x : lo.x, p.y >= 0.0 ? hi.y : lo.y, p.z >= 0.0 ? hi.z : lo.z);
+        if (dot(p.xyz, v) + p.w < 0.0) return false;
+    }
+    return true;
+}
+
+bool coveredSection(ivec3 s) {
+    if (s.y < 0 || s.y > 15) return true;
+    int gx = s.x - cover.x, gz = s.z - cover.z, n = cover.y;
+    if (gx < 0 || gz < 0 || gx >= n || gz >= n) return false;
+    int bit = (gz * n + gx) * 16 + s.y;
+    return (coverBits[bit >> 5] & (1u << (bit & 31))) != 0u;
+}
+
+/** Every chunk section of the box is built by vanilla. */
+bool coveredBox(ivec3 o, int size) {
+    if (cover.w == 0) return false;
+    ivec3 s0 = o >> 4;
+    int n = size >> 4;
+    for (int a = 0; a < n; a++)
+        for (int b = 0; b < n; b++)
+            for (int c = 0; c < n; c++)
+                if (!coveredSection(s0 + ivec3(a, b, c))) return false;
+    return true;
+}
+
+/** The box lies inside the band where vanilla hides the LODs completely. */
+bool insideEdge(vec3 lo, vec3 hi) {
+    if (edge.y <= edge.x) return true;
+    vec2 d = max(abs(lo.xz), abs(hi.xz));
+    return dot(d, d) < edge.x * edge.x;
+}
+
+void request(uint id) {
+    uint k = atomicAdd(requestCount, 1u);
+    if (k < pc.requestBudget) requests[k] = id;
+}
+
+vec3 boxLo(ivec3 o) {
+    return vec3(o - camBlock.xyz) - camFrac.xyz;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint id;
+    if (pc.source == 0u) {
+        if (i >= pc.rootCount) return;
+        id = roots[i];
+    } else {
+        uint q = pc.source - 1u;
+        if (i >= min(qcount[q], QUEUE)) return;
+        id = queue[q * QUEUE + i];
+    }
+    if (id == 0u) return;
+    Node nd = nodes[id];
+    uint lvl = (nd.a.z >> 12) & 7u;
+    int size = 32 << lvl;
+    ivec3 o = nd.b.xyz * size;
+    if (o.y >= 256 || o.y + size <= 0) return;
+    vec3 lo = boxLo(o), hi = lo + float(size);
+    if (!inRange(lo, hi) || !inFrustum(lo, hi)) return;
+    stamps[id * 2u] = pc.frameId;
+    if ((nd.a.z & 0x100u) == 0u) {
+        // No mesh yet (or a stale request): the node thread asks again.
+        request(id);
+        return;
+    }
+    // Near the camera vanilla terrain covers what it has built.
+    if (lvl <= 1u && coveredBox(o, size) && insideEdge(lo, hi)) return;
+
+    uint mask = nd.a.z & 0xFFu;
+    if (lvl > 0u && mask != 0u) {
+        vec3 dv = max(max(lo, -hi), vec3(0.0));
+        float px = float(size) * pc.pixelScale / max(1.0, length(dv));
+        if (px > pc.quality) {
+            // Descend once every child in range has its mesh; meanwhile draw this node.
+            bool all = nd.a.x != 0u;
+            uint base = nd.a.x * 8u;
+            int cs = size >> 1;
+            for (uint c = 0u; all && c < 8u; c++) {
+                if ((mask & (1u << c)) == 0u) continue;
+                vec3 clo = boxLo(o + ivec3(c & 1u, (c >> 2) & 1u, (c >> 1) & 1u) * cs);
+                if (!inRange(clo, clo + float(cs))) continue;
+                uint cid = children[base + c];
+                if (cid == 0u) {
+                    all = false;
+                } else {
+                    stamps[cid * 2u] = pc.frameId;
+                    if ((nodes[cid].a.z & 0x100u) == 0u) all = false;
+                }
+            }
+            if (all) {
+                uint w = (4u - lvl) & 1u;
+                for (uint c = 0u; c < 8u; c++) {
+                    if ((mask & (1u << c)) == 0u) continue;
+                    uint cid = children[base + c];
+                    if (cid == 0u) continue;
+                    uint k = atomicAdd(qcount[w], 1u);
+                    if (k < QUEUE) queue[w * QUEUE + k] = cid;
+                }
+                return;
+            }
+            request(id);
+        }
+    }
+
+    uint slot = nd.a.y;
+    if (slot == 0xFFFFFFFFu) return;
+    stamps[id * 2u + 1u] = pc.frameId;
+    uint k = atomicAdd(opaqueCandidates, 1u);
+    if (k < TRANS_OFF) candidates[k] = slot;
+    if ((nd.a.z & 0x200u) != 0u) {
+        vec3 c = (lo + hi) * 0.5;
+        uint t = atomicAdd(sortCount, 1u);
+        if (t < SORT_MAX) sortKeys[t] = uvec2(floatBitsToUint(dot(c, c)), slot);
+    }
+}
