@@ -1,0 +1,38 @@
+#version 450
+// The opaque candidates of the traversal, near to far (AUDIT 5.15): the traversal appends
+// them a level at a time with a distance bucket each and counts the buckets; here every
+// candidate moves to its bucket's place in the list. Near-first draws let depth reject
+// more of what lies behind, which the traversal's own order (coarse levels first, the rest
+// as the atomics fall) does not.
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 9) buffer Candidates { uint candidates[]; };
+layout(std430, set = 0, binding = 11) buffer Counts {
+    uint opaqueCount; uint visibleCount; uint pad0; uint pad1;
+    uint opaqueCandidates; uint translucentCandidates;
+};
+// buckets: candidates per distance bucket; fill: those placed so far; items: (slot, bucket)
+layout(std430, set = 1, binding = 8) buffer Order { uint buckets[64]; uint fill[64]; uvec2 items[]; };
+
+const uint TRANS_OFF = 131072u;
+shared uint base[64];
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    // Every workgroup takes the exclusive prefix of the 64 counts itself.
+    base[t] = buckets[t];
+    barrier();
+    if (t == 0u) {
+        uint sum = 0u;
+        for (uint b = 0u; b < 64u; b++) {
+            uint c = base[b];
+            base[b] = sum;
+            sum += c;
+        }
+    }
+    barrier();
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= min(opaqueCandidates, TRANS_OFF)) return;
+    uvec2 it = items[i];
+    candidates[base[it.y] + atomicAdd(fill[it.y], 1u)] = it.x;
+}

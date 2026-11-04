@@ -60,6 +60,11 @@ public final class LodRenderer {
     // GPU culling (L6): per-slot meta, per-frame candidates, device-written commands and counts, Hi-Z.
     private long metaBuf, metaAlloc, metaPtr;
     private final long[] candBuf, candAlloc, candPtr, gpuCmdBuf, gpuCmdAlloc, countBuf, countAlloc;
+    /** Per frame slot: the opaque draw count the cull pass wrote, copied for the CPU. */
+    private final long[] countReadBuf, countReadAlloc, countReadPtr;
+    /** This frame's maxDrawCount of the opaque indirect-count draws. */
+    private int opaqueBound = MIN_OPAQUE_BOUND;
+    private static final int MIN_OPAQUE_BOUND = 8192;
     private long hizImage, hizAlloc, hizView, hizSampler, depthSampler;
     private long[] hizLevelViews = new long[0];
     private int hizW, hizH, hizLevels;
@@ -121,6 +126,7 @@ public final class LodRenderer {
         candBuf = new long[frames]; candAlloc = new long[frames]; candPtr = new long[frames];
         gpuCmdBuf = new long[frames]; gpuCmdAlloc = new long[frames];
         countBuf = new long[frames]; countAlloc = new long[frames];
+        countReadBuf = new long[frames]; countReadAlloc = new long[frames]; countReadPtr = new long[frames];
         try (MemoryStack stack = MemoryStack.stackPush()) {
             long[] r = hostBuffer(stack, (long) MAX_SECTIONS * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             metaBuf = r[0]; metaAlloc = r[1]; metaPtr = r[2];
@@ -133,8 +139,11 @@ public final class LodRenderer {
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pb, pa);
                 gpuCmdBuf[i] = pb.get(0); gpuCmdAlloc[i] = pa.get(0);
                 MemoryManager.createBuffer(64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
-                        | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pb, pa);
+                        | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pb, pa);
                 countBuf[i] = pb.get(0); countAlloc[i] = pa.get(0);
+                r = hostBuffer(stack, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                countReadBuf[i] = r[0]; countReadAlloc[i] = r[1]; countReadPtr[i] = r[2];
+                MemoryUtil.memPutInt(countReadPtr[i], 0);
             }
         }
         uboBuf = new long[frames]; uboAlloc = new long[frames]; uboPtr = new long[frames];
@@ -334,8 +343,8 @@ public final class LodRenderer {
             for (int i = 0; i < frames; i++) writeSet(i);
             setsFresh = true;
         }
-        traversal().record(cmd, frame, setLayout, sets[frame], countBuf[frame], rootCount, frameId, pixelScale, quality,
-                lodBlocks, requestBudget);
+        traversal().record(cmd, frame, setLayout, sets[frame], countBuf[frame], rootCount, candidateBound, frameId, pixelScale,
+                quality, lodBlocks, requestBudget);
     }
 
     public int frameSlot() {
@@ -397,6 +406,12 @@ public final class LodRenderer {
         uploadedThisFrame = false;
         opaqueDraws = 0;
         shadowDraws = 0;
+        traversed = false;
+        // The driver walks maxDrawCount, not the count: bound it by the count this slot's last
+        // frame drew, with room to grow. Past it the farthest draws (the list runs near to
+        // far) wait a frame or two while the bound catches up.
+        int last = MemoryUtil.memGetInt(countReadPtr[frame]);
+        opaqueBound = Math.min(MAX_DRAWS, (Math.max(MIN_OPAQUE_BOUND, last + (last >> 1)) + 4095) & ~4095);
         translucentDraws = 0;
         translucentCount = 0;
     }
@@ -803,7 +818,8 @@ public final class LodRenderer {
 
     /**
      * Outside scene rendering, with the scene depth readable: builds the Hi-Z of this frame's
-     * vanilla depth, then culls the candidates and writes the indirect draws.
+     * vanilla depth, then culls the candidates and writes the indirect draws. With no
+     * {@code depthView} (under a pack, before vanilla terrain) only the frustum and facing cull.
      */
     public void cull(VkCommandBuffer cmd, long depthView, int sceneW, int sceneH) {
         ensureHiz(sceneW, sceneH);
@@ -824,8 +840,8 @@ public final class LodRenderer {
             vkCmdFillBuffer(cmd, countBuf[frame], 0, 16, 0);
             if (!traversed) vkCmdUpdateBuffer(cmd, countBuf[frame], 16, stack.ints(opaqueCandidates, translucentCandidates));
 
-            hizPipeline.bind(cmd);
-            int levels = Math.min(hizLevels, 16);
+            int levels = depthView == 0L ? 0 : Math.min(hizLevels, 16);
+            if (levels > 0) hizPipeline.bind(cmd);
             VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(levels * 2, stack);
             for (int l = 0; l < levels; l++) {
                 long set = hizSets[frame][l];
@@ -839,7 +855,7 @@ public final class LodRenderer {
                 w.get(l * 2 + 1).sType$Default().dstSet(set).dstBinding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                         .descriptorCount(1).pImageInfo(dst);
             }
-            vkUpdateDescriptorSets(device, w, null);
+            if (levels > 0) vkUpdateDescriptorSets(device, w, null);
             int sw = sceneW, sh = sceneH;
             for (int l = 0; l < levels; l++) {
                 int lw = Math.max(1, hizW >> l), lh = Math.max(1, hizH >> l);
@@ -860,11 +876,16 @@ public final class LodRenderer {
                 cullPipeline.bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline.layout(), 0, stack.longs(sets[frame]), null);
                 ByteBuffer pc = stack.malloc(32);
-                pc.putInt(0, opaqueCandidates).putInt(4, translucentCandidates).putInt(8, MAX_DRAWS).putInt(12, levels)
+                pc.putInt(0, 0).putInt(4, 0).putInt(8, MAX_DRAWS).putInt(12, levels)
                         .putFloat(16, hizW).putFloat(20, hizH).putFloat(24, sceneW).putFloat(28, sceneH);
                 vkCmdPushConstants(cmd, cullPipeline.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
                 vkCmdDispatch(cmd, (total + 63) / 64, 1, 1);
             }
+            VkMemoryBarrier.Buffer cb = VkMemoryBarrier.calloc(1, stack).sType$Default()
+                    .srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT).dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT);
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, cb, null, null);
+            vkCmdCopyBuffer(cmd, countBuf[frame], countReadBuf[frame], VkBufferCopy.calloc(1, stack).srcOffset(0).dstOffset(0).size(4));
             VkMemoryBarrier.Buffer mb = VkMemoryBarrier.calloc(1, stack).sType$Default()
                     .srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)
                     .dstAccessMask(VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
@@ -879,7 +900,7 @@ public final class LodRenderer {
         if (opaquePipeline == 0 || pipelineDepthFormat != FrameTargets.depthFormat()) createPipelines();
         bind(cmd, opaquePipeline);
         bindQuadIndices(cmd);
-        VK12.vkCmdDrawIndexedIndirectCount(cmd, gpuCmdBuf[frame], 0, countBuf[frame], 0, MAX_DRAWS, CMD);
+        VK12.vkCmdDrawIndexedIndirectCount(cmd, gpuCmdBuf[frame], 0, countBuf[frame], 0, opaqueBound, CMD);
         Drawer.forgetBoundPipeline(cmd);
     }
 
@@ -1070,7 +1091,19 @@ public final class LodRenderer {
     public boolean drawPack(org.joml.Matrix4f mvp, org.joml.Matrix4f modelView, int camBX, int camBY, int camBZ,
                             float fx, float fy, float fz, org.joml.Matrix4f invMvp, int[] coverBits, int coverX, int coverZ,
                             int coverN, boolean flipY, boolean dropCovered) {
-        if (!packPipelines()) return false;
+        if (!packPipelines()) {
+            Runnable work = beforePack;
+            beforePack = null;
+            if (work != null) {
+                VkCommandBuffer cmd = Drawer.currentCommandBuffer();
+                try (MemoryStack stack = MemoryStack.stackPush()) {
+                    net.vesu.vulkan.VkCompat.endRendering(cmd);
+                    work.run();
+                    FrameTargets.resumeScene(cmd, stack);
+                }
+            }
+            return false;
+        }
         int words = (coverN * coverN * 16 + 31) / 32;
         for (int i = 0; i < words; i++) MemoryUtil.memPutInt(coverPtr[frame] + i * 4L, coverBits[i]);
         ByteBuffer u = MemoryUtil.memByteBuffer(packUboPtr[frame], PACK_UBO_SIZE);
@@ -1082,7 +1115,8 @@ public final class LodRenderer {
         u.putInt(224, coverX).putInt(228, coverN).putInt(232, coverZ).putInt(236, 1);
         u.putFloat(240, FrameTargets.scene.width()).putFloat(244, FrameTargets.scene.height()).putFloat(248, flipY ? -1 : 1)
                 .putFloat(252, dropCovered ? 1 : 0);
-        if (opaqueDraws > 0) drawPackPass(packOpaque, false, 0, opaqueDraws, 8);
+        if (traversed) drawPackPass(packOpaque, false, 0, -opaqueBound, 8);
+        else if (opaqueDraws > 0) drawPackPass(packOpaque, false, 0, opaqueDraws, 8);
         return true;
     }
 
@@ -1093,6 +1127,10 @@ public final class LodRenderer {
      */
     public void drawPackTranslucent() {
         if (packTranslucent == 0) return;
+        if (traversed) {
+            drawPackPass(packTranslucent, true, (long) MAX_DRAWS * CMD, -MAX_SORTED_TRANSLUCENT, 17);
+            return;
+        }
         int n = writeTranslucent();
         drawPackPass(packTranslucent, true, (long) MAX_DRAWS * CMD, n, 17);
     }
@@ -1135,19 +1173,39 @@ public final class LodRenderer {
         Drawer.forgetBoundPipeline(cmd);
     }
 
+    private Runnable beforePack;
+
+    /**
+     * Compute work (the traversal and the cull pass) for the next {@link #drawPack}, recorded
+     * where it leaves scene rendering anyway: one rendering break instead of two.
+     */
+    public void beforePack(Runnable work) {
+        beforePack = work;
+    }
+
+    /** A negative {@code count} draws the GPU commands, at most -count, with the cull pass's count. */
     private void drawPackPass(long pipeline, boolean translucent, long offset, int count, int renderStage) {
+        Runnable outside = beforePack;
+        beforePack = null;
         drawBlock.putFloat(0, 1).putFloat(4, 1).putFloat(8, 1).putFloat(12, 1);
         drawBlock.putInt(48, renderStage);
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            net.vesu.vulkan.LodPackBridge.begin(cmd, stack, translucent);
-            if (count > 0) {
+            net.vesu.vulkan.LodPackBridge.begin(cmd, stack, translucent, outside);
+            if (count != 0) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, packLayout, 0,
                         stack.longs(net.vesu.vulkan.LodPackBridge.sharedSet(), packSets[frame]), null);
                 net.vesu.vulkan.LodPackBridge.bindResources(cmd, packLayout);
                 vkCmdPushConstants(cmd, packLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, drawBlock);
-                drawIndirect(cmd, offset, count);
+                if (count > 0) {
+                    drawIndirect(cmd, offset, count);
+                } else {
+                    bindQuadIndices(cmd);
+                    // Opaque draws count from 0, translucent ones (one per sorted candidate) from 20.
+                    VK12.vkCmdDrawIndexedIndirectCount(cmd, gpuCmdBuf[frame], offset, countBuf[frame], translucent ? 20 : 0,
+                            -count, CMD);
+                }
             }
             net.vesu.vulkan.LodPackBridge.end(cmd, stack);
         }
@@ -1191,7 +1249,7 @@ public final class LodRenderer {
         net.vesu.vulkan.ComputePipeline cp = cullPipeline, hp = hizPipeline;
         long hl = hizLayout, hpool = hizPool, hs = hizSampler, mb = metaBuf, ma = metaAlloc;
         long[] cb = candBuf.clone(), ca = candAlloc.clone(), gb = gpuCmdBuf.clone(), ga = gpuCmdAlloc.clone(),
-                kb = countBuf.clone(), ka = countAlloc.clone();
+                kb = countBuf.clone(), ka = countAlloc.clone(), rb = countReadBuf.clone(), ra = countReadAlloc.clone();
         MemoryManager.addToFreeable(() -> {
             if (cp != null) cp.cleanUp();
             if (hp != null) hp.cleanUp();
@@ -1203,6 +1261,7 @@ public final class LodRenderer {
                 MemoryManager.freeBuffer(cb[i], ca[i]);
                 MemoryManager.freeBuffer(gb[i], ga[i]);
                 MemoryManager.freeBuffer(kb[i], ka[i]);
+                MemoryManager.freeBuffer(rb[i], ra[i]);
             }
         });
         MemoryManager.addToFreeable(() -> {

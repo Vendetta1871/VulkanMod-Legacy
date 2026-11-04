@@ -265,17 +265,40 @@ public final class LodSession {
         buildCover(mc);
         candOpaque = 0;
         candTranslucent = 0;
+        boolean gpuSelect = traversal() != null;
         packMode = true;
         try {
-            select(mc);
+            if (gpuSelect) selectRoots(mc);
+            else select(mc);
         } finally {
             packMode = false;
         }
+        if (gpuSelect) {
+            // The traversal drops what vanilla covers only where the pack draws LODs in the scene depth.
+            writeUniforms(mc, packTerrain);
+        }
         renderer.endUploads();
+        if (gpuSelect) {
+            renderer.traversedCandidates(nodes.size());
+            double room = Math.max(0, (4000 - meshes.queued()) / 4000.0);
+            int budget = (int) Math.ceil(LodTraversal.MAX_REQUESTS * room * room);
+            float px = (float) pixelScale, blocks = (float) lodBlocks;
+            int frameId = frame, roots = rootCount;
+            renderer.beforePack(() -> {
+                // Vanilla terrain is not drawn yet: no occlusion test.
+                org.lwjgl.vulkan.VkCommandBuffer cmd = net.vesu.vulkan.Drawer.currentCommandBuffer();
+                net.vesu.vulkan.GpuTimer.mark(cmd, net.vesu.vulkan.GpuTimer.LOD_START);
+                renderer.recordTraversal(cmd, roots, frameId, px, Initializer.CONFIG.lodQuality, blocks, budget);
+                renderer.cull(cmd, 0L, net.vesu.vulkan.FrameTargets.scene.width(), net.vesu.vulkan.FrameTargets.scene.height());
+                net.vesu.vulkan.GpuTimer.mark(cmd, net.vesu.vulkan.GpuTimer.LOD_CULL);
+            });
+        }
+        if (!gpuSelect) net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_CULL);
         int bx = (int) Math.floor(camX), by = (int) Math.floor(camY), bz = (int) Math.floor(camZ);
         packOpen = renderer.drawPack(viewProj, mv, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz),
                 invViewProj.set(viewProj).invert(), cover, coverX, coverZ, coverN, !net.vesu.vulkan.FrameTargets.packSpace(),
                 packTerrain);
+        net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_DRAW);
         renderShadow(mc);
         frameOpen = false;
         if ((frame & 255) == 0) cleanup();
@@ -304,7 +327,7 @@ public final class LodSession {
             select(mc);
         }
         rtRing = false;
-        writeUniforms(mc);
+        writeUniforms(mc, true);
         renderer.endUploads();
         net.vesu.vulkan.GpuTimer.mark(net.vesu.vulkan.Drawer.currentCommandBuffer(), net.vesu.vulkan.GpuTimer.LOD_START);
         if (renderer.gpuCull) {
@@ -840,7 +863,8 @@ public final class LodSession {
         return dx * dx + dz * dz < (double) start * start;
     }
 
-    private void writeUniforms(Minecraft mc) {
+    /** The LOD uniforms of this frame; {@code dropCovered}: the traversal skips what vanilla has built. */
+    private void writeUniforms(Minecraft mc, boolean dropCovered) {
         ByteBuffer b = ubo.clear();
         viewProj.get(0, b);
         int bx = (int) Math.floor(camX), by = (int) Math.floor(camY), bz = (int) Math.floor(camZ);
@@ -856,7 +880,7 @@ public final class LodSession {
                 .putFloat(124, VRenderSystem.getFogDensity());
         b.putFloat(128, fade ? (float) (lodBlocks * 0.9) : 0).putFloat(132, fade ? (float) lodBlocks : 0)
                 .putFloat(136, renderer.atlasWidth()).putFloat(140, renderer.atlasHeight());
-        b.putInt(144, coverX).putInt(148, coverN).putInt(152, coverZ).putInt(156, 1);
+        b.putInt(144, coverX).putInt(148, coverN).putInt(152, coverZ).putInt(156, dropCovered ? 1 : 0);
         b.putFloat(160, net.vesu.vulkan.VRenderSystem.lodEdgeStart).putFloat(164, net.vesu.vulkan.VRenderSystem.lodEdgeEnd)
                 .putFloat(168, 0).putFloat(172, 0);
         b.limit(176);

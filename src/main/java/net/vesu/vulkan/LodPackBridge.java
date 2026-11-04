@@ -100,7 +100,12 @@ public final class LodPackBridge {
      * Before distant water, dhDepthTex1 takes a copy of that depth first.
      */
     public static void begin(VkCommandBuffer cmd, MemoryStack stack, boolean translucent) {
-        FrameTargets.beginLodPackPass(cmd, stack, translucent);
+        begin(cmd, stack, translucent, null);
+    }
+
+    /** As {@link #begin}, running {@code outside} (compute work) between the two renderings. */
+    public static void begin(VkCommandBuffer cmd, MemoryStack stack, boolean translucent, Runnable outside) {
+        FrameTargets.beginLodPackPass(cmd, stack, translucent, outside);
     }
 
     /** Back to scene rendering, everything loaded; dhDepthTex0 is readable. */

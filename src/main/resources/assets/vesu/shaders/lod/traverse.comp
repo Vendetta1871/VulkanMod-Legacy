@@ -4,8 +4,9 @@
 // frustum, the vanilla coverage near the camera, then the screen size decides between
 // descending into the children (when every child in range has its mesh) and drawing the
 // node itself. Missing or unbuilt children become requests for the node thread. Drawn
-// nodes go to the candidate list the cull pass turns into draws; translucent ones also
-// get a distance key for the far-to-near sort.
+// nodes go to the candidate list the cull pass turns into draws, with a distance bucket
+// for the near-to-far order (osort.comp); translucent ones also get a distance key for the
+// far-to-near sort.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lod_common.glsl"
@@ -28,6 +29,7 @@ layout(std430, set = 1, binding = 4) readonly buffer Roots { uint roots[]; };
 layout(std430, set = 1, binding = 5) buffer Queues { uint queue[]; };
 layout(std430, set = 1, binding = 6) buffer Trav { uvec4 args; uint qcount[2]; uint sortCount; uint pad; };
 layout(std430, set = 1, binding = 7) buffer SortKeys { uvec2 sortKeys[]; };
+layout(std430, set = 1, binding = 8) buffer Order { uint buckets[64]; uint fill[64]; uvec2 items[]; };
 
 layout(push_constant) uniform P {
     uint source;        // 0: the top-level list, 1 + q: queue q
@@ -165,10 +167,15 @@ void main() {
     uint slot = nd.a.y;
     if (slot == 0xFFFFFFFFu) return;
     stamps[id * 2u + 1u] = pc.frameId;
+    vec3 c = (lo + hi) * 0.5;
     uint k = atomicAdd(opaqueCandidates, 1u);
-    if (k < TRANS_OFF) candidates[k] = slot;
+    if (k < TRANS_OFF) {
+        // Seven buckets per doubling of the distance from 16 blocks on.
+        uint b = uint(clamp(log2(max(length(c), 16.0) / 16.0) * 7.0, 0.0, 63.0));
+        atomicAdd(buckets[b], 1u);
+        items[k] = uvec2(slot, b);
+    }
     if ((nd.a.z & 0x200u) != 0u) {
-        vec3 c = (lo + hi) * 0.5;
         uint t = atomicAdd(sortCount, 1u);
         if (t < SORT_MAX) sortKeys[t] = uvec2(floatBitsToUint(dot(c, c)), slot);
     }

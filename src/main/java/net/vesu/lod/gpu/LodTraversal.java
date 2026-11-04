@@ -29,7 +29,8 @@ import static org.lwjgl.vulkan.VK10.*;
  */
 public final class LodTraversal {
     public static final int MAX_NODES = 1 << 18, MAX_BLOCKS = 1 << 16, MAX_REQUESTS = 50;
-    private static final int NODE_BYTES = 32, QUEUE = 200000, SORT_MAX = 2048, MAX_ROOTS = 1 << 15;
+    private static final int NODE_BYTES = 32, QUEUE = 200000, SORT_MAX = 2048, MAX_ROOTS = 1 << 15, MAX_CANDIDATES = 131072;
+    private static final int BINDINGS = 9;
     public static final int NO_SLOT = -1;
 
     private final VkDevice device = Vulkan.getDevice();
@@ -37,11 +38,11 @@ public final class LodTraversal {
 
     private final long nodesBuf, nodesAlloc, nodesPtr, childrenBuf, childrenAlloc, childrenPtr, stampsBuf, stampsAlloc, stampsPtr;
     private final long[] requestsBuf, requestsAlloc, requestsPtr, rootsBuf, rootsAlloc, rootsPtr;
-    private final long queueBuf, queueAlloc, travBuf, travAlloc, sortBuf, sortAlloc;
+    private final long queueBuf, queueAlloc, travBuf, travAlloc, sortBuf, sortAlloc, orderBuf, orderAlloc;
 
     private long setLayout, pool;
     private final long[] sets;
-    private net.vesu.vulkan.ComputePipeline traverse, args, sort;
+    private net.vesu.vulkan.ComputePipeline traverse, args, sort, order;
     private long mainSetLayout;
 
     private final int[] freeIds = new int[MAX_NODES];
@@ -78,6 +79,9 @@ public final class LodTraversal {
             travBuf = d[0]; travAlloc = d[1];
             d = device(stack, SORT_MAX * 8L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             sortBuf = d[0]; sortAlloc = d[1];
+            // 64 bucket counts, 64 fill counters, then (slot, bucket) per opaque candidate.
+            d = device(stack, 512 + MAX_CANDIDATES * 8L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            orderBuf = d[0]; orderAlloc = d[1];
         }
         sets = new long[frames];
         createSets();
@@ -99,8 +103,8 @@ public final class LodTraversal {
 
     private void createSets() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(8, stack);
-            for (int i = 0; i < 8; i++) {
+            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(BINDINGS, stack);
+            for (int i = 0; i < BINDINGS; i++) {
                 b.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
             }
             LongBuffer p = stack.mallocLong(1);
@@ -108,7 +112,7 @@ public final class LodTraversal {
                     "traversal set layout");
             setLayout = p.get(0);
             VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(1, stack);
-            sizes.get(0).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 8);
+            sizes.get(0).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * BINDINGS);
             check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(frames).pPoolSizes(sizes),
                     null, p), "traversal pool");
             pool = p.get(0);
@@ -119,9 +123,9 @@ public final class LodTraversal {
                     .descriptorPool(pool).pSetLayouts(layouts), out), "traversal sets");
             for (int i = 0; i < frames; i++) {
                 sets[i] = out.get(i);
-                long[] bufs = {nodesBuf, childrenBuf, stampsBuf, requestsBuf[i], rootsBuf[i], queueBuf, travBuf, sortBuf};
-                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(8, stack);
-                for (int k = 0; k < 8; k++) {
+                long[] bufs = {nodesBuf, childrenBuf, stampsBuf, requestsBuf[i], rootsBuf[i], queueBuf, travBuf, sortBuf, orderBuf};
+                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(BINDINGS, stack);
+                for (int k = 0; k < BINDINGS; k++) {
                     w.get(k).sType$Default().dstSet(sets[i]).dstBinding(k).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1)
                             .pBufferInfo(VkDescriptorBufferInfo.calloc(1, stack).buffer(bufs[k]).offset(0).range(VK_WHOLE_SIZE));
                 }
@@ -138,6 +142,7 @@ public final class LodTraversal {
         traverse = new net.vesu.vulkan.ComputePipeline(compile("lod/traverse.comp"), layouts, 32);
         args = new net.vesu.vulkan.ComputePipeline(compile("lod/travargs.comp"), layouts, 8);
         sort = new net.vesu.vulkan.ComputePipeline(compile("lod/tsort.comp"), layouts, 0);
+        order = new net.vesu.vulkan.ComputePipeline(compile("lod/osort.comp"), layouts, 0);
     }
 
     private static ShaderSPIRVUtils.SPIRV compile(String path) {
@@ -147,8 +152,8 @@ public final class LodTraversal {
     }
 
     private void destroyPipelines() {
-        net.vesu.vulkan.ComputePipeline[] old = {traverse, args, sort};
-        traverse = args = sort = null;
+        net.vesu.vulkan.ComputePipeline[] old = {traverse, args, sort, order};
+        traverse = args = sort = order = null;
         net.vesu.vulkan.memory.MemoryManager.addToFreeable(() -> {
             for (net.vesu.vulkan.ComputePipeline p : old) if (p != null) p.cleanUp();
         });
@@ -241,16 +246,18 @@ public final class LodTraversal {
     // ---- Recording ----
 
     /**
-     * Outside rendering, before the cull pass: clears the counters, walks levels 4..0 and
-     * sorts the translucent candidates. {@code mainSet} is the LOD renderer's set of this
-     * frame (uniforms, coverage, candidates, counts).
+     * Outside rendering, before the cull pass: clears the counters, walks levels 4..0, puts
+     * the opaque candidates near to far (at most {@code candidateBound} of them) and sorts the
+     * translucent ones. {@code mainSet} is the LOD renderer's set of this frame (uniforms,
+     * coverage, candidates, counts).
      */
     public void record(VkCommandBuffer cmd, int frameSlot, long mainLayout, long mainSet, long countBuffer, int rootCount,
-                       int frameId, float pixelScale, float quality, float lodBlocks, int requestBudget) {
+                       int candidateBound, int frameId, float pixelScale, float quality, float lodBlocks, int requestBudget) {
         ensurePipelines(mainLayout);
         try (MemoryStack stack = MemoryStack.stackPush()) {
             vkCmdFillBuffer(cmd, travBuf, 0, 32, 0);
             vkCmdFillBuffer(cmd, countBuffer, 16, 8, 0);
+            vkCmdFillBuffer(cmd, orderBuf, 0, 512, 0);
             barrier(cmd, stack, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
             LongBuffer bound = stack.longs(mainSet, sets[frameSlot]);
@@ -277,6 +284,11 @@ public final class LodTraversal {
                 vkCmdDispatchIndirect(cmd, travBuf, 0);
             }
             barrier(cmd, stack, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            if (candidateBound > 0) {
+                order.bind(cmd);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, order.layout(), 0, bound, null);
+                vkCmdDispatch(cmd, (Math.min(candidateBound, MAX_CANDIDATES) + 63) / 64, 1, 1);
+            }
             sort.bind(cmd);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sort.layout(), 0, bound, null);
             vkCmdDispatch(cmd, 1, 1, 1);
@@ -294,7 +306,7 @@ public final class LodTraversal {
     public void destroy() {
         destroyPipelines();
         long[] host = {nodesBuf, nodesAlloc, childrenBuf, childrenAlloc, stampsBuf, stampsAlloc, queueBuf, queueAlloc,
-                travBuf, travAlloc, sortBuf, sortAlloc};
+                travBuf, travAlloc, sortBuf, sortAlloc, orderBuf, orderAlloc};
         long[][] perFrame = {requestsBuf, requestsAlloc, rootsBuf, rootsAlloc};
         long layout = setLayout, p = pool;
         net.vesu.vulkan.memory.MemoryManager.addToFreeable(() -> {
