@@ -12,6 +12,7 @@ layout(std430, set = 0, binding = 4) readonly buffer Tints { uint tints[]; };
 layout(location = 0) out vec3 vRel;
 layout(location = 1) out vec2 vUv;
 layout(location = 2) flat out uvec4 vInfo;   // model, face | lvl << 4, light, tint (ARGB, 0 = none)
+layout(location = 3) flat out uvec2 vFace;   // the face data and flags of the model (no per-fragment reads)
 
 const int CU[4] = int[](0, 1, 1, 0);
 const int CV[4] = int[](0, 0, 1, 1);
@@ -55,4 +56,5 @@ void main() {
         tint |= 0xFF000000u;
     }
     vInfo = uvec4(model, uint(face) | uint(sec.w) << 4, light, tint);
+    vFace = uvec2(fd, flags);
 }

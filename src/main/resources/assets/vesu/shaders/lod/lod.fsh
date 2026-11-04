@@ -12,6 +12,7 @@ layout(std430, set = 0, binding = 7) readonly buffer Cover { uint coverBits[]; }
 layout(location = 0) in vec3 vRel;
 layout(location = 1) in vec2 vUv;
 layout(location = 2) flat in uvec4 vInfo;
+layout(location = 3) flat in uvec2 vFace;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -39,7 +40,7 @@ void main() {
         if (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) >= t) discard;
     }
     uint model = vInfo.x;
-    uint fd = models[model].faceData[face];
+    uint fd = vFace.x;
 
     vec2 pix = fract(vUv) * 16.0;
     ivec2 pi = clamp(ivec2(pix), ivec2(0), ivec2(15));
@@ -51,18 +52,13 @@ void main() {
     // Analytic derivatives of the unwrapped coordinate: no mip seam where fract() wraps.
     vec2 gx = dFdx(vUv) * 16.0 / atlasSize, gy = dFdy(vUv) * 16.0 / atlasSize;
     vec4 color = textureGrad(atlas, uv, gx, gy);
-    float alpha0 = textureLod(atlas, uv, 0.0).a;
+    // The alpha test reads the base level; only cutout and translucent faces need it.
 #ifdef LOD_TRANSLUCENT
-    const bool translucent = true;
+    if (textureLod(atlas, uv, 0.0).a <= 0.0) discard;
 #else
-    const bool translucent = false;
+    if (((fd >> 22) & 1u) != 0u && textureLod(atlas, uv, 0.0).a <= 0.1) discard;
+    color.a = 1.0;
 #endif
-    if (translucent) {
-        if (alpha0 <= 0.0) discard;
-    } else {
-        if (((fd >> 22) & 1u) != 0u && alpha0 <= 0.1) discard;
-        color.a = 1.0;
-    }
 
     uint tintMode = (fd >> 24) & 3u;
     uint t = vInfo.w;
@@ -75,7 +71,7 @@ void main() {
     uint light = vInfo.z;
     vec2 lm = (vec2(float(light >> 4), float(light & 15u)) + 0.5) / 16.0;
     color.rgb *= texture(lightmap, lm).rgb;
-    if ((models[model].flags & 8u) != 0u) color.rgb *= SHADE[face];
+    if ((vFace.y & 8u) != 0u) color.rgb *= SHADE[face];
 
     float dist = length(vRel);
     int mode = int(fog.z);
