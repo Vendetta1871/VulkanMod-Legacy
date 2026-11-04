@@ -63,6 +63,7 @@ public final class FrameBlock {
             .add("terrainIconSize", INT)
             .add("vkm_dimension", INT)
             .add("vkm_biome", INT)
+            .add("vkm_lavaResistance", INT)
             .add("atlasSize", IVEC2)
             .add("terrainTextureSize", IVEC2)
             .add("vkm_jitter", VEC2)

@@ -11,7 +11,8 @@ import java.util.List;
 /**
  * Images and storage buffers every program of a pack shares (pack-format.md, "Resources"), in
  * descriptor set {@link #SET}. They are not scheduled like render textures: a program writes
- * them whenever it wants, and the host puts a memory barrier between stages.
+ * them whenever it wants, and the host puts a memory barrier before stages whose program text
+ * uses the set.
  */
 public final class Resources {
 

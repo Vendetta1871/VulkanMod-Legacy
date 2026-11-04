@@ -88,6 +88,18 @@ class GeometryPlanTest {
     }
 
     @Test
+    void gnormalCopyReservesTheSnapshotImage() {
+        // Sampling gnormalCopy from a translucent program needs the gnormal SNAPSHOT copy
+        // even when no program samples the "gnormal" texture by name (runtime regression).
+        FramePlan p = plan("\"textures\": [ { \"name\": \"albedo\", \"format\": \"RGBA8\" }, { \"name\": \"gnormal\" } ],"
+                + "\"gbuffers\": { \"terrain\": {" + G + ", \"targets\": [\"albedo\", \"gnormal\"] },"
+                + " \"water\": {" + G + ", \"targets\": [\"albedo\"], \"inputs\": [\"gnormalCopy\"] } }");
+        assertEquals(java.util.List.of(1), p.snapshots, "gnormal texture gets a SNAPSHOT image");
+        assertThrows(IllegalArgumentException.class, () -> plan(TEX
+                + "\"gbuffers\": { \"water\": {" + G + ", \"targets\": [\"albedo\"], \"inputs\": [\"gnormalCopy\"] } }"));
+    }
+
+    @Test
     void preludeUsesTheVanillaInterfaceInSetOne() {
         FramePlan p = plan(TEX + "\"gbuffers\": { \"terrain\": {" + G + ", \"targets\": [\"albedo\", \"ids\"], \"inputs\": [\"normal\"] } }");
         String vsh = """

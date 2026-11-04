@@ -10,15 +10,16 @@ final class BedrockPrograms {
               "format": 1, "id": "vv", "version": "1",
               "requires": { "vertex": ["normal", "tangent", "blockId"] },
               "blockIds": { "1": "minecraft:water minecraft:flowing_water" },
-              "renderer": { "sceneTarget": "lit", "handDepth": 0.125, "unmappedBlockId": 0 },
+              "renderer": { "sceneTarget": "lit", "handDepth": 0.125, "unmappedBlockId": 0, "fullScreenOverwrite": true },
               "textures": [
                 { "name": "albedo", "format": "RGBA8", "clear": [0, 0, 0, 0] },
                 { "name": "gnormal", "format": "RGBA16F", "clear": [0, 0, 0, 0] },
                 { "name": "material", "format": "RGBA8", "clear": [0, 0, 0, 0] },
                 { "name": "lit", "format": "RGBA16F", "clear": [0, 0, 0, 1] },
                 { "name": "luminance", "format": "R32F", "size": [1, 1], "history": true, "clear": false, "filter": "nearest" },
-                { "name": "params", "format": "RGBA32F", "size": [20, 1], "history": true, "clear": false, "filter": "nearest" },
+                { "name": "params", "format": "RGBA32F", "size": [36, 1], "history": true, "clear": false, "filter": "nearest" },
                 { "name": "volume", "format": "RGBA16F", "scale": 0.5, "clear": false },
+                { "name": "reflections", "format": "RGBA16F", "scale": 0.5, "clear": false, "history": true },
                 { "name": "bloom1", "format": "RGBA16F", "scale": 0.5, "clear": false },
                 { "name": "bloom2", "format": "RGBA16F", "scale": 0.25, "clear": false },
                 { "name": "bloom3", "format": "RGBA16F", "scale": 0.125, "clear": false },
@@ -33,7 +34,7 @@ final class BedrockPrograms {
                 "entities": { "vertex": "@DIR@geo.vsh", "fragment": "@DIR@actor.fsh", "targets": ["albedo", "gnormal", "material"], "inputs": ["normals", "specular", "actorNormals", "actorSpecular"] },
                 "block": { "vertex": "@DIR@geo.vsh", "fragment": "@DIR@geo.fsh", "targets": ["albedo", "gnormal", "material"], "inputs": ["normals", "specular"] },
                 "hand": { "vertex": "@DIR@geo.vsh", "fragment": "@DIR@actor.fsh", "targets": ["albedo", "gnormal", "material"], "inputs": ["normals", "specular", "actorNormals", "actorSpecular"] },
-                "water": { "vertex": "@DIR@water.vsh", "fragment": "@DIR@water.fsh", "targets": ["lit"], "inputs": ["depthtex1", "params", "lit"], "blend": "default" },
+                "water": { "vertex": "@DIR@water.vsh", "fragment": "@DIR@water.fsh", "targets": ["lit"], "inputs": ["depthtex1", "shadowtex0", "gnormalCopy", "params", "lit"], "blend": "default" },
                 "clouds": { "vertex": "@DIR@clouds.vsh", "fragment": "@DIR@clouds.fsh", "targets": ["lit"], "inputs": ["params"], "blend": "default" },
                 "weather": { "vertex": "@DIR@clouds.vsh", "fragment": "@DIR@weather.fsh", "targets": ["lit"], "inputs": ["params"], "blend": "default" },
                 "skybasic": { "vertex": "@DIR@sky.vsh", "fragment": "@DIR@sky.fsh", "targets": ["lit"], "inputs": ["params"] },
@@ -45,9 +46,12 @@ final class BedrockPrograms {
                 { "stage": "DEFERRED", "passes": [ { "name": "lighting", "fragment": "@DIR@lighting.fsh",
                   "inputs": ["albedo", "gnormal", "material", "lit", "sceneDepth", "shadowtex0", "params"], "targets": ["lit"] },
                   { "name": "reflections", "fragment": "@DIR@reflections.fsh",
-                  "inputs": ["albedo", "gnormal", "material", "lit", "sceneDepth", "params"], "targets": ["lit"] } ] },
-                { "stage": "POST_SCENE", "passes": [ { "name": "exposure", "fragment": "@DIR@exposure.fsh",
-                  "inputs": ["lit", "luminancePrev"], "targets": ["luminance"] },
+                  "inputs": ["albedo", "gnormal", "material", "lit", "sceneDepth", "motion", "reflectionsPrev", "params"], "targets": ["reflections"] },
+                  { "name": "reflectionApply", "fragment": "@DIR@reflectionApply.fsh",
+                  "inputs": ["lit", "reflections"], "targets": ["lit"] } ] },
+                { "stage": "POST_SCENE", "passes": [ { "name": "histogram", "compute": "@DIR@histogram.csh", "inputs": ["lit"], "workGroups": { "local": [16, 16, 1] } },
+                  { "name": "exposure", "fragment": "@DIR@exposure.fsh",
+                  "inputs": ["luminancePrev"], "targets": ["luminance"] },
                   { "name": "volume", "fragment": "@DIR@volume.fsh",
                   "inputs": ["depthtex0", "shadowtex0", "params"], "targets": ["volume"] },
                   { "name": "volumeApply", "fragment": "@DIR@volumeApply.fsh", "inputs": ["lit", "volume"], "targets": ["lit"] },
@@ -92,17 +96,25 @@ final class BedrockPrograms {
             #define VV_WATER_COLOR VV_ROW(7).rgb
             #define VV_WATER_ALPHA VV_ROW(7).a
             vec3 vv_sunVector() { return normalize(mat3(gbufferModelViewInverse) * sunPosition); }
+            float vv_moonMie() { return VV_ROW(20).x; }
+            float vv_sunGlareShape() { return VV_ROW(20).y; }
             vec3 vv_skyClear(vec3 dir) {
                 vec3 sun = vv_sunVector();
                 float low = vv_horizonMin() - vv_horizonMax();
                 float mixUp = 1.0 - smoothstep(low, vv_horizonStart(), dir.y);
                 float mieUp = 1.0 - smoothstep(low, vv_horizonMie() - vv_horizonMax(), dir.y);
-                float c = dot(dir, sun), sunI = vv_sunIlluminance(), moonI = vv_moonIlluminance();
+                float sunDot = dot(dir, sun), moonDot = dot(dir, -sun);
+                float sunI = vv_sunIlluminance(), moonI = vv_moonIlluminance();
                 vec3 horizon = vv_skyHorizon();
                 vec3 rayleigh = mix(vv_skyZenith(), horizon, mixUp * mixUp * mixUp) * vv_rayleigh() * VV_PHASE
-                        * 0.75 * (sunI * (c * c + 1.0) + moonI * (c * c + 1.0));
-                float glow = clamp(pow(max(c, 0.0), 4.0), 0.0, 1.0), k = 1.81 - 1.8 * glow;
-                vec3 mie = horizon * mieUp * mieUp * mieUp * VV_PHASE * vv_sunColor() * max(sunI, 1.0) * vv_sunMie() * glow * 0.0361 / (k * sqrt(k));
+                        * 0.75 * (sunI * (sunDot * sunDot + 1.0) + moonI * (moonDot * moonDot + 1.0));
+                float shape = max(vv_sunGlareShape(), 0.001);
+                float sunGlow = clamp(pow(max(sunDot, 0.0), shape), 0.0, 1.0);
+                float moonGlow = clamp(pow(max(moonDot, 0.0), shape), 0.0, 1.0);
+                float sunK = 1.81 - 1.8 * sunGlow, moonK = 1.81 - 1.8 * moonGlow;
+                vec3 mie = horizon * mieUp * mieUp * mieUp * VV_PHASE * 0.0361
+                        * (vv_sunColor() * sunI * vv_sunMie() * sunGlow / (sunK * sqrt(sunK))
+                        + vv_moonColor() * moonI * vv_moonMie() * moonGlow / (moonK * sqrt(moonK)));
                 return rayleigh + mie;
             }
             float vv_lightScale() { return vv_sunIlluminance() + vv_moonIlluminance(); }
@@ -113,21 +125,34 @@ final class BedrockPrograms {
                 vec3 clear = mix(zenith, vec3(dot(zenith, vec3(0.2126, 0.7152, 0.0722))), 0.4) * vv_rayleigh() * VV_PHASE * 0.75 * vv_lightScale();
                 return mix(clear, vv_rainSky(), rainStrength) * VV_AMBIENT_GAIN * VV_ROW(14).x;
             }
+            float vv_fogLayer(float dist, float start, float end) {
+                float scale = end < 0.0 ? 1.0 : far;
+                return clamp((dist / scale - start) / max(abs(end) - start, 1e-4), 0.0, 1.0);
+            }
             float vv_fog(float dist) {
-                float air = smoothstep(VV_FOG_AIR_START * far, VV_FOG_AIR_END * far, dist);
-                float rain = smoothstep(VV_FOG_WEATHER_START * far, VV_FOG_WEATHER_END * far, dist);
+                if (isEyeInWater == 1) return vv_fogLayer(dist, VV_ROW(21).y, VV_ROW(21).z);
+                if (isEyeInWater == 2) return vv_fogLayer(dist, VV_ROW(21).w, VV_ROW(22).x);
+                if (isEyeInWater == 2 && vkm_lavaResistance == 1) return vv_fogLayer(dist, VV_ROW(22).y, VV_ROW(22).z);
+                float air = vv_fogLayer(dist, VV_FOG_AIR_START, VV_FOG_AIR_END);
+                float rain = vv_fogLayer(dist, VV_FOG_WEATHER_START, VV_FOG_WEATHER_END);
                 return max(air, rain * rainStrength);
+            }
+            vec3 vv_fogColor(vec3 dir) {
+                if (isEyeInWater == 1) return VV_ROW(23).rgb;
+                if (isEyeInWater == 2) return VV_ROW(24).rgb;
+                return vv_sky(dir);
             }
             """;
 
     /** A light per cell of 4 blocks, position and radius then color and power; 8 light indices per cluster of 8 blocks. */
     static final String LOCAL_LIGHT_RESOURCES = """
             { "images": [ { "name": "voxelImg", "sampler": "voxelTex", "format": "R8UI", "clear": true, "size": [128, 64, 128] } ],
-              "buffers": [ { "binding": 0, "size": 524288 }, { "binding": 1, "size": 40960 } ] }
+              "buffers": [ { "binding": 0, "size": 524288 }, { "binding": 1, "size": 65536 }, { "binding": 2, "size": 65540 }, { "binding": 3, "size": 1024 } ] }
             """;
 
     static final String LOCAL_LIGHT_STAGE = """
             { "stage": "PREPARE", "passes": [
+              { "name": "resourceReset", "compute": "@DIR@resourceReset.csh", "workGroups": { "local": [1, 1, 1], "fixed": [1, 1, 1] } },
               { "name": "lightGather", "compute": "@DIR@lightGather.csh", "workGroups": { "local": [4, 4, 4], "fixed": [8, 4, 8] } },
               { "name": "lightCluster", "compute": "@DIR@lightCluster.csh", "workGroups": { "local": [2, 2, 2], "fixed": [8, 4, 8] } } ] }
             """;
@@ -135,7 +160,12 @@ final class BedrockPrograms {
     private static final String LIGHT_BUFFERS = """
             layout(std430, set = 2, binding = 256) buffer VvLights { vec4 vvLights[]; };
             layout(std430, set = 2, binding = 257) buffer VvClusters { int vvClusters[]; };
+            layout(std430, set = 2, binding = 258) buffer VvActiveLights { int vvActiveLights[]; };
             const ivec3 VV_VOXELS = ivec3(128, 64, 128);
+            """;
+
+    private static final String LUMINANCE_HISTOGRAM = """
+            layout(std430, set = 2, binding = 259) buffer VvLuminanceHistogram { uint vvLuminanceHistogram[]; };
             """;
 
     /**
@@ -178,7 +208,7 @@ final class BedrockPrograms {
             }
             #endif
             /** Adds the lights of this point's cluster. {@code tint} is their mean color and how much they reach it, the game's input for block ambient. */
-            void vv_pointLights(vec3 world, vec3 n, vec3 v, vec3 base, float metal, float roughness, vec3 f0, float level,
+            void vv_pointLights(vec3 world, vec3 n, vec3 v, vec3 base, float metal, float subsurface, float roughness, vec3 f0, float level,
                                 inout vec3 diffuse, inout vec3 specular, out vec4 tint) {
                 tint = vec4(0.0);
                 vec3 p = world + fract(cameraPosition) + vec3(64.0, 32.0, 64.0);
@@ -197,27 +227,36 @@ final class BedrockPrograms {
                     if (d2 >= r2) continue;
                     float ratio = d2 / (r2 + 1e-4), falloff = clamp(1.0 - ratio * ratio, 0.0, 1.0);
                     float attenuation = falloff * falloff / max(d2, 0.1) * gate;
-                    sum += color.rgb * attenuation;
-                    weight += 1.0 - ratio;
                     float dist = sqrt(d2);
-                    vec3 l = toLight / dist;
+                    vec3 l = toLight / max(dist, 1e-4);
                     float nl = dot(n, l);
-                    if (nl <= 0.0) continue;
                     float seen = 1.0;
                     if (i < 4) seen = vv_voxelShadow(p + n * 0.06, at.xyz);
                 #ifdef VV_POINT_SHADOWS
                     if (seen > 0.0 && i < 2 && dot(world, world) < 576.0) seen = vv_contactShadow(world + n * 0.05, l, dist);
                 #endif
+                    // The game also shadows the colored block ambient; it must not leak through walls.
+                    if (seen > 0.0) {
+                        sum += color.rgb * attenuation;
+                        weight += 1.0 - ratio;
+                    }
                     if (seen == 0.0) continue;
+                    vec3 energy = color.rgb * color.a * attenuation * VV_POINT_GAIN;
                     vec3 h = normalize(l + v);
-                    float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
+                    float vh = max(dot(v, h), 0.0);
                     vec3 fresnel = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
-                    float d = nh * nh * (a4 - 1.0) + 1.0;
-                    float distribution = a4 / max(3.14159265 * d * d, 1e-4);
-                    float visibility = nv / (nv * (1.0 - k) + k) * nl / (nl * (1.0 - k) + k) / (4.0 * nl * nv + 1e-4);
-                    vec3 energy = color.rgb * color.a * attenuation * VV_POINT_GAIN * nl;
-                    diffuse += (1.0 - fresnel) * base * (1.0 - metal) / 3.14159265 * energy;
-                    specular += fresnel * distribution * visibility * energy;
+                    const float WRAP = 0.5;
+                    float wrapped = max((dot(n, l) + WRAP) / ((1.0 + WRAP) * (1.0 + WRAP)), 0.0);
+                    float front = mix(nl, wrapped, subsurface);
+                    float back = subsurface * max((dot(-n, l) + WRAP) / ((1.0 + WRAP) * (1.0 + WRAP)), 0.0);
+                    diffuse += base * (1.0 - metal) / 3.14159265 * (1.0 - fresnel) * energy * (front + back);
+                    if (nl > 0.0) {
+                        float nh = max(dot(n, h), 0.0);
+                        float d = nh * nh * (a4 - 1.0) + 1.0;
+                        float distribution = a4 / max(3.14159265 * d * d, 1e-4);
+                        float visibility = nv / (nv * (1.0 - k) + k) * nl / (nl * (1.0 - k) + k) / (4.0 * nl * nv + 1e-4);
+                        specular += fresnel * distribution * visibility * energy * nl;
+                    }
                 }
                 if (weight > 1e-4) tint = vec4(sum / weight, clamp(weight, 0.0, 1.0));
             }
@@ -268,29 +307,24 @@ final class BedrockPrograms {
             const vec3 VV_ABSORB_WATER = vec3(0.40, 0.06, 0.02), VV_ABSORB_CHLOROPHYLL = vec3(0.03, 0.015, 0.04),
                     VV_ABSORB_SEDIMENT = vec3(0.002, 0.004, 0.008), VV_ABSORB_CDOM = vec3(0.0, 0.02, 0.08);
             #ifdef VV_WAVES
-            /** Sharp sines of many headings, each pulling the next toward its crest. */
-            float vv_waveHeight(vec2 p) {
-                float frequency = VV_WAVE_FREQUENCY, speed = VV_WAVE_SPEED, weight = 1.0, sum = 0.0, total = 0.0, angle = 0.0;
+            /** Bedrock's sharp waves: analytic slopes, accumulated once per octave. */
+            vec3 vv_waveNormal(vec3 n, vec2 p) {
+                float frequency = VV_WAVE_FREQUENCY, speed = VV_WAVE_SPEED, weight = 1.0, total = 0.0, angle = 0.0;
+                vec2 slope = vec2(0.0);
                 for (int i = 0; i < VV_WAVE_OCTAVES; i++) {
                     vec2 d = vec2(sin(angle), cos(angle));
-                    float x = dot(d, p) * frequency + frameTimeCounter * speed;
-                    float s = 0.5 + 0.5 * sin(x), wave = pow(s, VV_WAVE_SHAPE);
-                    float slope = VV_WAVE_SHAPE * pow(max(s, 1e-4), VV_WAVE_SHAPE - 1.0) * 0.5 * cos(x);
-                    p -= d * slope * weight * VV_WAVE_PULL;
-                    sum += wave * weight;
+                    float x = dot(d, p) * frequency + frameTimeCounter * 0.5 * speed;
+                    float s = sin(x), c = cos(x), wave = pow(0.5 * (s + 1.0), VV_WAVE_SHAPE);
+                    slope += -d * VV_WAVE_DEPTH * weight * frequency * VV_WAVE_SHAPE * c * wave / (s + 1.0001);
                     total += weight;
-                    weight *= 1.0 - VV_WAVE_MIX;
+                    p -= d * weight * wave * c * VV_WAVE_PULL;
+                    weight = mix(weight, 0.0, VV_WAVE_MIX);
                     frequency *= VV_WAVE_FREQUENCY_SCALING;
                     speed *= VV_WAVE_SPEED_SCALING;
                     angle += radians(VV_WAVE_DIRECTION);
                 }
-                return sum / total * VV_WAVE_DEPTH * 0.12;
-            }
-            vec3 vv_waveNormal(vec3 n, vec2 p) {
-                if (n.y < 0.5) return n;
-                const float e = 0.04;
-                float h = vv_waveHeight(p);
-                return normalize(vec3(h - vv_waveHeight(p + vec2(e, 0.0)), e, h - vv_waveHeight(p + vec2(0.0, e))));
+                slope /= max(total, 1e-4);
+                return normalize(mix(n, normalize(vec3(slope.x, 1.0, slope.y)), n.y));
             }
             #endif
             #ifdef VV_CAUSTICS
@@ -312,19 +346,47 @@ final class BedrockPrograms {
                 return pow(abs(c), 8.0);
             }
             #endif
+            float vv_waterShadow(vec3 world, vec3 n) {
+                vec4 clip = shadowProjection * shadowModelView * vec4(world + n * 0.05, 1.0);
+                vec3 s = clip.xyz / clip.w * 0.5 + 0.5;
+                if (any(lessThan(s.xy, vec2(0.0))) || any(greaterThan(s.xy, vec2(1.0)))) return 1.0;
+            #ifdef VV_SHADOW_BLOCKY
+                return step(s.z - 0.0004, texture(shadowtex0, s.xy).r);
+            #else
+                float sum = 0.0, texel = 1.0 / 2048.0;
+                for (int x = -1; x <= 1; x++) for (int y = -1; y <= 1; y++)
+                    sum += step(s.z - 0.0004, texture(shadowtex0, s.xy + vec2(x, y) * texel).r);
+                return sum / 9.0;
+            #endif
+            }
+            vec3 vv_waterSun(vec3 world, vec3 n, vec3 v) {
+                vec3 sun = vv_sunVector(), l = sun.y >= 0.0 ? sun : -sun;
+                float nl = max(dot(n, l), 0.0), nv = max(dot(n, v), 1e-3);
+                if (nl <= 0.0) return vec3(0.0);
+                vec3 light = (sun.y >= 0.0 ? vv_sunColor() * vv_sunIlluminance()
+                        : vv_moonColor() * vv_moonIlluminance() * VV_MOON_GAIN / VV_SUN_GAIN) * VV_SUN_GAIN * (1.0 - rainStrength);
+                vec3 h = normalize(l + v);
+                float alpha = 0.08 * 0.08, a2 = alpha * alpha, k = alpha * 0.5;
+                float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
+                float d = nh * nh * (a2 - 1.0) + 1.0;
+                float distribution = a2 / max(3.14159265 * d * d, 1e-4);
+                float visibility = nv / (nv * (1.0 - k) + k + 1e-5) * nl / (nl * (1.0 - k) + k + 1e-5) / (4.0 * nl * nv + 1e-5);
+                float fresnel = 0.02 + 0.98 * pow(1.0 - vh, 5.0);
+                return vec3(fresnel * distribution * visibility) * light * nl * vv_waterShadow(world, n);
+            }
             void main() {
                 vec4 c = texture(gtexture, uv) * color;
                 vec3 v = normalize(-worldPos), n = normalize(normalWorld);
                 float light = lm.y * lm.y * lm.y, fog = vv_fog(length(worldPos));
                 vec3 pointDiffuse = vec3(0.0), pointSpecular = vec3(0.0);
                 vec4 lightTint;
-                vv_pointLights(worldPos, n, v, vec3(0.0), 0.0, 0.08, vec3(0.04), lm.x, pointDiffuse, pointSpecular, lightTint);
+                vv_pointLights(worldPos, n, v, vec3(0.0), 0.0, 0.0, 0.08, vec3(0.04), lm.x, pointDiffuse, pointSpecular, lightTint);
                 vec3 ambient = vv_ambient() * light + vv_blockAmbient(lightTint) * pow(lm.x, 3.0);
                 if (block != 1.0) {
                     // Glass and ice: their own color over the scene, with the sky in their sheen.
                     float sheen = 0.04 + 0.96 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
                     vec3 own = pow(c.rgb, vec3(2.2)) * ambient;
-                    vkmOut_lit = vec4(mix(mix(own, vv_sky(reflect(-v, n)) * light, sheen) + pointSpecular, vv_sky(normalize(worldPos)), fog), max(max(c.a, sheen), fog));
+                    vkmOut_lit = vec4(mix(mix(own, vv_sky(reflect(-v, n)) * light, sheen) + pointSpecular, vv_fogColor(normalize(worldPos)), fog), max(max(c.a, sheen), fog));
                     return;
                 }
             #ifdef VV_WAVES
@@ -342,9 +404,13 @@ final class BedrockPrograms {
             #ifdef VV_CAUSTICS
                 if (behindDepth < 1.0) {
                     vec3 sun = vv_sunVector();
-                    float below = max(worldPos.y - behind.y, 0.0);
-                    vec3 bed = behind + cameraPosition + sun * below / max(sun.y, 0.1);
-                    scene *= 1.0 + vv_caustic(bed.xz) * VV_CAUSTIC_POWER * exp(-below * 0.12) * light * (1.0 - rainStrength) * step(0.0, sun.y);
+                    if (sun.y > 0.0 && rainStrength < 1.0 && light > 0.0) {
+                        float below = max(worldPos.y - behind.y, 0.0);
+                        vec3 bed = behind + cameraPosition + sun * below / max(sun.y, 0.1);
+                        vec3 bedNormal = normalize(texture(gnormalCopy, bent).xyz);
+                        float sunlit = clamp(bedNormal.y, 0.0, 1.0) * vv_waterShadow(behind, bedNormal);
+                        scene *= 1.0 + vv_caustic(bed.xz) * VV_CAUSTIC_POWER * exp(-below * 0.12) * light * (1.0 - rainStrength) * sunlit;
+                    }
                 }
             #endif
                 vec4 row = VV_ROW(13);
@@ -354,10 +420,16 @@ final class BedrockPrograms {
                 vec3 body = scene * tint * extinction + scattered * (1.0 - extinction);
                 float f = 0.02 + 0.98 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
                 vec3 r = reflect(normalize(view), viewNormal);
-                vec3 reflected = vv_sky(mat3(gbufferModelViewInverse) * r) * light * 0.35;
-                vec3 hit = vv_trace(depthtex1, view + viewNormal * 0.02, r);
-                if (hit.z > 0.0) reflected = mix(reflected, texture(lit, hit.xy).rgb, hit.z);
-                vkmOut_lit = vec4(mix(mix(body, reflected, f) + pointSpecular, vv_sky(normalize(worldPos)), fog), 1.0);
+                // Seen from below, water has no surface reflection or SSR march.
+                vec3 reflected = n.y > 0.0 ? vv_sky(mat3(gbufferModelViewInverse) * r) * light * 0.35 : vec3(0.0);
+                if (n.y > 0.0) {
+                    vec3 hit = vv_trace(depthtex1, view + viewNormal * 0.02, r);
+                    if (hit.z > 0.0) reflected = mix(reflected, texture(lit, hit.xy).rgb, hit.z);
+                }
+                vec3 surface = mix(body, reflected, f) + pointSpecular + vv_waterSun(worldPos, n, v);
+                // The scene is already refracted here, so apply surface opacity as an effect weight rather than blending twice.
+                surface = mix(texture(lit, screen).rgb, surface, clamp(VV_WATER_ALPHA, 0.0, 1.0));
+                vkmOut_lit = vec4(mix(surface, vv_fogColor(normalize(worldPos)), fog), 1.0);
             }
             """;
 
@@ -424,13 +496,15 @@ final class BedrockPrograms {
                         // A model's own texture: its rectangle of the actor atlas. Models carry no tangents.
                         vec2 at = vkm_material.xy + fract(uv) * vkm_material.zw;
                         m = texture(actorSpecular, at);
+                        if (m == vec4(0.0)) m = VV_PBR_ACTOR;
                         vec3 dx = dFdx(worldPos), dy = dFdy(worldPos);
                         vec2 ux = dFdx(uv), uy = dFdy(uv);
                         vec3 t = dx * uy.y - dy * ux.y, b = dy * ux.x - dx * uy.x;
                         float scale = max(length(t), length(b));
                         if (scale > 0.0) n = normalize(mat3(t / scale, b / scale, n) * (texture(actorNormals, at).xyz * 2.0 - 1.0));
                     }
-                    albedo = vec4(c.rgb * color.rgb, 1.0);
+                    // Bedrock packs metalness and subsurface scattering in the albedo alpha.
+                    albedo = vec4(c.rgb * color.rgb, 1.0 - m.a * 0.498039);
                     gnormal = vec4(n, lm.y);
                     material = vec4(m.r, m.g, m.b, lm.x);
                 }
@@ -446,7 +520,7 @@ final class BedrockPrograms {
                     vkm_alphaTest(c.a);
                 #endif
                     vec3 n = normalize(tbn * (texture(normals, uv).xyz * 2.0 - 1.0));
-                    albedo = vec4(c.rgb * color.rgb, 1.0);
+                    albedo = vec4(c.rgb * color.rgb, 1.0 - texture(specular, uv).a * 0.498039);
                     gnormal = vec4(n, lm.y);
                     vec4 m = texture(specular, uv);
                     if (m == vec4(0.0)) m = VV_PBR_BLOCK;
@@ -469,6 +543,30 @@ final class BedrockPrograms {
                     }
                 }
                 """);
+        out.put(dir + "resourceReset.csh", LIGHT_BUFFERS + LUMINANCE_HISTOGRAM + """
+                void main() {
+                    vvActiveLights[0] = 0;
+                    for (int i = 0; i < 256; i++) vvLuminanceHistogram[i] = 0u;
+                }
+                """);
+        out.put(dir + "histogram.csh", LUMINANCE_HISTOGRAM + """
+                layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+                shared uint localHistogram[256];
+                void main() {
+                    int local = int(gl_LocalInvocationIndex);
+                    localHistogram[local] = 0u;
+                    barrier();
+                    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+                    if (all(lessThan(p, ivec2(vkm_passSize)))) {
+                        vec3 c = texture(lit, (vec2(p) + 0.5) / vkm_passSize).rgb;
+                        float l = clamp(log2(max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.00095)), -3.0, 17.0);
+                        atomicAdd(localHistogram[clamp(1 + int((l + 3.0) * (255.0 / 20.0)), 1, 255)], 1u);
+                    }
+                    barrier();
+                    if (localHistogram[local] > 0u) atomicAdd(vvLuminanceHistogram[local], localHistogram[local]);
+                }
+                """);
+
         out.put(dir + "lightGather.csh", settings + LIGHT_BUFFERS + """
                 void main() {
                     ivec3 cell = ivec3(gl_GlobalInvocationID);
@@ -492,6 +590,10 @@ final class BedrockPrograms {
                     vvLights[slot] = count > 0.0 ? vec4(sum / count, radius) : vec4(0.0);
                     // A lake of lava is one light per cell, brighter for its size.
                     vvLights[slot + 1] = count > 0.0 ? vec4(color / count, sqrt(count)) : vec4(0.0);
+                    if (count > 0.0) {
+                        int id = cell.x + cell.z * 32 + cell.y * 1024;
+                        vvActiveLights[atomicAdd(vvActiveLights[0], 1) + 1] = id;
+                    }
                 }
                 """);
         out.put(dir + "lightCluster.csh", LIGHT_BUFFERS + """
@@ -504,27 +606,22 @@ final class BedrockPrograms {
                         best[i] = -1;
                         score[i] = 0.0;
                     }
-                    // The reach of the strongest light is 16 blocks: 4 cells past the cluster's own 2.
-                    ivec3 lo = max(cluster * 2 - 4, ivec3(0)), hi = min(cluster * 2 + 6, ivec3(32, 16, 32));
-                    for (int z = lo.z; z < hi.z; z++) {
-                        for (int y = lo.y; y < hi.y; y++) {
-                            for (int x = lo.x; x < hi.x; x++) {
-                                int id = x + z * 32 + y * 1024;
-                                vec4 at = vvLights[id * 2];
-                                if (at.w == 0.0) continue;
-                                float d = max(length(at.xyz - center) - 6.93, 0.0);
-                                if (d >= at.w) continue;
-                                float s = vvLights[id * 2 + 1].a / (1.0 + d * d);
-                                for (int i = 0; i < 8; i++) {
-                                    if (s <= score[i]) continue;
-                                    int moved = best[i];
-                                    float kept = score[i];
-                                    best[i] = id;
-                                    score[i] = s;
-                                    id = moved;
-                                    s = kept;
-                                }
-                            }
+                    // Only cells that actually contain a light participate; empty volumes cost no million-cell scan.
+                    int count = min(vvActiveLights[0], 16384);
+                    for (int n = 0; n < count; n++) {
+                        int id = vvActiveLights[n + 1];
+                        vec4 at = vvLights[id * 2];
+                        float d = max(length(at.xyz - center) - 6.93, 0.0);
+                        if (d >= at.w) continue;
+                        float s = vvLights[id * 2 + 1].a / (1.0 + d * d);
+                        for (int i = 0; i < 8; i++) {
+                            if (s <= score[i]) continue;
+                            int moved = best[i];
+                            float kept = score[i];
+                            best[i] = id;
+                            score[i] = s;
+                            id = moved;
+                            s = kept;
                         }
                     }
                     int first = (cluster.x + cluster.z * 16 + cluster.y * 256) * 8;
@@ -599,33 +696,26 @@ final class BedrockPrograms {
                 layout(location = 2) in vec4 color;
                 void main() {
                     vec4 c = texture(gtexture, uv) * color;
-                    float gain = dot(normalize(worldDir), vv_sunVector()) > 0.0 ? max(vv_sunIlluminance(), 4.0) * 2.0 : 1.0;
-                    vkmOut_lit = vec4(pow(c.rgb, vec3(2.2)) * vv_sunColor() * gain * c.a * (1.0 - rainStrength), 1.0);
+                    bool sun = dot(normalize(worldDir), vv_sunVector()) > 0.0;
+                    vec3 tone = sun ? vv_sunColor() * vv_sunIlluminance() : vv_moonColor() * vv_moonIlluminance();
+                    vkmOut_lit = vec4(pow(c.rgb, vec3(2.2)) * tone * c.a, 1.0);
                 }
                 """);
-        out.put(dir + "exposure.fsh", """
+        out.put(dir + "exposure.fsh", LUMINANCE_HISTOGRAM + """
                 layout(location = 0) out vec4 outColor;
-                const int NX = 16, NY = 9, BINS = 32;
                 const float MIN_LOG = -3.0, RANGE_LOG = 20.0;
                 void main() {
                     // average_luminance.json of the game: the log mean of the 80..100 percentile.
-                    float histogram[BINS];
-                    for (int i = 0; i < BINS; i++) histogram[i] = 0.0;
-                    for (int y = 0; y < NY; y++) {
-                        for (int x = 0; x < NX; x++) {
-                            vec3 c = texture(lit, (vec2(x, y) + 0.5) / vec2(NX, NY)).rgb;
-                            float l = log2(max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 1e-4));
-                            histogram[clamp(int((l - MIN_LOG) / RANGE_LOG * float(BINS)), 0, BINS - 1)] += 1.0;
-                        }
-                    }
-                    float total = float(NX * NY), low = 0.8 * total, seen = 0.0, sum = 0.0, count = 0.0;
-                    for (int i = 0; i < BINS; i++) {
-                        float take = clamp(seen + histogram[i], low, total) - clamp(seen, low, total);
-                        sum += take * (MIN_LOG + (float(i) + 0.5) / float(BINS) * RANGE_LOG);
+                    float total = 0.0;
+                    for (int i = 1; i < 256; i++) total += float(vvLuminanceHistogram[i]);
+                    float low = total * 0.8, seen = 0.0, sum = 0.0, count = 0.0;
+                    for (int i = 1; i < 256; i++) {
+                        float take = clamp(seen + float(vvLuminanceHistogram[i]), low, total) - clamp(seen, low, total);
+                        sum += take * (MIN_LOG + float(i - 1) * (RANGE_LOG / 255.0));
                         count += take;
-                        seen += histogram[i];
+                        seen += float(vvLuminanceHistogram[i]);
                     }
-                    float now = clamp(exp2(sum / max(count, 1.0)), 0.125, 16.0);
+                    float now = clamp(exp2(sum / max(count, 1.0)), 0.00095, 16.0);
                     float prev = texture(luminancePrev, vec2(0.5)).r;
                     outColor = vec4(prev > 0.0 ? mix(prev, now, 1.0 - exp(-frameTime)) : now, 0.0, 0.0, 1.0);
                 }
@@ -648,7 +738,7 @@ final class BedrockPrograms {
                     c *= texture(gtexture, uv);
                 #endif
                     vec3 sun = vv_sunColor() * vv_sunIlluminance() * VV_SUN_GAIN / 3.14159 * (1.0 - rainStrength);
-                    vkmOut_lit = vec4(vv_ambient() + sun * 0.4, c.a * VV_CLOUD_ALPHA);
+                    vkmOut_lit = vec4(c.rgb * (vv_ambient() + sun * 0.4), c.a * VV_CLOUD_ALPHA);
                 }
                 """);
         out.put(dir + "weather.fsh", settings + LIGHT + """
@@ -703,24 +793,32 @@ final class BedrockPrograms {
                     vec3 lightColor = (isDay ? vv_sunColor() * vv_sunIlluminance() : vv_moonColor() * vv_moonIlluminance() * VV_MOON_GAIN / VV_SUN_GAIN) * VV_SUN_GAIN;
                     lightColor *= 1.0 - rainStrength;
                     float roughness = max(m.r, 0.05), metal = m.g, emissive = m.b;
-                    float nl = max(dot(n, l), 0.0);
-                    float vis = nl > 0.0 ? shadow(world, n) : 0.0;
+                    float nl = max(dot(n, l), 0.0), nv = max(dot(n, v), 1e-3);
+                    float subsurface = clamp(2.007874 * (0.498039 - a.a), 0.0, 1.0);
+                    float vis = nl > 0.0 || subsurface > 0.0 ? shadow(world, n) : 0.0;
                     vec3 base = pow(a.rgb, vec3(2.2));
                     vec3 f0 = mix(vec3(0.04), base, metal);
                     vec3 h = normalize(l + v);
                     float vh = max(dot(v, h), 0.0);
                     vec3 fresnel = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
-                    vec3 specularLight = fresnel * ggx(max(dot(n, h), 0.0), roughness * roughness) * 0.25;
+                    float alpha = roughness * roughness, k = alpha * 0.5;
+                    float visibility = nv / (nv * (1.0 - k) + k + 1e-5) * nl / (nl * (1.0 - k) + k + 1e-5) / (4.0 * nl * nv + 1e-5);
+                    vec3 specularLight = fresnel * ggx(max(dot(n, h), 0.0), alpha) * visibility;
+                    const float WRAP = 0.5;
+                    float wrapped = max((dot(n, l) + WRAP) / ((1.0 + WRAP) * (1.0 + WRAP)), 0.0);
+                    float front = mix(nl, wrapped, subsurface);
+                    float back = subsurface * max((dot(-n, l) + WRAP) / ((1.0 + WRAP) * (1.0 + WRAP)), 0.0);
                     vec3 diffuse = base * (1.0 - metal) / PI;
-                    vec3 direct = (diffuse + specularLight) * lightColor * nl * vis;
+                    vec3 diffuseLight = diffuse * ((1.0 - fresnel) * front + back) * vis;
+                    vec3 direct = diffuseLight * lightColor + specularLight * lightColor * nl * vis;
                     float sky = g.a * g.a * g.a;
                     vec3 pointDiffuse = vec3(0.0), pointSpecular = vec3(0.0);
                     vec4 lightTint;
-                    vv_pointLights(world, n, v, base, metal, max(roughness, 0.05), f0, m.a, pointDiffuse, pointSpecular, lightTint);
+                    vv_pointLights(world, n, v, base, metal, subsurface, max(roughness, 0.05), f0, m.a, pointDiffuse, pointSpecular, lightTint);
                     vec3 ambient = max(vv_ambient() * sky + vv_blockAmbient(lightTint) * pow(m.a, 3.0), vv_ambientColor() * vv_ambientIlluminance());
                     vec3 glow = mix(base, vec3(dot(base, vec3(0.2126, 0.7152, 0.0722))), VV_ROW(14).y);
-                    vec3 color = direct + pointDiffuse + pointSpecular + mix(base, f0, metal) * ambient + glow * emissive * VV_EMISSIVE;
-                    outColor = vec4(mix(color, vv_sky(normalize(world)), vv_fog(length(world))), 1.0);
+                    vec3 color = direct + pointDiffuse + pointSpecular + base * (1.0 - metal) * ambient + glow * emissive * VV_EMISSIVE;
+                    outColor = vec4(mix(color, vv_fogColor(normalize(world)), vv_fog(length(world))), 1.0);
                 }
                 """);
         out.put(dir + "water.vsh", """
@@ -743,26 +841,62 @@ final class BedrockPrograms {
         out.put(dir + "water.fsh", settings + LIGHT + TRACE + POINT_LIGHTS + WATER);
         out.put(dir + "reflections.fsh", settings + LIGHT + TRACE + """
                 layout(location = 0) out vec4 outColor;
+                vec3 vv_clampToHistory(vec3 c, vec2 uv) {
+                    vec2 texel = 1.0 / vec2(textureSize(reflectionsPrev, 0));
+                    vec3 mean = vec3(0.0), square = vec3(0.0);
+                    for (int y = -1; y <= 1; y++) {
+                        for (int x = -1; x <= 1; x++) {
+                            vec3 s = texture(reflectionsPrev, uv + vec2(x, y) * texel).rgb;
+                            mean += s;
+                            square += s * s;
+                        }
+                    }
+                    mean /= 9.0;
+                    vec3 deviation = sqrt(max(square / 9.0 - mean * mean, vec3(0.0)));
+                    return clamp(c, mean - deviation * 1.25, mean + deviation * 1.25);
+                }
                 void main() {
-                    vec3 c = texture(lit, vkm_texCoord).rgb;
                     float d = texture(sceneDepth, vkm_texCoord).r;
-                    vec4 a = texture(albedo, vkm_texCoord), m = texture(material, vkm_texCoord), g = texture(gnormal, vkm_texCoord);
+                    vec4 m = texture(material, vkm_texCoord);
                     float glossy = 1.0 - m.r / 0.5;
-                    if (d >= 1.0 || a.a == 0.0 || glossy <= 0.0) {
-                        outColor = vec4(c, 1.0);
+                    if (d >= 1.0 || glossy <= 0.0) {
+                        outColor = vec4(0.0);
+                        return;
+                    }
+                    // Deferred emission and albedo need opaque geometry; read them only after the cheap reject.
+                    vec4 a = texture(albedo, vkm_texCoord), g = texture(gnormal, vkm_texCoord);
+                    if (a.a < 0.25) {
+                        outColor = vec4(0.0);
                         return;
                     }
                     vec3 view = vkm_screenToView(vkm_texCoord, d), v = normalize(view);
                     vec3 n = normalize(mat3(gbufferModelView) * g.xyz);
                     vec3 r = reflect(v, n);
                     vec3 base = pow(a.rgb, vec3(2.2)), f0 = mix(vec3(0.04), base, m.g);
-                    vec3 fresnel = f0 + (1.0 - f0) * pow(1.0 - max(dot(-v, n), 0.0), 5.0);
                     float sky = g.a * g.a * g.a;
                     vec3 reflected = vv_sky(mat3(gbufferModelViewInverse) * r) * sky;
                     vec3 hit = vv_trace(sceneDepth, view + n * 0.03, r);
                     if (hit.z > 0.0) reflected = mix(reflected, texture(lit, hit.xy).rgb, hit.z);
+                    float nv = clamp(dot(-v, n), 0.0, 1.0), roughness = max(m.r, 0.05);
+                    // Split-sum environment BRDF, the analytic approximation of the game's LUT.
+                    vec4 t = roughness * vec4(-1.04, -1.04, -1.04, 0.33) + vec4(1.0, 0.783, 0.759, 0.34);
+                    float a004 = min(t.x * t.x, exp2(-9.28 * nv)) * t.x + t.y;
+                    vec2 brdf = vec2(-1.04, 1.04) * a004 + t.zw;
                     float fog = vv_fog(length(view));
-                    outColor = vec4(c + fresnel * reflected * glossy * glossy * (1.0 - fog), 1.0);
+                    vec3 indirect = reflected * (f0 * brdf.x + brdf.y) * glossy * (1.0 - fog);
+                    vec2 motion = texture(motion, vkm_texCoord).xy;
+                    vec2 previousUV = vkm_texCoord + motion;
+                    float historyValid = (frameCounter > 1 && all(greaterThanEqual(previousUV, vec2(0.0)))
+                            && all(lessThanEqual(previousUV, vec2(1.0))) && dot(motion, motion) < 0.05) ? 0.75 : 0.0;
+
+                    if (historyValid > 0.0) indirect = vv_clampToHistory(indirect, previousUV);
+                    outColor = vec4(mix(indirect, texture(reflectionsPrev, previousUV).rgb, historyValid), 1.0);
+                }
+                """);
+        out.put(dir + "reflectionApply.fsh", """
+                layout(location = 0) out vec4 outColor;
+                void main() {
+                    outColor = vec4(texture(lit, vkm_texCoord).rgb + texture(reflections, vkm_texCoord).rgb, 1.0);
                 }
                 """);
         out.put(dir + "volume.fsh", settings + LIGHT + """
@@ -819,31 +953,83 @@ final class BedrockPrograms {
         out.put(dir + "grade.fsh", settings + """
                 #define VV_ROW(i) texelFetch(params, ivec2(i, 0), 0)
                 layout(location = 0) out vec4 outColor;
+                vec3 vv_xyz(vec3 uv) {
+                    return vec3(uv.x * uv.z / uv.y, uv.z, (1.0 - uv.x - uv.y) * uv.z / uv.y);
+                }
+                vec3 vv_temperature(vec3 c) {
+                    if (VV_ROW(20).z < 0.5) return c;
+                    float t = VV_ROW(20).w;
+                    vec2 xy = vec2((0.8601177334785461 + 0.0001541182573419064 * t + 1.2864121856637212e-7 * t * t)
+                            / (1.0 + 0.0008424202096648514 * t + 7.081451371959701e-7 * t * t),
+                            (0.317398726940155 + 4.228062607580796e-5 * t + 4.204816761443908e-8 * t * t)
+                            / (1.0 - 2.8974181986995973e-5 * t + 1.6145605741257896e-7 * t * t));
+                    vec3 uv = vec3(vec2(3.0 * xy.x, 2.0 * xy.y) / (2.0 * xy.x - 8.0 * xy.y + 4.0), 1.0);
+                    mat3 xyzToLms = transpose(mat3(vec3(0.7328, 0.4296, -0.1624), vec3(-0.7036, 1.6975, 0.0061), vec3(0.003, 0.0136, 0.9834)));
+                    vec3 reference = xyzToLms * vv_xyz(vec3(0.31272, 0.32903, 1.0));
+                    vec3 target = xyzToLms * vv_xyz(uv);
+                    vec3 ratio = VV_ROW(21).x < 0.5 ? reference / target : target / reference;
+                    mat3 lmsToRgb = transpose(mat3(vec3(2.859, -1.629, -0.025), vec3(-0.21, 1.158, 0.0), vec3(-0.042, -0.118, 1.069)));
+                    mat3 rgbToLms = transpose(mat3(vec3(0.39, 0.55, 0.009), vec3(0.071, 0.963, 0.001), vec3(0.023, 0.128, 0.936)));
+                    return lmsToRgb * (mat3(ratio.x, 0.0, 0.0, 0.0, ratio.y, 0.0, 0.0, 0.0, ratio.z) * rgbToLms) * c;
+                }
+                vec3 vv_selectGrade(vec3 mid, vec3 high, vec3 shadow, float luma, float average) {
+                    float highAt = average * max(VV_ROW(35).x, 1.0);
+                    float shadowAt = average * clamp(VV_ROW(35).y, 0.0, 0.999);
+                    if (luma >= highAt) return high;
+                    if (luma <= shadowAt) return shadow;
+                    if (luma < average && average > shadowAt)
+                        return mix(shadow, mid, clamp((luma - shadowAt) / (average - shadowAt), 0.0, 1.0));
+                    if (luma > average && highAt > average)
+                        return mix(mid, high, clamp((luma - average) / (highAt - average), 0.0, 1.0));
+                    return mid;
+                }
+                vec3 vv_hableCurve(vec3 v) {
+                    return (v * (v * 0.15 + 0.05) + 0.004) / (v * (v * 0.15 + 0.5) + 0.06) - 1.0 / 15.0;
+                }
                 vec3 tonemap(vec3 x) {
-                #if defined(VV_TONEMAP_ACES)
-                    return x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14);
-                #elif defined(VV_TONEMAP_REINHARD)
-                    return x / (1.0 + x);
+                    const float WHITE = 32.0;
+                #if defined(VV_TONEMAP_REINHARD)
+                    return x * (1.0 + x / (WHITE * WHITE)) / (1.0 + x);
+                #elif defined(VV_TONEMAP_REINHARD_LUMA) || defined(VV_TONEMAP_REINHARD_LUMINANCE)
+                    float luma = max(dot(x, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+                    return x * ((luma * (1.0 + luma / (WHITE * WHITE)) / (1.0 + luma)) / luma);
+                #elif defined(VV_TONEMAP_HABLE)
+                    return vv_hableCurve(x * 2.0) / vv_hableCurve(vec3(WHITE * WHITE));
+                #elif defined(VV_TONEMAP_ACES)
+                    mat3 acesIn = transpose(mat3(vec3(0.59719, 0.35458, 0.04823), vec3(0.076, 0.90834, 0.01566), vec3(0.0284, 0.13383, 0.83777)));
+                    mat3 acesOut = transpose(mat3(vec3(1.60475, -0.53108, -0.07367), vec3(-0.10208, 1.10813, -0.00605), vec3(-0.00327, -0.07276, 1.07602)));
+                    vec3 a = acesIn * x;
+                    return clamp(acesOut * clamp((a * (a + 0.0245786) - 0.000090537) / (a * (a * 0.983729 + 0.432951) + 0.238081), 0.0, 1.0), 0.0, 1.0);
                 #else
                     // "generic": a curve through mid gray and a white point on the peak channel, with
                     // the hue kept until the peak is close to white.
-                    const float a = 1.05, white = 32.0;
-                    float mid = pow(0.18, a), top = pow(white, a), b = (top - mid / 0.18) / (top - mid), d = top * (1.0 - b);
+                    const float a = 1.05;
+                    float mid = pow(0.18, a), top = pow(WHITE, a), b = (top - mid / 0.18) / (top - mid), d = top * (1.0 - b);
                     float peak = max(max(x.r, x.g), max(x.b, 1e-5)), p = pow(peak, a), y = p / (b * p + d);
                     return mix(x / peak, vec3(1.0), pow(y, 32.0)) * y;
                 #endif
                 }
                 void main() {
                     vec3 c = max(texture(lit, vkm_texCoord).rgb + texture(bloomUp1, vkm_texCoord).rgb * 0.02, vec3(0.0));
-                    // The game's exposure: 0.18 / average, with a compensation of 5 measured from its picture.
-                    float average = max(texture(luminance, vec2(0.5)).r, 0.125) / mix(5.0, 2.7, rainStrength);
+                    // The full histogram replaces the old 16x9 estimate; /5 remains the calibration
+                    // measured against the game's pre-exposure pipeline.
+                    float average = max(texture(luminance, vec2(0.5)).r, 0.125) / 5.0;
+                    // The game chooses its grading range from the input luminance, before grading.
+                    float sourceLuma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    vec3 contrast = vv_selectGrade(VV_ROW(8).rgb, VV_ROW(25).rgb, VV_ROW(30).rgb, sourceLuma, average);
+                    vec3 saturation = vv_selectGrade(VV_ROW(11).rgb, VV_ROW(28).rgb, VV_ROW(33).rgb, sourceLuma, average);
+                    vec3 gain = vv_selectGrade(VV_ROW(9).rgb, VV_ROW(26).rgb, VV_ROW(31).rgb, sourceLuma, average);
+                    vec3 offset = vv_selectGrade(VV_ROW(10).rgb, VV_ROW(27).rgb, VV_ROW(32).rgb, sourceLuma, average);
+                    c = vv_temperature(c);
+                    c = average * pow(max(c, vec3(0.0)) / average, contrast);
                     float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-                    c = average * pow(c / average, VV_ROW(8).rgb);
-                    luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-                    c = max(mix(vec3(luma), c, VV_ROW(11).rgb) * VV_ROW(9).rgb + VV_ROW(10).rgb, vec3(0.0));
-                    c = clamp(tonemap(c * 0.18 / average), 0.0, 1.0);
+                    c = max(mix(vec3(luma), c, saturation) * gain + offset, vec3(0.0));
+                    c = clamp(tonemap(c * (0.18 / average)), 0.0, 1.0);
+                    // Gamma follows the output of the selected tone-mapping operator.
+                    float outputLuma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    vec3 gamma = vv_selectGrade(VV_ROW(12).rgb, VV_ROW(29).rgb, VV_ROW(34).rgb, outputLuma, 0.18);
                     vec3 encoded = mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
-                    outColor = vec4(pow(encoded, 2.2 / VV_ROW(12).rgb), 1.0);
+                    outColor = vec4(pow(encoded, 2.2 / gamma), 1.0);
                 }
                 """);
     }
@@ -870,9 +1056,11 @@ final class BedrockPrograms {
                 layout(location = 0) out vec4 outColor;
                 void main() {
                     vec2 d = 2.0 / vec2(textureSize(LOW, 0)), uv = vkm_texCoord;
-                    vec3 c = texture(LOW, uv + vec2(d.x, 0.0)).rgb + texture(LOW, uv - vec2(d.x, 0.0)).rgb
-                            + texture(LOW, uv + vec2(0.0, d.y)).rgb + texture(LOW, uv - vec2(0.0, d.y)).rgb;
-                    outColor = vec4(texture(HIGH, uv).rgb + c * 0.25, 1.0);
+                    vec3 c = (texture(LOW, uv + d * 0.5).rgb + texture(LOW, uv + vec2(-d.x, d.y) * 0.5).rgb
+                            + texture(LOW, uv + vec2(d.x, -d.y) * 0.5).rgb + texture(LOW, uv - d * 0.5).rgb) * 0.166
+                            + (texture(LOW, uv + d).rgb + texture(LOW, uv + vec2(-d.x, d.y)).rgb
+                            + texture(LOW, uv + vec2(d.x, -d.y)).rgb + texture(LOW, uv - d).rgb) * 0.083;
+                    outColor = vec4(texture(HIGH, uv).rgb + c, 1.0);
                 }
                 """;
         out.put(dir + "bloomUp3.fsh", up.replace("LOW", "bloom4").replace("HIGH", "bloom3"));

@@ -23,11 +23,19 @@ class BedrockFrontendTest {
         Files.writeString(p, text);
     }
 
-    private String params() throws IOException {
+    private BedrockFrontend.Result lower() throws IOException {
         try (PackSource src = PackSource.directory(dir)) {
-            return BedrockFrontend.lower(src, "test").programs().entrySet().stream()
-                    .filter(e -> e.getKey().endsWith("params.fsh")).findFirst().orElseThrow().getValue();
+            return BedrockFrontend.lower(src, "test");
         }
+    }
+
+    private String program(String suffix) throws IOException {
+        return lower().programs().entrySet().stream()
+                .filter(e -> e.getKey().endsWith(suffix)).findFirst().orElseThrow().getValue();
+    }
+
+    private String params() throws IOException {
+        return program("params.fsh");
     }
 
     private void pack(String biomeLights) throws IOException {
@@ -54,5 +62,54 @@ class BedrockFrontendTest {
     @Test
     void programsHaveAFixedOrder() {
         assertEquals("basic", GeometryCategory.PROGRAMS.iterator().next());
+    }
+
+    @Test
+    void blockyShadowsAreTheDefault() throws IOException {
+        pack("{ \"sun\": { \"illuminance\": 20.0 } }");
+        assertTrue(program("water.fsh").contains("#define VV_SHADOW_BLOCKY"));
+    }
+
+    @Test
+    void defaultBiomeAcceptsBlockComments() throws IOException {
+        pack("{ \"sun\": { \"illuminance\": 20.0 } }");
+        write("biomes_client.json", "/* vanilla header */\n{ \"biomes\": { \"default\": { \"water_surface_color\": \"#44AFF5\" } } }");
+        String params = params();
+        assertTrue(params.contains("case 20"), "atmosphere and temperature rows");
+        assertTrue(params.contains("case 24"), "medium fog rows");
+        assertTrue(params.contains("case 35"), "grading range thresholds");
+    }
+
+    @Test
+    void gradingRangesAndHalfResolutionReflectionsArePlanned() throws IOException {
+        pack("{ \"sun\": { \"illuminance\": 20.0 } }");
+        write("color_grading/color_grading.json", "{ \"minecraft:color_grading_settings\": {"
+                + " \"color_grading\": { \"midtones\": { \"contrast\": [1, 1, 1] },"
+                + " \"highlights\": { \"contrast\": [2, 2, 2] }, \"shadows\": { \"contrast\": [0.5, 0.5, 0.5] },"
+                + " \"highlightsMin\": 1.5, \"shadowsMax\": 0.4 }, \"tone_mapping\": { \"operator\": \"generic\" } } }");
+        String params = params();
+        assertTrue(params.contains("case 25"), "highlight grading");
+        assertTrue(params.contains("case 30"), "shadow grading");
+        assertTrue(params.contains("case 35"), "grading thresholds");
+        var reflections = lower().pack().texture("reflections");
+        assertNotNull(reflections);
+        assertEquals(0.5f, reflections.scale, 1e-6f);
+        assertTrue(reflections.history, "temporal accumulation");
+    }
+
+    @Test
+    void localLightBuffersCoverTheWholeVolume() throws IOException {
+        pack("{ \"sun\": { \"illuminance\": 20.0 } }");
+        var resources = lower().pack().raw.getAsJsonObject("resources");
+        long clusters = 0, active = 0, histogram = 0;
+        for (var element : resources.getAsJsonArray("buffers")) {
+            var buffer = element.getAsJsonObject();
+            if (buffer.get("binding").getAsInt() == 1) clusters = buffer.get("size").getAsLong();
+            if (buffer.get("binding").getAsInt() == 2) active = buffer.get("size").getAsLong();
+            if (buffer.get("binding").getAsInt() == 3) histogram = buffer.get("size").getAsLong();
+        }
+        assertEquals(16 * 8 * 16 * 8 * Integer.BYTES, clusters);
+        assertEquals(32 * 16 * 32, (active - Integer.BYTES) / Integer.BYTES);
+        assertEquals(256 * Integer.BYTES, histogram);
     }
 }

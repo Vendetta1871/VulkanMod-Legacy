@@ -89,6 +89,11 @@ public final class IncludeExpander {
         return out.toString();
     }
 
+    /** The unexpanded text of one program, for analysis that must ignore the host prelude. */
+    public String readProgram(String rel) throws IOException {
+        return source.read(PackSource.normalize(rel));
+    }
+
     /** Expands includes in {@code text}, the contents of {@code rel}. */
     public String expand(String rel, String text) throws IOException {
         Deque<String> chain = new ArrayDeque<>();
