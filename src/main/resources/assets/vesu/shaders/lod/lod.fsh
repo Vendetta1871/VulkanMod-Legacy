@@ -33,7 +33,11 @@ bool covered(vec3 rel, int face) {
 
 void main() {
     int face = int(vInfo.y & 15u);
-    if (covered(vRel, face)) discard;
+    if (covered(vRel, face)) {
+        // In the edge band vanilla drops a share of its pixels (terrain.fsh): show those.
+        float t = edge.y > edge.x ? smoothstep(edge.x, edge.y, length(vRel.xz)) : 0.0;
+        if (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) >= t) discard;
+    }
     uint model = vInfo.x;
     uint fd = models[model].faceData[face];
 

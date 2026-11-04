@@ -8,6 +8,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 fog;           // x start, y end, z mode (0 off, 1 linear, 2 exp, 3 exp2), w density
     vec4 lodFade;       // x fade start, y fade end (horizontal blocks), z atlas width, w atlas height
     ivec4 cover;        // x, z: chunk of the coverage grid's corner, y: grid size in chunks, w: 1 when valid
+    vec4 edge;          // x, y: horizontal band where vanilla dissolves into the LODs (x >= y: none)
 };
 
 struct Model {

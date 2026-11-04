@@ -105,6 +105,12 @@ public class VRenderSystem {
      * terrain stays clear and the LODs behind it carry the fog. Sky and special fogs keep theirs.
      */
     public static float fogScale = 1.0f, fogScaleFrom;
+    /** Horizontal band where vanilla terrain dissolves into the LODs (start >= end: none). */
+    public static float lodEdgeStart, lodEdgeEnd;
+
+    public static float getLodEdgeStart() { return lodEdgeStart; }
+
+    public static float getLodEdgeEnd() { return lodEdgeEnd; }
 
     private static float scaledFog(float v) {
         if (fogScale == 1.0f || !reverseZ) return v;

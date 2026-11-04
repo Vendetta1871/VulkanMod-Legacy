@@ -9,6 +9,9 @@ layout(binding = 1) uniform UniformBufferObject {
     float FogDensity;
     float AlphaFunc;
     float AlphaRef;
+    // Horizontal band where vanilla terrain dissolves into the LODs; start >= end: off.
+    float LodEdgeStart;
+    float LodEdgeEnd;
 };
 
 layout(binding = 2) uniform sampler2D Sampler0;
@@ -18,10 +21,16 @@ layout(location = 0) in float vertexDistance;
 layout(location = 1) in vec4 vertexColor;
 layout(location = 2) in vec2 texCoord0;
 layout(location = 3) in vec2 lightCoord;
+layout(location = 4) in vec2 horizontal;
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
+    if (LodEdgeEnd > LodEdgeStart) {
+        // Screen-space noise shared with lod.fsh, which keeps exactly the pixels dropped here.
+        float t = smoothstep(LodEdgeStart, LodEdgeEnd, length(horizontal));
+        if (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) < t) discard;
+    }
     vec4 color = vertexColor * ColorModulator * texture(Sampler0, texCoord0);
 
     // GL fixed-function alpha test with the live func/ref: keep the fragment only

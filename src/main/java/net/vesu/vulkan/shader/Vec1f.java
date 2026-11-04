@@ -27,6 +27,8 @@ public class Vec1f extends Field {
             case "GameTime" -> this.floatSet = VRenderSystem::getShaderGameTime;
             case "AlphaFunc" -> this.floatSet = VRenderSystem::getAlphaFunc;
             case "AlphaRef" -> this.floatSet = VRenderSystem::getAlphaRef;
+            case "LodEdgeStart" -> this.floatSet = VRenderSystem::getLodEdgeStart;
+            case "LodEdgeEnd" -> this.floatSet = VRenderSystem::getLodEdgeEnd;
             case "RedOverlay" -> this.floatSet = net.vesu.render.EntityRenderer::getRedOverlay;
         }
     }

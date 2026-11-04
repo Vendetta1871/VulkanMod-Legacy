@@ -54,6 +54,8 @@ final class IngestService implements WorkerPool.Service {
         size.decrementAndGet();
         if (world.closed()) return true;
         c.insertInto(world, mapper, SNAPSHOT.get());
+        // Only now: a column marked done while still queued is lost when the world closes.
+        if (c.doneBy != null) c.doneBy.markDone(c.cx, c.cz);
         return true;
     }
 

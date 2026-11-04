@@ -44,6 +44,7 @@ layout(location = 0) out float vertexDistance;
 layout(location = 1) out vec4 vertexColor;
 layout(location = 2) out vec2 texCoord0;
 layout(location = 3) out vec2 lightCoord;
+layout(location = 4) out vec2 horizontal; // camera-relative world x, z (LOD edge band)
 
 void main() {
     ChunkMatrix cm = chunks[int(ChunkSlot)];
@@ -56,6 +57,7 @@ void main() {
     // through glFogi(GL_FOG_DISTANCE_MODE_NV), mirrored into FogRadial (R16).
     vertexDistance = FogRadial != 0 ? length(viewPos.xyz) : abs(viewPos.z);
 
+    horizontal = (transpose(mat3(cm.modelView)) * viewPos.xyz).xz;
     vertexColor = Color;
     texCoord0 = UV0;
 

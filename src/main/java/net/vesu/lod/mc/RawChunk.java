@@ -21,6 +21,8 @@ public final class RawChunk {
     /** Imported sections: runtime block ids already remapped from the save's (AUDIT 5.8). */
     final short[][] ids = new short[16][];
     int present;
+    /** The generation producer that wants this column marked done once it is stored. */
+    LodGenerator doneBy;
 
     private RawChunk(int cx, int cz, boolean sky, byte[] biomes) {
         this.cx = cx;

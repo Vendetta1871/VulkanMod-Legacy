@@ -90,7 +90,7 @@ final class SaveImporter implements WorkerPool.Service {
         }
     }
 
-    /** Reads one column from its region file on a worker, then marks it done for the generator. */
+    /** Reads one column from its region file on a worker; ingest marks it done for the generator. */
     void readChunkLater(LodGenerator generator, int cx, int cz) {
         this.generator = generator;
         singles.add((long) cx << 32 | (cz & 0xFFFFFFFFL));
@@ -131,11 +131,13 @@ final class SaveImporter implements WorkerPool.Service {
         Long single = singles.poll();
         if (single != null) {
             int cx = (int) (single >> 32), cz = (int) (long) single;
+            boolean ok;
             try {
-                if (readSingle(cx, cz) && generator != null) generator.markDone(cx, cz);
+                ok = readSingle(cx, cz);
             } catch (IOException | RuntimeException e) {
-                // A chunk being written right now: the producer comes back to it.
+                ok = false; // a chunk being written right now
             }
+            if (!ok && generator != null) generator.readFailed(cx, cz);
             return true;
         }
         File f = regions.poll();
@@ -157,7 +159,7 @@ final class SaveImporter implements WorkerPool.Service {
         if (!f.isFile()) return false;
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
             int i = (cz & 31) << 5 | (cx & 31);
-            return readEntry(raf, raf.length(), i);
+            return readEntry(raf, raf.length(), i, generator);
         }
     }
 
@@ -165,12 +167,12 @@ final class SaveImporter implements WorkerPool.Service {
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
             long size = raf.length();
             if (size < 8192) return;
-            for (int i = 0; i < 1024 && !cancelled; i++) readEntry(raf, size, i);
+            for (int i = 0; i < 1024 && !cancelled; i++) readEntry(raf, size, i, null);
         }
     }
 
     /** Reads entry {@code i} of an open region file; true when a populated chunk was ingested. */
-    private boolean readEntry(RandomAccessFile raf, long size, int i) throws IOException {
+    private boolean readEntry(RandomAccessFile raf, long size, int i, LodGenerator doneBy) throws IOException {
         if (size < 8192) return false;
         raf.seek(i * 4L);
         int e = raf.readInt();
@@ -193,10 +195,10 @@ final class SaveImporter implements WorkerPool.Service {
         } catch (IOException | RuntimeException ex) {
             return false;
         }
-        return convert(root.getCompoundTag("Level"));
+        return convert(root.getCompoundTag("Level"), doneBy);
     }
 
-    private boolean convert(NBTTagCompound level) {
+    private boolean convert(NBTTagCompound level, LodGenerator doneBy) {
         if (!level.getBoolean("TerrainPopulated")) return false;
         int cx = level.getInteger("xPos"), cz = level.getInteger("zPos");
         byte[] biomes = level.getByteArray("Biomes");
@@ -220,6 +222,7 @@ final class SaveImporter implements WorkerPool.Service {
             c.setImported(y, ids, meta.length == 2048 ? meta : null, bl.length == 2048 ? bl : null, sl.length == 2048 ? sl : null);
         }
         chunks.incrementAndGet();
+        c.doneBy = doneBy;
         session.ingest(c);
         return true;
     }

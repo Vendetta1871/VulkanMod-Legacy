@@ -20,6 +20,12 @@ import java.util.Map;
  */
 final class LodGenerator {
     static final int TYPE_DONE = 3;
+    /**
+     * Trailing byte of a done bitmap. Version 0 (no byte) marked columns before they were
+     * stored and lost the ones still queued at close; those bitmaps are dropped, so every
+     * column is checked again once (read back from the region file or generated).
+     */
+    private static final byte DONE_VERSION = 1;
     /** Per-tick budget; VESU_LOD_GEN_BUDGET_MS overrides it (tuning, L9). */
     private static final long BUDGET_NS = (long) (Double.parseDouble(
             net.vesu.Env.getOrDefault("VESU_LOD_GEN_BUDGET_MS", "2")) * 1_000_000L);
@@ -27,6 +33,8 @@ final class LodGenerator {
     private final LodSession session;
     private final LodStorage storage;
     private final Map<Integer, byte[]> done = new HashMap<>();
+    /** Columns on disk that the reader could not use (not populated yet, or mid-write), {@code x << 32 | z}. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<Long> unread = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private int ring, ringStep, centerX = Integer.MIN_VALUE, centerZ;
     private int generated, read;
     private long backoffUntil;
@@ -35,7 +43,7 @@ final class LodGenerator {
         this.session = session;
         this.storage = storage;
         storage.forEachMapping((k, v) -> {
-            if (k >>> 30 == TYPE_DONE && v.length == 128) done.put(k & ((1 << 30) - 1), v);
+            if (k >>> 30 == TYPE_DONE && v.length == 129 && v[128] == DONE_VERSION) done.put(k & ((1 << 30) - 1), v);
         });
     }
 
@@ -51,11 +59,23 @@ final class LodGenerator {
 
     synchronized void markDone(int cx, int cz) {
         int k = regionKey(cx >> 5, cz >> 5);
-        byte[] b = done.computeIfAbsent(k, x -> new byte[128]);
+        byte[] b = done.computeIfAbsent(k, x -> {
+            byte[] n = new byte[129];
+            n[128] = DONE_VERSION;
+            return n;
+        });
         int i = (cz & 31) << 5 | (cx & 31);
         if ((b[i >> 3] & 1 << (i & 7)) != 0) return;
         b[i >> 3] |= (byte) (1 << (i & 7));
         storage.putMapping(k | TYPE_DONE << 30, b);
+    }
+
+    /**
+     * The reader found the column on disk but not usable: a neighbour generated for another
+     * column's population is saved unpopulated, and the ring has passed it already.
+     */
+    void readFailed(int cx, int cz) {
+        unread.add((long) cx << 32 | (cz & 0xFFFFFFFFL));
     }
 
     String progress() {
@@ -90,6 +110,16 @@ final class LodGenerator {
         ChunkProviderServer provider = world.getChunkProvider();
         long deadline = now + BUDGET_NS;
         boolean didWork = false;
+        for (Long u; (System.nanoTime() < deadline || !didWork) && (u = unread.poll()) != null; ) {
+            int cx = (int) (u >> 32), cz = (int) (long) u;
+            if (isDone(cx, cz) || Math.max(Math.abs(cx - centerX), Math.abs(cz - centerZ)) > radius) continue;
+            if (session.ingest.full()) {
+                unread.add(u);
+                break;
+            }
+            didWork = true;
+            generate(world, provider, cx, cz);
+        }
         while (ring <= radius && (System.nanoTime() < deadline || !didWork)) {
             int n = ring == 0 ? 1 : ring * 8;
             if (ringStep >= n) {
@@ -108,21 +138,27 @@ final class LodGenerator {
                 continue;
             }
             didWork = true;
-            // Population of (x, z) needs its +x, +z and +x+z neighbours.
-            Chunk ch = provider.provideChunk(cx, cz);
-            provider.provideChunk(cx + 1, cz);
-            provider.provideChunk(cx, cz + 1);
-            provider.provideChunk(cx + 1, cz + 1);
-            if (ch.isTerrainPopulated()) {
-                session.ingest(RawChunk.grab(ch, world.provider.hasSkyLight(), 0xFFFF));
-                markDone(cx, cz);
-                generated++;
-            }
-            unloadIfFar(world, provider, cx, cz);
-            unloadIfFar(world, provider, cx + 1, cz);
-            unloadIfFar(world, provider, cx, cz + 1);
-            unloadIfFar(world, provider, cx + 1, cz + 1);
+            generate(world, provider, cx, cz);
         }
+    }
+
+    /** Generates or loads the column with its population neighbours and snapshots it. */
+    private void generate(WorldServer world, ChunkProviderServer provider, int cx, int cz) {
+        // Population of (x, z) needs its +x, +z and +x+z neighbours.
+        Chunk ch = provider.provideChunk(cx, cz);
+        provider.provideChunk(cx + 1, cz);
+        provider.provideChunk(cx, cz + 1);
+        provider.provideChunk(cx + 1, cz + 1);
+        if (ch.isTerrainPopulated()) {
+            RawChunk r = RawChunk.grab(ch, world.provider.hasSkyLight(), 0xFFFF);
+            r.doneBy = this;
+            session.ingest(r);
+            generated++;
+        }
+        unloadIfFar(world, provider, cx, cz);
+        unloadIfFar(world, provider, cx + 1, cz);
+        unloadIfFar(world, provider, cx, cz + 1);
+        unloadIfFar(world, provider, cx + 1, cz + 1);
     }
 
     private static void unloadIfFar(WorldServer world, ChunkProviderServer provider, int cx, int cz) {

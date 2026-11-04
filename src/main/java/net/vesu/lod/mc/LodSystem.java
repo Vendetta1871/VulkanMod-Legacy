@@ -202,6 +202,16 @@ public final class LodSystem {
         pendingEdits.putIfAbsent(k, due);
     }
 
+    /**
+     * The band where vanilla terrain dissolves into the LODs instead of ending at a chunk
+     * border: it ends a chunk inside the render distance, where every column is still built.
+     */
+    static float[] edgeBand(int renderDistance) {
+        if (renderDistance < 4) return null;
+        float end = (renderDistance - 1) * 16f;
+        return new float[]{end - 16f, end};
+    }
+
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent e) {
         if (e.phase != TickEvent.Phase.END) return;
@@ -211,6 +221,9 @@ public final class LodSystem {
         VRenderSystem.fogScaleFrom = mc.gameSettings.renderDistanceChunks * 16.0f;
         boolean scaleFog = s != null && Initializer.CONFIG.lodRendering && Initializer.CONFIG.lodFog.startsWith("fog");
         VRenderSystem.fogScale = scaleFog ? (float) (distanceBlocks() / VRenderSystem.fogScaleFrom) : 1.0f;
+        float[] band = s != null && Initializer.CONFIG.lodRendering ? edgeBand(mc.gameSettings.renderDistanceChunks) : null;
+        VRenderSystem.lodEdgeStart = band == null ? 0 : band[0];
+        VRenderSystem.lodEdgeEnd = band == null ? 0 : band[1];
         if (s != null && atlasDirty) {
             atlasDirty = false;
             downloadAtlas();

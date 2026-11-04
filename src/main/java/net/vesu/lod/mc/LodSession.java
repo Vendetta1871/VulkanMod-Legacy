@@ -1,7 +1,6 @@
 package net.vesu.lod.mc;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.ViewFrustum;
 import net.minecraft.client.renderer.chunk.CompiledChunk;
 import net.minecraft.client.renderer.chunk.RenderChunk;
 import net.minecraft.util.math.BlockPos;
@@ -443,7 +442,7 @@ public final class LodSession {
         if (!n.ready()) return;
         // Under a pack vanilla terrain draws over the LODs, and packs fade it out near its edge
         // for DH to fill: what vanilla has built stays.
-        if (lvl <= 1 && !packMode && coveredBox(x0, y0, z0, size)) return;
+        if (lvl <= 1 && !packMode && coveredBox(x0, y0, z0, size) && insideEdge(x0, z0, size)) return;
         if (lvl > 0 && n.childMask != 0) {
             double dx = Math.max(x0 - camX, Math.max(0, camX - (x0 + size)));
             double dy = Math.max(y0 - camY, Math.max(0, camY - (y0 + size)));
@@ -530,10 +529,14 @@ public final class LodSession {
         coverZ = ((int) Math.floor(camZ) >> 4) - half;
         int words = (coverN * coverN * 16 + 31) / 32;
         java.util.Arrays.fill(cover, 0, words, 0);
-        ViewFrustum vf = mc.renderGlobal == null ? null
-                : ((net.vesu.mixin.render.RenderGlobalAccessor) mc.renderGlobal).vesu$getViewFrustum();
-        if (vf == null || vf.renderChunks == null) return;
-        for (RenderChunk rc : vf.renderChunks) {
+        // What vanilla draws this frame, not what it has built: its visibility flood does not
+        // pass through sections still waiting for a build, so a built section behind them is
+        // left undrawn and must not hide the LOD there.
+        java.util.List<?> infos = mc.renderGlobal == null ? null
+                : ((net.vesu.mixin.render.RenderGlobalAccessor) mc.renderGlobal).vesu$getRenderInfos();
+        if (infos == null) return;
+        for (int i = 0, n = infos.size(); i < n; i++) {
+            RenderChunk rc = ((net.vesu.mixin.render.ContainerInfoAccessor) infos.get(i)).vesu$getRenderChunk();
             if (rc == null || rc.getCompiledChunk() == CompiledChunk.DUMMY) continue;
             BlockPos p = rc.getPosition();
             int gx = (p.getX() >> 4) - coverX, gz = (p.getZ() >> 4) - coverZ, gy = p.getY() >> 4;
@@ -561,6 +564,15 @@ public final class LodSession {
         return true;
     }
 
+    /** The box lies inside the vanilla edge band, where vanilla hides the LODs completely. */
+    private boolean insideEdge(double x0, double z0, double size) {
+        float start = net.vesu.vulkan.VRenderSystem.lodEdgeStart, end = net.vesu.vulkan.VRenderSystem.lodEdgeEnd;
+        if (end <= start) return true;
+        double dx = Math.max(Math.abs(x0 - camX), Math.abs(x0 + size - camX));
+        double dz = Math.max(Math.abs(z0 - camZ), Math.abs(z0 + size - camZ));
+        return dx * dx + dz * dz < (double) start * start;
+    }
+
     private void writeUniforms(Minecraft mc) {
         ByteBuffer b = ubo.clear();
         viewProj.get(0, b);
@@ -578,7 +590,9 @@ public final class LodSession {
         b.putFloat(128, fade ? (float) (lodBlocks * 0.9) : 0).putFloat(132, fade ? (float) lodBlocks : 0)
                 .putFloat(136, renderer.atlasWidth()).putFloat(140, renderer.atlasHeight());
         b.putInt(144, coverX).putInt(148, coverN).putInt(152, coverZ).putInt(156, 1);
-        b.limit(160);
+        b.putFloat(160, net.vesu.vulkan.VRenderSystem.lodEdgeStart).putFloat(164, net.vesu.vulkan.VRenderSystem.lodEdgeEnd)
+                .putFloat(168, 0).putFloat(172, 0);
+        b.limit(176);
         renderer.setFrame(b, cover, (coverN * coverN * 16 + 31) / 32);
     }
 
