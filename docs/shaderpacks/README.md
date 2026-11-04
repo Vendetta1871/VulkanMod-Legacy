@@ -271,12 +271,17 @@ follow the camera's biome, and bloom follows the game's pyramid.
 
 **Bedrock fidelity/performance pass (2026-11-04):** the built-in pack is now the vanilla preset
 (biomes, settings and MERS texture sets). Default shadows are blocky; sky uses sun/moon Mie and
-glare shape; water uses opacity, absorption, analytic Bedrock waves and a direct GGX glint;
+glare shape; water uses opacity, absorption, the preset's analytic waves and a direct GGX glint;
 MERS subsurface participates in directional and point diffuse; medium fog, temperature grading and
 highlight/midtone/shadow grading ranges are honored. The light clusterer reads a compact
 active-light list, exposure uses a parallel 256-bin histogram, and opaque SSR runs at half
-resolution with motion-vector history before its fullscreen apply. New visual parity/performance
-figures still need a fresh reference run.
+resolution with motion-vector history before its fullscreen apply. While a pack with its own
+shadow map runs, entities cast only the pack's shadow - the round vanilla blob is skipped (a
+scene-target pack without one still gets the blob, blended in after DEFERRED instead of the
+G-buffer, where the lighting pass re-shaded it into a black disc).
+`VESU_AUTOTEST_VV=1` captures the parity scene (platform pool at morning/sunset, entity shadow)
+for side-by-side checks against the Bedrock reference. New visual parity/performance figures
+still need a fresh reference run.
 
 **M7 (2026-10-31): `SETUP`, `BEGIN` and `PREPARE` run** before the scene, compute included
 (`testpacks/stages-compute`). The OptiFine frontend maps them too, for packs that ship them for Iris.
