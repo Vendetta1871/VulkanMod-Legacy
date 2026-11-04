@@ -393,7 +393,12 @@ final class BedrockPrograms {
                 return vec3(fresnel * distribution * visibility) * light * nl * vv_waterShadow(world, n);
             }
             void main() {
+            #ifdef VKM_LOD_DISCARD
+                // Distant water has no atlas coordinates; its face carries the color.
+                vec4 c = color;
+            #else
                 vec4 c = texture(gtexture, uv) * color;
+            #endif
                 vec3 v = normalize(-worldPos), n = normalize(normalWorld);
                 float light = lm.y * lm.y * lm.y, fog = vv_fog(length(worldPos));
                 vec3 pointDiffuse = vec3(0.0), pointSpecular = vec3(0.0);
@@ -538,6 +543,13 @@ final class BedrockPrograms {
                 layout(location = 2) in vec2 lm;
                 layout(location = 3) in mat3 tbn;
                 void main() {
+                #ifdef VKM_LOD_DISCARD
+                    // Distant terrain: one color per face, no atlas coordinates, the default block material.
+                    vec4 m = VV_PBR_BLOCK;
+                    albedo = vec4(color.rgb, 1.0 - m.a * 0.498039);
+                    gnormal = vec4(normalize(tbn[2]), lm.y);
+                    material = vec4(m.r, m.g, m.b, lm.x);
+                #else
                     vec4 c = texture(gtexture, uv);
                 #ifdef VKM_ALPHA_TEST
                     vkm_alphaTest(c.a);
@@ -548,6 +560,7 @@ final class BedrockPrograms {
                     vec4 m = texture(specular, uv);
                     if (m == vec4(0.0)) m = VV_PBR_BLOCK;
                     material = vec4(m.r, m.g, m.b, lm.x);
+                #endif
                 }
                 """);
         out.put(dir + "shadow.vsh", settings + """
