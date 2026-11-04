@@ -64,6 +64,7 @@ format-agnostic, and each frontend is a translator that can be tested offline.
 | [host-interface.md](host-interface.md) | GLSL contract between pack programs and the host: conventions, uniform blocks, samplers, per-draw data |
 | [runtime.md](runtime.md) | How the renderer executes a pack: frame graph inside `FrameTargets`, program routing per draw category, resources, shadow pass, compilation, performance rules |
 | [frontends.md](frontends.md) | `pack-compiler` module, the OptiFine translator, the `post_effect` and Bedrock frontends |
+| [bedrock-vv-water.md](bedrock-vv-water.md) | Reverse-engineered design of Bedrock's own VV water (flat surface, wave normals, extinction, caustics) and what it implies for our preset |
 
 ## Decisions
 
@@ -264,14 +265,24 @@ uninitialized GLSL locals were undefined in SPIR-V, the sun quad ignored `sunPat
 Compilation runs on a thread of its own (D10): the frame keeps its look until the pack is in the SPIR-V
 disk cache, then the switch takes about 2 s for pipelines. Autotests compile in place.
 
-> Not in this build: the Bedrock frontend is held back until its bugs are fixed. A Bedrock pack is listed as not supported. The text below describes the work in progress.
-
 **M6 (2026-11-01): Bedrock packs render close to Vibrant Visuals** (frontends.md, "Bedrock frontend"):
-a deferred PBR pipeline with the game's sky, exposure and tone mapping model, parameterized by the
-pack's settings JSON, texture sets in the neutral layout and the pack's color textures. Compared
+a deferred PBR pipeline parameterized by the pack's settings JSON and texture sets. Compared
 with Bedrock 26.52 on the same scene (11 views): about 24/255 mean, sky within about 7/255. Settings
 follow the camera's biome, and bloom follows the game's pyramid.
-Open: cubemaps, volumetric fog, caustics, reflections, entity texture sets.
+
+**Bedrock fidelity/performance pass (2026-11-04):** the built-in pack is now the vanilla preset
+(biomes, settings and MERS texture sets). Default shadows are blocky; sky uses sun/moon Mie and
+glare shape; water uses opacity, absorption, the preset's analytic waves and a direct GGX glint;
+MERS subsurface participates in directional and point diffuse; medium fog, temperature grading and
+highlight/midtone/shadow grading ranges are honored. The light clusterer reads a compact
+active-light list, exposure uses a parallel 256-bin histogram, and opaque SSR runs at half
+resolution with motion-vector history before its fullscreen apply. While a pack with its own
+shadow map runs, entities cast only the pack's shadow - the round vanilla blob is skipped (a
+scene-target pack without one still gets the blob, blended in after DEFERRED instead of the
+G-buffer, where the lighting pass re-shaded it into a black disc).
+`VESU_AUTOTEST_VV=1` captures the parity scene (platform pool at morning/sunset, entity shadow)
+for side-by-side checks against the Bedrock reference. New visual parity/performance figures
+still need a fresh reference run.
 
 **M7 (2026-10-31): `SETUP`, `BEGIN` and `PREPARE` run** before the scene, compute included
 (`testpacks/stages-compute`). The OptiFine frontend maps them too, for packs that ship them for Iris.

@@ -182,6 +182,7 @@ read-while-write pass left that result in the other image.
 | `hdr` | The scene color is RGBA16F. |
 | `handDepth` | The hand's share of the depth range, 0.125 by default. |
 | `sceneTarget` | A texture that replaces the scene color as attachment 0 during geometry, so vanilla shaders draw into it (OptiFine's `colortex0`). The combination still writes the host scene color. |
+| `fullScreenOverwrite` | Every fullscreen pass of this pack writes every output pixel. The runtime may then use `DONT_CARE` instead of preserving old attachment contents. |
 | `rt` | The pack keeps running with RT on, after the RT composite. Post passes only; it samples `sceneColor` through `vkm_hostUV`. |
 
 ### Shadow

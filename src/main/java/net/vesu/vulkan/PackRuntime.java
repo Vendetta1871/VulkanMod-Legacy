@@ -339,9 +339,10 @@ public final class PackRuntime {
         final int pushStages;
         final ComputePipeline compute;
         final long[] sets;
+        final boolean usesResources;
 
         StepGpu(FramePlan.Step step, long setLayout, long pipelineLayout, long pipeline, int pushStages,
-                ComputePipeline compute, long[] sets) {
+                ComputePipeline compute, long[] sets, boolean usesResources) {
             this.step = step;
             this.setLayout = setLayout;
             this.pipelineLayout = pipelineLayout;
@@ -349,6 +350,7 @@ public final class PackRuntime {
             this.pushStages = pushStages;
             this.compute = compute;
             this.sets = sets;
+            this.usesResources = usesResources;
         }
     }
 
@@ -981,6 +983,11 @@ public final class PackRuntime {
 
     /** The program of the draw {@code pipeline} is about to do, or null for its vanilla shader. */
     Pipeline.Program program(Pipeline pipeline) {
+        // Entity drop shadows keep their own shader. Routed into a pack's G-buffer they
+        // would be re-shaded by the pack's lighting pass into a solid black disc; the blob
+        // draws are instead buffered by EntityRenderer and blended into the relit scene
+        // right after the DEFERRED passes (see flushEntityBlobs).
+        if (pipeline.recordId().equals("entity_shadow")) return null;
         Pipeline.Program[] table = pipeline.packPrograms;
         if (table == null) return null;
         GeometryCategory category = switch (pipeline.routeKind()) {
@@ -1277,6 +1284,17 @@ public final class PackRuntime {
         return centerDepthSmooth;
     }
 
+    /** Raw program text mentions a shared resource only when the pass itself uses it. */
+    private boolean usesResources(String program) {
+        if (resources == null) return false;
+        if (java.util.regex.Pattern.compile("(?s).*\\bset\\s*=\\s*2\\b.*").matcher(program).matches()) return true;
+        Resources definitions = Resources.of(pack.raw);
+        for (Resources.Image image : definitions.images) {
+            if (program.contains(image.name()) || image.sampler() != null && program.contains(image.sampler())) return true;
+        }
+        return false;
+    }
+
     private StepGpu buildStep(FramePlan.Step step, IncludeExpander expander, int frames) throws IOException {
         VkDevice device = Vulkan.getDevice();
         IrPack.Pass pass = step.pass();
@@ -1285,6 +1303,7 @@ public final class PackRuntime {
         int stageBit = compute ? VK_SHADER_STAGE_COMPUTE_BIT : !middle.isEmpty() ? VK_SHADER_STAGE_ALL_GRAPHICS : pass.vertex != null
                 ? VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
         String program = compute ? pass.compute : pass.fragment;
+        boolean stepUsesResources = usesResources(expander.readProgram(program));
         String source = expander.expandProgram(program, Prelude.forStep(pack, step));
         String name = pack.id + "/" + program;
         ShaderSPIRVUtils.SPIRV spv = ShaderSPIRVUtils.compilePackShader(name, source,
@@ -1324,7 +1343,7 @@ public final class PackRuntime {
         try {
             if (compute) {
                 ComputePipeline cp = new ComputePipeline(spv, stepSetLayouts(setLayout), Prelude.PASS_BLOCK_SIZE);
-                return new StepGpu(step, setLayout, cp.layout(), cp.handle(), stageBit, cp, sets);
+                return new StepGpu(step, setLayout, cp.layout(), cp.handle(), stageBit, cp, sets, stepUsesResources);
             }
             long layout = createPipelineLayout(setLayout, stageBit);
             int[] formats;
@@ -1360,7 +1379,7 @@ public final class PackRuntime {
                 if (vertexModule != hostVertexModule) vkDestroyShaderModule(device, vertexModule, null);
                 modules.values().forEach(m -> vkDestroyShaderModule(device, m, null));
             }
-            return new StepGpu(step, setLayout, layout, pipeline, stageBit, null, sets);
+            return new StepGpu(step, setLayout, layout, pipeline, stageBit, null, sets, stepUsesResources);
         } finally {
             spv.free();
         }
@@ -1428,7 +1447,7 @@ public final class PackRuntime {
         IrPack.Pass pass = step.pass();
         boolean compute = pass.isCompute();
         long readStage = compute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-        if (resources != null) resources.barrier(cmd, stack);
+        if (resources != null && g.usesResources) resources.barrier(cmd, stack);
         boolean stores = !compute && !step.storage().isEmpty();
 
         // Clears of images this pass touches first by sampling or a storage write.
@@ -1447,13 +1466,17 @@ public final class PackRuntime {
                 barriers.use(image(in.image()), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, readStage, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, false);
             }
         }
+        // Bedrock VV declares that every fullscreen pass writes every pixel; preserving old
+        // attachments only adds bandwidth. Other packs keep the conservative load behavior.
+        boolean discardOld = !stores && pack.renderer.has("fullScreenOverwrite")
+                && pack.renderer.get("fullScreenOverwrite").getAsBoolean();
         boolean[] clearOnLoad = new boolean[step.outputs().size()];
         for (int i = 0; i < step.outputs().size(); i++) {
             Image img = image(step.outputs().get(i));
             if (compute) {
                 barriers.use(img, VK_IMAGE_LAYOUT_GENERAL, readStage, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, false);
             } else if (!(stores && step.storage().contains(step.outputs().get(i)))) {
-                clearOnLoad[i] = img.pendingClear;
+                clearOnLoad[i] = img.pendingClear && !discardOld;
                 barriers.use(img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                         ATTACHMENT_ACCESS, img.pendingClear);
                 img.pendingClear = false;
@@ -1487,7 +1510,7 @@ public final class PackRuntime {
                 VkRenderingAttachmentInfo a = color.get(i).sType$Default()
                         .imageView(image(ref).level0View)
                         .imageLayout(stores && step.storage().contains(ref) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        .loadOp(clearOnLoad[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD)
+                        .loadOp(clearOnLoad[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : discardOld ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD)
                         .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
                 if (clearOnLoad[i]) setClear(a.clearValue().color(), ref.texture());
             }
@@ -1949,6 +1972,8 @@ public final class PackRuntime {
             info.get(0).imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             if (in.isHost() && in.host().startsWith("shadow")) {
                 shadow.bind(info.get(0), in.host());
+            } else if (in.isHost() && in.host().equals("gnormalCopy")) {
+                info.get(0).sampler(nearestSampler).imageView(images[pack.textures.indexOf(pack.texture("gnormal"))][FramePlan.SNAPSHOT].level0View);
             } else if (in.isHost() && (in.host().equals("normals") || in.host().equals("specular") || in.host().startsWith("actor"))) {
                 net.vesu.vulkan.texture.VulkanImage atlas = switch (in.host()) {
                     case "normals" -> net.vesu.shader.PbrAtlases.normals();

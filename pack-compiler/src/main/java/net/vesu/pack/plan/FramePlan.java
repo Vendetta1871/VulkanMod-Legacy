@@ -46,7 +46,7 @@ public final class FramePlan {
     private static final Set<String> SHADOW_INPUTS = Set.of("shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw",
             "shadowcolor0", "shadowcolor1", "shadowcolor2", "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7");
     private static final Set<String> GEOMETRY_HOST_INPUTS = Set.of("depthtex1", "depthtex2", "normals", "specular", "actorNormals", "actorSpecular",
-            "dhDepthTex0", "dhDepthTex1");
+            "gnormalCopy", "dhDepthTex0", "dhDepthTex1");
     /** Before and after {@code DEFERRED} in {@link #geometryImages} and {@link #geometryInputs}. */
     public static final int OPAQUE = 0, TRANSLUCENT = 1;
 
@@ -344,6 +344,15 @@ public final class FramePlan {
             if (SHADOW_INPUTS.contains(name) && pack.shadow == null) {
                 throw new IllegalArgumentException(name + " needs a \"shadow\" section");
             }
+            if (name.equals("gnormalCopy") && !geometryTargets.contains("gnormal")) {
+                throw new IllegalArgumentException("gnormalCopy needs a geometry target named gnormal");
+            }
+        }
+        if (hostInputs.contains("gnormalCopy")) {
+            // The translucent programs sample the opaque normals through a copy taken after
+            // DEFERRED (resumeGeometry); the texture needs its SNAPSHOT image allocated.
+            int gnormal = indexOf(pack, "gnormal");
+            if (!snapshots.contains(gnormal)) snapshots.add(gnormal);
         }
         IrPack.Gbuffer shadowProgram = pack.gbuffers.get("shadow");
         if (pack.shadow != null && shadowProgram == null) {
@@ -379,7 +388,7 @@ public final class FramePlan {
     }
 
     /** Host textures a {@code DEFERRED} pass can sample: what exists before the translucent layer. */
-    private static final Set<String> DEFERRED_READS = Set.of("sceneColor", "sceneDepth", "depthtex0", "depthtex1", "depthtex2",
+    private static final Set<String> DEFERRED_READS = Set.of("sceneColor", "sceneDepth", "motion", "depthtex0", "depthtex1", "depthtex2",
             "dhDepthTex0", "dhDepthTex1",
             "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2", "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7", "normals", "specular");
 

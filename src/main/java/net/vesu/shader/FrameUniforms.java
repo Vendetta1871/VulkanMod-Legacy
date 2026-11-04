@@ -79,6 +79,7 @@ public final class FrameUniforms {
             HELD_ITEM = L.offset("heldItemId"), HELD_LIGHT = L.offset("heldBlockLightValue"),
             HELD_ITEM2 = L.offset("heldItemId2"), HELD_LIGHT2 = L.offset("heldBlockLightValue2"),
             HIDE_GUI = L.offset("hideGUI"), DIMENSION = L.offset("vkm_dimension"), BIOME = L.offset("vkm_biome"),
+            LAVA_RESISTANCE = L.offset("vkm_lavaResistance"),
             JITTER = L.offset("vkm_jitter"), DISPLAY_SIZE = L.offset("vkm_displaySize"),
             RENDER_SCALE = L.offset("vkm_renderScale"), RT_ENABLED = L.offset("vkm_rtEnabled"),
             ATLAS_SIZE = L.offset("atlasSize"), TERRAIN_SIZE = L.offset("terrainTextureSize"), ICON_SIZE = L.offset("terrainIconSize"),
@@ -351,8 +352,11 @@ public final class FrameUniforms {
         b.putFloat(WETNESS, wetness);
 
         // --- Player.
-        int inWater = viewer.isInsideOfMaterial(Material.WATER) ? 1 : viewer.isInsideOfMaterial(Material.LAVA) ? 2 : 0;
+        boolean inLava = viewer.isInsideOfMaterial(Material.LAVA);
+        boolean lavaResistance = inLava && viewer instanceof EntityLivingBase living && living.isPotionActive(MobEffects.FIRE_RESISTANCE);
+        int inWater = viewer.isInsideOfMaterial(Material.WATER) ? 1 : inLava ? 2 : 0;
         b.putInt(EYE_IN_WATER, inWater);
+        b.putInt(LAVA_RESISTANCE, lavaResistance ? 1 : 0);
         b.putFloat(NIGHT_VISION, effectStrength(viewer, MobEffects.NIGHT_VISION, pt, true));
         b.putFloat(BLINDNESS, effectStrength(viewer, MobEffects.BLINDNESS, pt, false));
         b.putFloat(SCREEN_BRIGHTNESS, mc.gameSettings.gammaSetting);

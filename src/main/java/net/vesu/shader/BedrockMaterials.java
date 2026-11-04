@@ -142,21 +142,30 @@ public final class BedrockMaterials {
         }
     }
 
+    private static int rgba(com.google.gson.JsonArray a) {
+        int r = a.get(0).getAsInt(), g = a.get(1).getAsInt(), b = a.get(2).getAsInt();
+        int alpha = a.size() > 3 ? a.get(3).getAsInt() : 255;
+        return alpha << 24 | r << 16 | g << 8 | b;
+    }
+
     private static boolean decode(PackSource src, String dir, String sprite, JsonObject set) throws IOException {
-        JsonElement mer = set.has("metalness_emissive_roughness_subsurface") ? set.get("metalness_emissive_roughness_subsurface")
+        boolean subsurfaceFormat = set.has("metalness_emissive_roughness_subsurface");
+        JsonElement mer = subsurfaceFormat ? set.get("metalness_emissive_roughness_subsurface")
                 : set.get("metalness_emissive_roughness");
         boolean any = false;
         if (mer != null) {
             int[] uniform = mer.isJsonPrimitive() && mer.getAsString().startsWith("#") ? new int[]{Integer.parseUnsignedInt(mer.getAsString().substring(1), 16)}
-                    : mer.isJsonArray() ? new int[]{mer.getAsJsonArray().get(0).getAsInt() << 16 | mer.getAsJsonArray().get(1).getAsInt() << 8
-                    | mer.getAsJsonArray().get(2).getAsInt()} : null;
+                    : mer.isJsonArray() ? new int[]{rgba(mer.getAsJsonArray())} : null;
             Image image = uniform != null ? new Image(1, 1, uniform) : load(src, dir, mer.getAsString());
             if (image != null) {
                 // MER(S): R metalness, G emissive, B roughness, A subsurface. To R roughness, G metalness, B emissive, A subsurface.
                 ByteBuffer out = MemoryUtil.memAlloc(image.w * image.h * 4);
                 for (int i = 0; i < image.argb.length; i++) {
                     int p = image.argb[i];
-                    out.put((byte) p).put((byte) (p >> 16)).put((byte) (p >> 8)).put((byte) (p >>> 24));
+                    int metal = p >> 16 & 255, subsurface = subsurfaceFormat ? p >>> 24 : 0;
+                    if (subsurface >= metal) metal = 0;
+                    else subsurface = 0;
+                    out.put((byte) p).put((byte) metal).put((byte) (p >> 8)).put((byte) subsurface);
                 }
                 out.flip();
                 freeList.add(out);

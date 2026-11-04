@@ -33,6 +33,7 @@ public final class IrPack {
     public static final Set<String> HOST_TEXTURES = Set.of(
             "sceneColor", "sceneDepth", "motion",
             "gtexture", "texture", "tex", "lightmap", "normals", "specular", "actorNormals", "actorSpecular",
+            "gnormalCopy",
             "depthtex0", "depthtex1", "depthtex2",
             "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2",
             "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7", "noisetex",

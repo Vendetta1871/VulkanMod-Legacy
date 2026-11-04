@@ -42,10 +42,13 @@ public final class BedrockFrontend {
 
     private JsonObject json(String path, String root) throws IOException {
         if (!src.exists(path)) return null;
-        // Bedrock JSON allows comments.
-        String text = src.read(path).replaceAll("(?m)^\\s*//.*$", "");
-        JsonObject o = JsonParser.parseString(text).getAsJsonObject();
+        JsonObject o = JsonParser.parseString(jsonText(src.read(path))).getAsJsonObject();
         return o.has(root) ? o.getAsJsonObject(root) : null;
+    }
+
+    /** Bedrock JSON permits whole-line and block comments. */
+    private static String jsonText(String text) {
+        return text.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)^\\s*//.*$", "");
     }
 
     /** The names of the client biomes by numeric id; Bedrock kept the ids and names of 1.12. */
@@ -164,8 +167,14 @@ public final class BedrockFrontend {
         ir.addProperty("name", name(id));
         JsonObject gbuffers = ir.getAsJsonObject("gbuffers");
         if (causticPath != null) {
-            ir.getAsJsonArray("textures").add(fileTexture("causticsMap", causticPath, true));
+            ir.getAsJsonArray("textures").add(fileTexture("causticsMap", causticPath, true, "nearest"));
+            // From above the water surface pass draws the caustics of the floor behind it; from below
+            // the lighting pass modulates the submerged floor's sun light, as the original's two passes.
             gbuffers.getAsJsonObject("water").getAsJsonArray("inputs").add("causticsMap");
+            for (JsonElement causticList : ir.getAsJsonArray("commandLists"))
+                for (JsonElement p : causticList.getAsJsonObject().getAsJsonArray("passes"))
+                    if ("lighting".equals(p.getAsJsonObject().get("name").getAsString()))
+                        p.getAsJsonObject().getAsJsonArray("inputs").add("causticsMap");
         }
         if (cubemap) {
             for (int i = 0; i < 6; i++) {
@@ -224,6 +233,8 @@ public final class BedrockFrontend {
         int a = emit(p.atmosphere, curves, (x, c) -> {
             c.append(curve("vv_rayleigh" + x, p.atmosphere, "rayleigh_strength", 5.0));
             c.append(curve("vv_sunMie" + x, p.atmosphere, "sun_mie_strength", 0.5));
+            c.append(curve("vv_moonMie" + x, p.atmosphere, "moon_mie_strength", 0.5));
+            c.append(curve("vv_sunGlareShape" + x, p.atmosphere, "sun_glare_shape", 4.0));
             c.append(colorCurve("vv_skyZenith" + x, p.atmosphere, "sky_zenith_color", new double[]{0.24, 0.45, 0.85}));
             c.append(colorCurve("vv_skyHorizon" + x, p.atmosphere, "sky_horizon_color", new double[]{0.72, 0.82, 0.95}));
             JsonObject stops = p.atmosphere == null ? null : path(p.atmosphere, "horizon_blend_stops");
@@ -233,7 +244,18 @@ public final class BedrockFrontend {
             c.append(curve("vv_horizonMax" + x, stops, "max", 0.25));
         });
         JsonObject distance = p.fog == null ? null : path(p.fog, "distance");
-        JsonObject midtones = p.grading == null ? null : path(p.grading, "color_grading", "midtones");
+        JsonObject colorGrading = p.grading == null ? null : path(p.grading, "color_grading");
+        JsonObject midtones = path(colorGrading, "midtones");
+        JsonObject highlights = path(colorGrading, "highlights");
+        JsonObject shadows = path(colorGrading, "shadows");
+        JsonObject temperature = path(colorGrading, "temperature");
+        JsonObject waterFog = distance == null ? null : path(distance, "water");
+        JsonObject lavaFog = distance == null ? null : path(distance, "lava");
+        JsonObject lavaResistance = distance == null ? null : path(distance, "lava_resistance");
+        double kelvin = number(temperature, "temperature", 6500.0);
+        double temperatureEnabled = temperature != null && temperature.has("enabled") && temperature.get("enabled").getAsBoolean() ? 1.0 : 0.0;
+        double temperatureType = temperature != null && temperature.has("type")
+                && !temperature.get("type").getAsString().equals("color_temperature") ? 1.0 : 0.0;
         String L = "_" + l + "()", A = "_" + a + "()";
         return "vec4 vv_profile" + index + "(int i) {\n    switch (i) {\n"
                 + "        case 0: return vec4(vv_sunColor" + L + ", vv_sunIlluminance" + L + ");\n"
@@ -242,8 +264,8 @@ public final class BedrockFrontend {
                 + "        case 3: return vec4(vv_skyZenith" + A + ", vv_rayleigh" + A + ");\n"
                 + "        case 4: return vec4(vv_skyHorizon" + A + ", vv_sunMie" + A + ");\n"
                 + "        case 5: return vec4(vv_horizonMin" + A + ", vv_horizonStart" + A + ", vv_horizonMie" + A + ", vv_horizonMax" + A + ");\n"
-                + "        case 6: return vec4(" + fogRange(distance == null ? null : path(distance, "air"), 0.92, 1.0) + ", "
-                + fogRange(distance == null ? null : path(distance, "weather"), 0.23, 0.7) + ");\n"
+                + "        case 6: return vec4(" + fogRange(distance == null ? null : path(distance, "air"), 0.92, 1.0, false) + ", "
+                + fogRange(distance == null ? null : path(distance, "weather"), 0.23, 0.7, false) + ");\n"
                 + "        case 7: return vec4(" + literal("vec3", color(p.waterColor)) + ", " + p.waterAlpha + ");\n"
                 + "        case 8: return vec4(" + vector(midtones, "contrast", 1.0) + ", 1.0);\n"
                 + "        case 9: return vec4(" + vector(midtones, "gain", 1.0) + ", 1.0);\n"
@@ -252,7 +274,17 @@ public final class BedrockFrontend {
                 + "        case 12: return vec4(" + vector(midtones, "gamma", 2.2) + ", 1.0);\n"
                 + "        case 13: return " + waterRow(p.water) + ";\n"
                 + "        case 14: return vec4(vv_skyIntensity" + L + ", " + number(inherited(p.lighting, "emissive"), "desaturation", 0.0) + ", 0.0, 0.0);\n"
-                + volumeRows(p.fog) + "        case 19: return " + cubemapRow + ";\n    }\n    return vec4(0.0);\n}\n";
+                + volumeRows(p.fog) + "        case 19: return " + cubemapRow + ";\n"
+                + "        case 20: return vec4(vv_moonMie" + A + ", vv_sunGlareShape" + A + ", " + temperatureEnabled + ", " + kelvin + ");\n"
+                + "        case 21: return vec4(" + temperatureType + ", " + fogRange(waterFog, 0.0, 60.0, true) + ", "
+                + fogRange(lavaFog, 0.0, 0.64, true).split(", ")[0] + ");\n"
+                + "        case 22: return vec4(" + fogRange(lavaFog, 0.0, 0.64, true).split(", ")[1] + ", "
+                + fogRange(lavaResistance, 2.0, 4.0, true) + ", 0.0);\n"
+                + "        case 23: return vec4(" + literal("vec3", fogColor(waterFog, "#44AFF5")) + ", 0.0);\n"
+                + "        case 24: return vec4(" + literal("vec3", fogColor(lavaFog, "#991A00")) + ", 0.0);\n"
+                + gradingRows(highlights, 25) + gradingRows(shadows, 30)
+                + "        case 35: return vec4(" + number(colorGrading, "highlightsMin", 2.0) + ", "
+                + number(colorGrading, "shadowsMax", 0.5) + ", 0.0, 0.0);\n    }\n    return vec4(0.0);\n}\n";
     }
 
     private static final String CUBEMAP_DIR = "textures/environment/overworld_cubemap/";
@@ -299,11 +331,16 @@ public final class BedrockFrontend {
     }
 
     private JsonObject fileTexture(String name, String path, boolean repeat) throws IOException {
+        return fileTexture(name, path, repeat, "linear");
+    }
+
+    private JsonObject fileTexture(String name, String path, boolean repeat, String filter) throws IOException {
         int[] size = pngSize(path);
         JsonObject t = new JsonObject();
         t.addProperty("name", name);
         t.addProperty("format", "RGBA8");
         t.addProperty("file", path);
+        t.addProperty("filter", filter);
         JsonArray s = new JsonArray();
         s.add(size[0]);
         s.add(size[1]);
@@ -405,6 +442,18 @@ public final class BedrockFrontend {
         return o != null && o.has(key) && o.get(key).isJsonPrimitive() ? o.get(key).getAsDouble() : fallback;
     }
 
+    /** Five rows of one grading range; a missing range is neutral and blends to the midtones. */
+    private static String gradingRows(JsonObject group, int first) {
+        StringBuilder rows = new StringBuilder();
+        String[] keys = {"contrast", "gain", "offset", "saturation", "gamma"};
+        double[] fallback = {1.0, 1.0, 0.0, 1.0, 2.2};
+        for (int i = 0; i < keys.length; i++) {
+            rows.append("        case ").append(first + i).append(": return vec4(")
+                    .append(vector(group, keys[i], fallback[i])).append(", 1.0);\n");
+        }
+        return rows.toString();
+    }
+
     private static String waterRow(JsonObject water) {
         JsonObject c = water == null ? null : path(water, "particle_concentrations");
         return "vec4(" + number(c, "chlorophyll", 0.0) + ", " + number(c, "suspended_sediment", 0.0) + ", " + number(c, "cdom", 0.0) + ", "
@@ -438,7 +487,7 @@ public final class BedrockFrontend {
     private String materialDefines() throws IOException {
         JsonObject o = null;
         if (src.exists("pbr/global.json")) {
-            o = JsonParser.parseString(src.read("pbr/global.json").replaceAll("(?m)^\\s*//.*$", "")).getAsJsonObject()
+            o = JsonParser.parseString(jsonText(src.read("pbr/global.json"))).getAsJsonObject()
                     .getAsJsonObject("minecraft:pbr_fallback_settings");
         }
         return "#define VV_PBR_BLOCK " + fallback(o, "blocks") + "\n#define VV_PBR_ACTOR " + fallback(o, "actors") + "\n";
@@ -458,10 +507,13 @@ public final class BedrockFrontend {
     }
 
     private String shadowDefines() throws IOException {
-        if (!src.exists("shadows/global.json")) return "";
-        JsonObject o = JsonParser.parseString(src.read("shadows/global.json").replaceAll("(?m)^\\s*//.*$", "")).getAsJsonObject()
-                .getAsJsonObject("minecraft:shadow_settings");
-        if (o == null || !o.has("shadow_style") || !o.get("shadow_style").getAsString().equals("blocky_shadows")) return "";
+        JsonObject o = null;
+        if (src.exists("shadows/global.json")) {
+            o = JsonParser.parseString(jsonText(src.read("shadows/global.json"))).getAsJsonObject()
+                    .getAsJsonObject("minecraft:shadow_settings");
+        }
+        // Bedrock defaults to pixel-aligned shadows; only an explicit soft_shadows opts into PCF.
+        if (o != null && o.has("shadow_style") && o.get("shadow_style").getAsString().equals("soft_shadows")) return "";
         return "#define VV_SHADOW_BLOCKY\n#define VV_SHADOW_TEXEL " + number(o, "texel_size", 16.0) + "\n";
     }
 
@@ -471,8 +523,8 @@ public final class BedrockFrontend {
         StringBuilder d = new StringBuilder();
         if (waves != null && waves.has("enabled") && waves.get("enabled").getAsBoolean()) {
             d.append("#define VV_WAVES\n");
-            // More octaves than this change nothing a pixel can show, and each costs three evaluations.
-            d.append("#define VV_WAVE_OCTAVES ").append(Math.min(16, (int) number(waves, "octaves", 12))).append('\n');
+            // Keep Bedrock's full wave definition; analytic normals evaluate every octave only once.
+            d.append("#define VV_WAVE_OCTAVES ").append(Math.max(1, (int) number(waves, "octaves", 12))).append('\n');
             for (String[] k : new String[][]{{"depth", "DEPTH", "1.0"}, {"frequency", "FREQUENCY", "1.0"}, {"frequency_scaling", "FREQUENCY_SCALING", "1.2"},
                     {"speed", "SPEED", "2.0"}, {"speed_scaling", "SPEED_SCALING", "1.03"}, {"shape", "SHAPE", "1.5"}, {"pull", "PULL", "0.38"},
                     {"mix", "MIX", "0.2"}, {"direction_increment", "DIRECTION", "80.0"}}) {
@@ -481,22 +533,33 @@ public final class BedrockFrontend {
         }
         if (caustics == null || !caustics.has("enabled") || caustics.get("enabled").getAsBoolean()) {
             d.append("#define VV_CAUSTICS\n");
-            d.append("#define VV_CAUSTIC_SCALE ").append(number(caustics, "scale", 0.5)).append('\n');
+            // The data scale is normalized: one 32-texel tile of the strip spans 2 blocks. The reference
+            // shows caustic cells of roughly a block, hence the doubling to one world unit per texel.
+            d.append("#define VV_CAUSTIC_SCALE ").append(2 * number(caustics, "scale", 0.5)).append('\n');
             d.append("#define VV_CAUSTIC_POWER ").append(number(caustics, "power", 2.0)).append('\n');
             d.append("#define VV_CAUSTIC_FRAME ").append(number(caustics, "frame_length", 0.05)).append('\n');
         }
         return d.toString();
     }
 
-    private static String fogRange(JsonObject layer, double start, double end) {
-        return (layer != null && layer.has("fog_start") ? layer.get("fog_start").getAsDouble() : start) + ", "
-                + (layer != null && layer.has("fog_end") ? layer.get("fog_end").getAsDouble() : end);
+    /** A negative end marks fixed block distances; positive ends are fractions of the render distance. */
+    private static String fogRange(JsonObject layer, double start, double end, boolean defaultFixed) {
+        double first = layer != null && layer.has("fog_start") ? layer.get("fog_start").getAsDouble() : start;
+        double last = layer != null && layer.has("fog_end") ? layer.get("fog_end").getAsDouble() : end;
+        boolean fixed = layer != null && layer.has("render_distance_type")
+                ? layer.get("render_distance_type").getAsString().equals("fixed") : defaultFixed;
+        return first + ", " + (fixed ? -last : last);
+    }
+
+    private static double[] fogColor(JsonObject layer, String fallback) {
+        JsonElement color = layer == null ? null : layer.get("fog_color");
+        return color(color == null ? new JsonPrimitive(fallback) : color);
     }
 
     /** The default client biome, from {@code biomes_client.json}: fog file and water surface. */
     private JsonObject defaultBiome() throws IOException {
         if (!src.exists("biomes_client.json")) return null;
-        JsonObject o = JsonParser.parseString(src.read("biomes_client.json").replaceAll("(?m)^\\s*//.*$", "")).getAsJsonObject();
+        JsonObject o = JsonParser.parseString(jsonText(src.read("biomes_client.json"))).getAsJsonObject();
         return path(o, "biomes", "default");
     }
 

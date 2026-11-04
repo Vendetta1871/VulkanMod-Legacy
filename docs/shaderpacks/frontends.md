@@ -362,34 +362,37 @@ and its license forbids redistribution, so it has no reference pack here.
 
 ## Bedrock frontend
 
-> Not in this build: the Bedrock frontend is held back until its bugs are fixed. A Bedrock pack is listed as not supported. The text below describes the work in progress.
-
-Only the portable part of Bedrock packs. Shaders are out of scope (README non-goals). Code:
+A Bedrock pack lowers to Vesu's deferred PBR pipeline and runs as a regular shader-pack entry.
+Only the portable part of Bedrock packs is read: the game's own shader source is not shipped or
+executed. Code:
 `pack-compiler/.../pack/bedrock/`, `J/shader/BedrockMaterials.java`.
 
 **What runs today.** Such a pack has no shaders, so it lowers to a deferred PBR pipeline of ours
 (`BedrockPrograms`), written after the structure of vanilla Vibrant Visuals and checked against it
 (Bedrock 26.52 on Mesa, the same scene built in both games, `local/ref/vv.sh`, `local/ref/vvcmp.py`):
 
-- **Sky and fog:** a Rayleigh term of `sky_zenith_color` and `sky_horizon_color` with a
-  Henyey-Greenstein Mie term around the sun. `horizon_blend_stops` read as min, start, mie_start, max.
-- **Light:** GGX and Lambert from `lighting/global.json`. Sky ambient is a desaturated zenith term, with
-  `ambient` as a floor. Direct light has a gain (`VV_SUN_GAIN`) measured from the game's picture.
-- **Exposure:** a 1x1 history texture holds the log mean of the 80..100 percentile of a 16x9 luminance
-  grid, clamped to 2^-3..2^4 and adapted over a second (`average_luminance.json`, `tone_mapping.json`
-  of the game). A pack cannot change these files.
-- **Tone mapping:** the `generic` operator (a curve on the peak channel with crosstalk), contrast
-  around the average, saturation, sRGB. Its parameters are CPU-side in the game, so a=1.05, white=32
-  and crosstalk=32 are fitted to its sky. The other operators are `aces` and `reinhard`.
+- **Sky and fog:** Rayleigh from `sky_zenith_color`/`sky_horizon_color` plus Henyey-Greenstein Mie
+  around the sun and moon. `horizon_blend_stops` are min/start/mie_start/max; `sun_glare_shape` and
+  `moon_mie_strength` are used. Distance fog is linear and honors air/weather/water/lava ranges,
+  colors and `render_distance_type`.
+- **Light:** Bedrock's GGX, Smith visibility, Fresnel-weighted Lambert and wrapped/backside diffuse
+  for MERS subsurface. Sky ambient is a desaturated zenith term with `ambient` as a floor; direct
+  light still uses the fitted `VV_SUN_GAIN` bridge to the game's pre-exposure units.
+- **Exposure:** a compute pass builds the game's 256-bin log-luminance histogram; a 1x1 reduction
+  takes the mean of the 80..100 percentile, clamps it and adapts the history.
+- **Tone mapping:** `generic`, `reinhard`, `reinhard_luma`, `reinhard_luminance`, `hable` and
+  `aces` follow the operators in the game's post shader. Temperature uses its Bradford/LMS matrix.
+  Midtone contrast/gain/offset/saturation are applied around the average, then gamma.
 - **Rain:** the game's `rain_sky_color`, no direct light, weather fog from the biome's fog file.
-- **Water:** biome surface color and transparency over the scene, sky reflection by Fresnel.
+- **Water:** biome surface opacity, absorption/scattering, Fresnel sky and screen-space reflection,
+  a direct sun/moon GGX glint, and Bedrock's analytic octave waves when enabled.
 - **Sun and moon** are additive HDR discs; stars come from the gray vertices of the sky category.
 
 - **Biomes:** `biomes/*.client_biome.json` name lighting, atmosphere, grading, fog and water color by
   identifier. Biomes that share settings share a profile. A `BEGIN` pass evaluates the key-framed
-  curves of the camera's biome (`vkm_biome`) once a frame into a 13x1 texture, every program reads
+  curves of the camera's biome (`vkm_biome`) once a frame into a 25x1 texture, every program reads
   that texture, and its history blends biomes over about a quarter of a second.
-- **Bloom:** the game's pyramid: bright pixels, four levels down, a tent up, added at 0.02
+- **Bloom:** the game's pyramid: bright pixels, four levels down, an eight-tap tent up, added at 0.02
   (`bloom_configuration.shared.json` of the game).
 
 Read from the pack: `lighting/`, `atmospherics/`, `color_grading/`, `fogs/`, `biomes/`,
@@ -456,9 +459,8 @@ The settings JSON become IR `renderer.settings`, which the host lighting consume
 
 Biomes select settings through client-biome components, and the reserved global files are
 the defaults. Any `optkeyframe` field may be written as `{"<t>": value, ...}`, where t in [0,1]
-is the time of day (0 = noon, 0.25 = sunset); interpolation is linear. Settings blend between
-biomes, except the tone-mapping operator, `orbital_offset_degrees`, caustics and
-`waves.enabled`. This is roadmap P3, and it applies to RT and raster:
+is the time of day (0 = noon, 0.25 = sunset); interpolation is linear. The camera biome selects
+one profile per frame; biome settings blend through the parameter history:
 
 | Settings | Consumer |
 |---|---|
@@ -488,17 +490,24 @@ Texture sets of `textures/items` join the block atlas, where 1.12 keeps item spr
 
 Differences from the game:
 
-- Point lights use the game's BRDF and falloff and its clusters, with other limits: one light per
-  cell of 4 blocks inside a 128x64x128 volume around the camera, 8 lights per cluster of 8 blocks
-  against the game's 24. The game's shadow atlas is a walk through the voxels of the shadow pass,
-  for the first 4 lights of a cluster, plus a short depth march for entities, for the first 2.
-  The rest are unshadowed, held back only by the vanilla level. Partial blocks fill their voxel.
-  Light volumetrics are not drawn. Every section must reach the shadow pass, so VV runs with
-  `shadow.culling` off. In the reference night scene the wall next to the torch stays brighter
-  and yellower than in the game.
+- Point lights use the game's BRDF, falloff and shadowed block ambient, with other limits: one light
+  per cell of 4 blocks inside a 128x64x128 volume around the camera and 8 lights per cluster of 8
+  blocks against the game's 24. Voxel shadows run for the first 4 lights, plus a short depth march
+  for entities for the first 2. Partial blocks fill their voxel. Light volumetrics are not drawn.
+  Every section must reach the shadow pass, so VV runs with `shadow.culling` off.
+- SSR resolves indirect specular at half resolution, clamps it against a 3x3 neighborhood of the
+  reprojected history, and applies it to the HDR scene in a second pass. The game computes its
+  reprojection from the traced hit depth; Vesu uses screen-space motion vectors, so reflections on
+  independently moving entities are less stable. Volumetrics are a jittered 12-step half-resolution
+  march, not the game's 3D froxel volume.
+- Directional shadows are one 2048² cascade with a fitted bias, not the game's cascade set. There is
+  no cloud shadow or player-only shadow pass.
+- Water extinction uses the reconstructed thickness behind the surface instead of a water-depth
+  prepass; water transition fog and fire-resistance lava fog are not animated. Waves are analytic
+  but evaluated in the water fragment shader rather than in a prepass.
 - `textures/particle` sets and per-biome cubemaps are not read. Cubemap faces and caustic
   textures must be PNG. The order of the faces is assumed, not checked against the game.
-- Subsurface scattering is stored and unused. The End flash is not drawn.
+- The End flash is not drawn.
 
 Exact schema: Microsoft Learn "Vibrant Visuals resource packs" and the wiki's configuration
 values (README references).

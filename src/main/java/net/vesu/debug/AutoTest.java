@@ -273,6 +273,96 @@ public class AutoTest {
     }
 
     /**
+     * {@code VESU_AUTOTEST_VV=1}: Vibrant Visuals parity scene - a quartz platform in the
+     * sky with a two-deep water pool and a chicken plus a zombie on the dry floor, under a
+     * low morning sun. Captures the pool at a grazing angle toward the sun ("vvPoolMorning"),
+     * the pool straight from above to show the floor and caustics ("vvPoolTopDown"), the
+     * chicken's drop shadow ("vvChicken") and the pool again at sunset
+     * ("vvPoolSunset"), for side-by-side comparison against the Bedrock reference.
+     */
+    private static final boolean VV_MODE = Env.get("VESU_AUTOTEST_VV") != null;
+    private static int vvTicks;
+    /** Platform height, resolved from the terrain top when the world is ready. */
+    private static int vvBy = 150;
+
+    private static void vvStage(Minecraft mc) {
+        int t = ++vvTicks;
+        int bx = 300, bz = 260;
+        if (t == 1) {
+            IntegratedServer server = mc.getIntegratedServer();
+            if (server == null) return;
+            server.addScheduledTask(() -> {
+                net.minecraft.world.World world = server.getWorld(0);
+                // The spot is terrain like any other: build the platform in the air, well
+                // above the local surface, or it ends up buried and the scene is a forest.
+                int top = world.getTopSolidOrLiquidBlock(new BlockPos(bx + 12, 0, bz + 12)).getY();
+                int by = vvBy = top + 33;
+                Initializer.LOGGER.info("[autotest] VV platform at y={} (terrain top {})", by, top);
+                BlockPos.MutableBlockPos c = new BlockPos.MutableBlockPos();
+                for (int dx = 0; dx <= 24; dx++)
+                    for (int dz = 0; dz <= 24; dz++)
+                        world.setBlockState(c.setPos(bx + dx, by, bz + dz), Blocks.QUARTZ_BLOCK.getDefaultState());
+                // Rim two up everywhere except the 10x10 pool, which is two deep; a one-block
+                // rim lets the top water layer spill over and wash the player off the platform.
+                for (int dx = 0; dx <= 24; dx++)
+                    for (int dz = 0; dz <= 24; dz++) {
+                        boolean pool = dx >= 7 && dx <= 16 && dz >= 7 && dz <= 16;
+                        if (!pool) {
+                            world.setBlockState(c.setPos(bx + dx, by + 1, bz + dz), Blocks.QUARTZ_BLOCK.getDefaultState());
+                            world.setBlockState(c.setPos(bx + dx, by + 2, bz + dz), Blocks.QUARTZ_BLOCK.getDefaultState());
+                        } else {
+                            world.setBlockState(c.setPos(bx + dx, by + 1, bz + dz), Blocks.WATER.getDefaultState());
+                            world.setBlockState(c.setPos(bx + dx, by + 2, bz + dz), Blocks.WATER.getDefaultState());
+                        }
+                    }
+                // The two-high rim puts the platform's walking surface at by+3.
+                net.minecraft.entity.passive.EntityChicken chicken = new net.minecraft.entity.passive.EntityChicken(world);
+                chicken.setLocationAndAngles(bx + 18.5, by + 3, bz + 19.5, 0.0f, 0.0f);
+                chicken.setNoAI(true);
+                chicken.setEntityInvulnerable(true);
+                world.spawnEntity(chicken);
+                net.minecraft.entity.monster.EntityZombie zombie = new net.minecraft.entity.monster.EntityZombie(world);
+                zombie.setLocationAndAngles(bx + 21.5, by + 3, bz + 12.5, 90.0f, 0.0f);
+                zombie.setNoAI(true);
+                zombie.setEntityInvulnerable(true);
+                world.spawnEntity(zombie);
+            });
+            serverCommand(mc, "time set 1500");
+            serverCommand(mc, "weather clear 1000000");
+        } else if (t == 5) {
+            // West of the pool looking east into the low morning sun: waves and glint.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f -90 18", mc.player.getName(), bx + 1.5, vvBy + 4.0, bz + 11.5));
+        } else if (t == 150) {
+            capture(mc, "vvPoolMorning");
+        } else if (t == 155) {
+            // Straight down at the pool: Fresnel is ~2% here, so the floor - and the caustics
+            // modulating it - are fully visible.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 0 90", mc.player.getName(), bx + 11.5, vvBy + 8.0, bz + 11.5));
+        } else if (t == 270) {
+            capture(mc, "vvPoolTopDown");
+        } else if (t == 275) {
+            // Eyes just under the surface (it sits at vvBy+3), looking along the pool: caustics
+            // must stay on the floor.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 0 18", mc.player.getName(), bx + 8.0, vvBy + 2.6, bz + 11.5));
+        } else if (t == 390) {
+            capture(mc, "vvPoolUnderwater");
+        } else if (t == 395) {
+            // South of the chicken looking north: the drop shadow blob on quartz.
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f 180 30", mc.player.getName(), bx + 18.5, vvBy + 2.6, bz + 23.5));
+        } else if (t == 520) {
+            capture(mc, "vvChicken");
+        } else if (t == 525) {
+            serverCommand(mc, "time set 11800");
+            serverCommand(mc, String.format("tp %s %.1f %.1f %.1f -90 18", mc.player.getName(), bx + 1.5, vvBy + 4.0, bz + 11.5));
+        } else if (t == 650) {
+            capture(mc, "vvPoolSunset");
+        } else if (t >= 660) {
+            Initializer.LOGGER.info("[autotest] done, shutting down");
+            mc.shutdown();
+        }
+    }
+
+    /**
      * {@code VESU_AUTOTEST_MOBSHADOW=1}: a stone platform high in the air under a low
      * morning sun with a zombie and a cow (no AI) on a polished quartz floor; captures
      * "mobShadow". Checks ray-traced entity shadows (replacing the round drop shadows) and
@@ -721,6 +811,11 @@ public class AutoTest {
 
                 if (MOBSHADOW_MODE) {
                     mobShadowStage(mc);
+                    return;
+                }
+
+                if (VV_MODE) {
+                    vvStage(mc);
                     return;
                 }
 

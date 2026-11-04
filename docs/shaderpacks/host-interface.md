@@ -55,7 +55,7 @@ target. The authoritative full list of OptiFine uniforms is `shaders.txt`.
 | Weather | `rainStrength`, `wetness` |
 | Player | `isEyeInWater`, `eyeBrightness`, `eyeBrightnessSmooth`, `nightVision`, `blindness`, `screenBrightness`, `heldItemId`, `heldBlockLightValue`, `heldItemId2`, `heldBlockLightValue2`, `hideGUI`, `centerDepthSmooth` |
 | Atlas | `atlasSize`, `terrainTextureSize`, `terrainIconSize` |
-| Host extras (`vkm_` prefix) | `vkm_dimension` (-1 Nether, 0 Overworld, 1 End, mod dimensions by id), `vkm_biome` (numeric id at the camera), `vkm_jitter`, `vkm_renderScale`, `vkm_displaySize`, `vkm_rtEnabled`, `vkm_dynLights[16]` |
+| Host extras (`vkm_` prefix) | `vkm_dimension` (-1 Nether, 0 Overworld, 1 End, mod dimensions by id), `vkm_biome` (numeric id at the camera), `vkm_lavaResistance` (1 while the eye is in lava and the viewer has fire resistance), `vkm_jitter`, `vkm_renderScale`, `vkm_displaySize`, `vkm_rtEnabled`, `vkm_dynLights[16]` |
 
 Notes:
 - The matrices are the **GL** matrices as vanilla set them, unjittered and without
@@ -97,8 +97,8 @@ What a native `POST_SCENE` or `combination` program sees besides the blocks abov
   sampler then reads the old image, the storage image is the new one).
 - Compute passes can write the base storage formats only: RGBA8, RGBA16F, RGBA32F, R32F,
   R32UI, RGBA32UI. Integer textures are sampled as `usampler2D`.
-- `motion` is in pack texcoords (previous minus current, y up) and runs the motion-vector
-  pass only for packs that sample it.
+- `motion` is in pack texcoords (previous minus current, y up), is available from `DEFERRED`
+  onward, and runs the motion-vector pass only for packs that sample it.
 
 ## Geometry programs (M3)
 
@@ -156,6 +156,7 @@ path reads the slot from a vertex attribute.
 | `shadowtex0`, `shadowtex1` | Shadow depth: all, and without translucent | `sampler2DShadow` when `shadow.hardwareFiltering` |
 | `shadowtex0Hw`, `shadowtex1Hw` | The same images as comparison samplers (`sampler2DShadow`), for a program that declares them so while another reads the depth | Lowered from `uniform sampler2DShadow` |
 | `actorNormals`, `actorSpecular` | Maps of model textures, one rectangle each (`vkm_material`) | Geometry programs |
+| `gnormalCopy` | Snapshot of a geometry target named `gnormal`, taken after `DEFERRED` | Geometry programs; avoids a name collision with the `gnormal` output |
 | `shadowcolor0` to `shadowcolor7` | Shadow color targets | OptiFine alias `shadowcolor` → `shadowcolor0`, `watershadow` → `shadowtex0` |
 | `normals`, `specular` in passes | The same atlases | Sampled with nearest filtering |
 | `sceneColor`, `sceneDepth` | The host scene (native packs) | As in the current parser |
