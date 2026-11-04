@@ -16,7 +16,7 @@
       "power": 1
     },
     "waves": {
-      "enabled": true,
+      "enabled": false,
       "frequency": 1,
       "octaves": 28,
       "depth": 1,

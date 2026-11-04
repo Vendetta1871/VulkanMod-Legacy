@@ -64,6 +64,7 @@ format-agnostic, and each frontend is a translator that can be tested offline.
 | [host-interface.md](host-interface.md) | GLSL contract between pack programs and the host: conventions, uniform blocks, samplers, per-draw data |
 | [runtime.md](runtime.md) | How the renderer executes a pack: frame graph inside `FrameTargets`, program routing per draw category, resources, shadow pass, compilation, performance rules |
 | [frontends.md](frontends.md) | `pack-compiler` module, the OptiFine translator, the `post_effect` and Bedrock frontends |
+| [bedrock-vv-water.md](bedrock-vv-water.md) | Reverse-engineered design of Bedrock's own VV water (flat surface, wave normals, extinction, caustics) and what it implies for our preset |
 
 ## Decisions
 
