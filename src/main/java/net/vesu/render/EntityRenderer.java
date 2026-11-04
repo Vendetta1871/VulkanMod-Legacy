@@ -545,6 +545,23 @@ public class EntityRenderer {
         VRenderSystem.updateModelViewMatrix();
         VRenderSystem.calculateMVP();
 
+        if (pipeline == shadowPipeline) {
+            net.vesu.pack.ir.IrPack pack = net.vesu.shader.PackManager.active();
+            if (pack != null && pack.shadow != null && !net.vesu.shader.PackManager.pausedByRt(pack)) {
+                // The running pack's shadow map casts the entity shadow; the round vanilla
+                // blob on top would double it (Bedrock draws only the cast shadow).
+                net.vesu.debug.FrameProfiler.entityDrawEnd();
+                return;
+            }
+            if (deferBlobShadows()) {
+                // A lit-scene pack would overwrite a blob drawn now (and its G-buffer route
+                // would re-shade the blob into a black disc): blend it in after the pack's
+                // DEFERRED passes instead. The model-view is per-entity and already updated.
+                deferBlob(data, vertexCount, texture);
+                net.vesu.debug.FrameProfiler.entityDrawEnd();
+                return;
+            }
+        }
 
         // Depth, cull and colour come straight from the GlStateManager tracking mixins
         // (GlStateManagerDepthM, GlStateManagerBlendM) into VRenderSystem, where the
@@ -794,6 +811,145 @@ public class EntityRenderer {
     /** Vertex count of the most recent {@link #flushWeather()}; used by the STICKY autotest. */
     public static int lastWeatherVerts() {
         return lastWeatherVerts;
+    }
+
+    // --- Deferred entity drop shadows (pack frames) --------------------------------------
+    /**
+     * A pack with its own lighting ({@code renderer.sceneTarget}) overwrites the scene color
+     * in its DEFERRED pass, so the round drop shadow under an entity cannot draw with the
+     * opaque geometry: it would land in the pack's G-buffer and be re-shaded into a solid
+     * black disc. The blob draws are buffered here and blended into the relit scene right
+     * after DEFERRED, before the translucent layer - the vanilla draw order. Each blob is
+     * its own batch with its own model-view (every entity translates the shadow quad itself).
+     */
+    private static ByteBuffer blobBuffer;
+    private static ByteBuffer blobScratch;
+    private static final java.util.ArrayList<int[]> blobBatch = new java.util.ArrayList<>();
+    private static final java.util.ArrayList<VulkanImage> blobBatchTex = new java.util.ArrayList<>();
+    private static final java.util.ArrayList<float[]> blobBatchMv = new java.util.ArrayList<>();
+    private static int blobVerts;
+    private static boolean blobPending;
+    private static final float[] blobTint = new float[4];
+    private static Pipeline.BlendState blobBlend;
+    private static boolean blobDepthMask, blobDepthTest, blobCull;
+    private static int blobDepthFunc;
+
+    /** True when a drop shadow draw must wait for the pack's relit scene instead of drawing now. */
+    private static boolean deferBlobShadows() {
+        net.vesu.pack.ir.IrPack pack = net.vesu.shader.PackManager.active();
+        return pack != null && pack.renderer.has("sceneTarget")
+                && net.vesu.vulkan.FrameTargets.phase() == net.vesu.vulkan.FrameTargets.Phase.SCENE;
+    }
+
+    private static void deferBlob(ByteBuffer data, int vertexCount, VulkanImage texture) {
+        int stride = SHADOW_FORMAT.getSize();
+        int bytes = vertexCount * stride;
+        int off = blobVerts * stride;
+        int need = off + bytes;
+        if (blobBuffer == null || blobBuffer.capacity() < need) {
+            ByteBuffer grown = MemoryUtil.memAlloc(Math.max(need * 2, 1 << 12));
+            if (blobBuffer != null) {
+                blobBuffer.position(0);
+                blobBuffer.limit(off);
+                grown.put(blobBuffer);
+                MemoryUtil.memFree(blobBuffer);
+            }
+            blobBuffer = grown;
+        }
+        blobBuffer.limit(blobBuffer.capacity());
+        ByteBuffer src = data.duplicate();
+        src.position(0);
+        src.limit(bytes);
+        blobBuffer.position(off);
+        blobBuffer.put(src);
+        blobBatch.add(new int[]{blobVerts, vertexCount});
+        blobBatchTex.add(texture);
+        float[] mv = new float[16];
+        VRenderSystem.getModelViewMatrix4f().get(mv);
+        blobBatchMv.add(mv);
+        blobVerts += vertexCount;
+
+        if (!blobPending) {
+            // The blob state is uniform across entities (vanilla renderShadow); snapshot once.
+            blobTint[0] = VRenderSystem.trackedColorR;
+            blobTint[1] = VRenderSystem.trackedColorG;
+            blobTint[2] = VRenderSystem.trackedColorB;
+            blobTint[3] = VRenderSystem.trackedColorA;
+            blobBlend = VRenderSystem.getBlendState();
+            blobDepthMask = VRenderSystem.depthMask;
+            blobDepthTest = VRenderSystem.depthTest;
+            blobDepthFunc = VRenderSystem.depthFun;
+            blobCull = VRenderSystem.cull;
+        }
+        blobPending = true;
+    }
+
+    /**
+     * Replays the buffered drop shadows into the relit scene. Called from
+     * {@code FrameTargets.enterTranslucent} after the pack's DEFERRED passes, inside the
+     * resumed scene render pass, so the blobs blend into the lit image before the water.
+     */
+    public static void flushEntityBlobs() {
+        if (!blobPending) {
+            return;
+        }
+        blobPending = false;
+        int n = blobVerts;
+        blobVerts = 0;
+        int batches = blobBatch.size();
+        if (n <= 0 || blobBuffer == null || batches == 0
+                || !Drawer.isActive() || Drawer.skipRendering) {
+            blobBatch.clear();
+            blobBatchTex.clear();
+            blobBatchMv.clear();
+            return;
+        }
+        try {
+            VRenderSystem.updateProjectionMatrix();
+            VRenderSystem.depthMask(blobDepthMask);
+            if (blobDepthTest) {
+                VRenderSystem.enableDepthTest();
+            } else {
+                VRenderSystem.disableDepthTest();
+            }
+            VRenderSystem.depthFunc(blobDepthFunc);
+            if (blobCull) {
+                VRenderSystem.enableCull();
+            } else {
+                VRenderSystem.disableCull();
+            }
+            VRenderSystem.setShaderColor(blobTint[0], blobTint[1], blobTint[2], blobTint[3]);
+            VRenderSystem.setShaderPipeline(shadowPipeline);
+            Drawer.currentBlendState = blobBlend;
+
+            int stride = SHADOW_FORMAT.getSize();
+            if (blobScratch == null || blobScratch.capacity() < n * stride) {
+                blobScratch = MemoryUtil.memAlloc(Math.max(n * stride, 1 << 12));
+            }
+            for (int i = 0; i < batches; i++) {
+                int[] vr = blobBatch.get(i);
+                int start = vr[0] * stride;
+                int bytes = vr[1] * stride;
+                blobBuffer.position(start);
+                blobBuffer.limit(start + bytes);
+                blobScratch.clear();
+                blobScratch.limit(bytes);
+                blobScratch.put(blobBuffer);
+                blobScratch.limit(bytes).position(0);
+                // The per-entity translate lives in the captured model-view.
+                VRenderSystem.modelViewMatrix.position(0);
+                VRenderSystem.getModelViewMatrix4f().put(blobBatchMv.get(i));
+                VRenderSystem.calculateMVP();
+                VTextureSelector.bindTexture(blobBatchTex.get(i));
+                Drawer.getInstance().draw(blobScratch, 7, SHADOW_FORMAT, vr[1]);
+            }
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("entity blob flush", t);
+        } finally {
+            blobBatch.clear();
+            blobBatchTex.clear();
+            blobBatchMv.clear();
+        }
     }
 
     private static int packedLight() {

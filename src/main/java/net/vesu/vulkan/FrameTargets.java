@@ -298,6 +298,8 @@ public final class FrameTargets {
         Drawer.invalidateBoundPipeline(cmd);
         pack.resumeGeometry(cmd, stack);
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+        // The buffered entity drop shadows land in the relit scene before the water.
+        net.vesu.render.EntityRenderer.flushEntityBlobs();
     }
 
     /** Before the hand: the copy behind depthtex2 leaves rendering and comes back with everything loaded. */

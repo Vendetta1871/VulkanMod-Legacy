@@ -812,6 +812,11 @@ public final class PackRuntime {
 
     /** The program of the draw {@code pipeline} is about to do, or null for its vanilla shader. */
     Pipeline.Program program(Pipeline pipeline) {
+        // Entity drop shadows keep their own shader. Routed into a pack's G-buffer they
+        // would be re-shaded by the pack's lighting pass into a solid black disc; the blob
+        // draws are instead buffered by EntityRenderer and blended into the relit scene
+        // right after the DEFERRED passes (see flushEntityBlobs).
+        if (pipeline.recordId().equals("entity_shadow")) return null;
         Pipeline.Program[] table = pipeline.packPrograms;
         if (table == null) return null;
         GeometryCategory category = switch (pipeline.routeKind()) {
