@@ -77,7 +77,8 @@ public final class CameraHistory {
         near = glProjection.m32() / (glProjection.m22() - 1.0f);
         far = glProjection.m32() / (glProjection.m22() + 1.0f);
         // The LOD far plane replaces vanilla's in the depth mapping (VRenderSystem.remapDepth).
-        if (net.vesu.vulkan.VRenderSystem.reverseZ && net.vesu.vulkan.VRenderSystem.lodFarPlane > far) {
+        if ((net.vesu.vulkan.VRenderSystem.reverseZ || net.vesu.vulkan.VRenderSystem.lodFarForward)
+                && net.vesu.vulkan.VRenderSystem.lodFarPlane > far) {
             far = net.vesu.vulkan.VRenderSystem.lodFarPlane;
         }
         fovY = (float) (2.0 * Math.atan(1.0 / glProjection.m11()));

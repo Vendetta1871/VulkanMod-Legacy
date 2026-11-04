@@ -3,6 +3,7 @@
 // dh_terrain and dh_water). Not compiled itself: GeometryPrelude copies its blocks into the
 // pack program's prelude, and the block between the vkm-host-prelude markers, which pulls
 // the LOD quad of the vertex and stands in for the vertex attributes of a vanilla format.
+// For the pack's own terrain programs it also stands in for mc_Entity and at_tangent.
 // The values follow Distant Horizons' vertices: the face's average color with its tint, the
 // baked light as a lightmap coordinate, the face normal and the DH material id.
 
@@ -22,12 +23,14 @@ layout(std140, binding = 0) uniform LodPackFrame {
     vec4 LodCamFrac;
     mat4 LodInvMVP;
     ivec4 LodCover;     // x, z: chunk of the coverage grid's corner, y: grid size in chunks, w: 1 when valid
-    vec4 LodScreen;     // x, y: size in pixels, z: -1 when the viewport flips y
+    vec4 LodScreen;     // x, y: size in pixels, z: -1 when the viewport flips y, w: 1 drops covered opaque too
 };
 layout(std430, binding = 1) readonly buffer LodQuads { uvec2 lodQuads[]; };
 layout(std430, binding = 2) readonly buffer LodSections { ivec4 lodSections[]; };
 layout(std430, binding = 3) readonly buffer LodModels { LodModel lodModels[]; };
 layout(std430, binding = 4) readonly buffer LodTints { uint lodTints[]; };
+// Per model: the pack's block.properties attribute of its block state (PackIds.block).
+layout(std430, binding = 6) readonly buffer LodPackIds { uint lodPackIds[]; };
 
 //vkm-host-prelude-begin
 const int VKM_LOD_CU[6] = int[](0, 1, 1, 1, 0, 0);
@@ -89,6 +92,19 @@ ivec2 vkm_lodLight() {
 #define vaUV2 vkm_lodLight()
 #define vaNormal VKM_LOD_NORMALS[vkm_lodFace()]
 #define dhMaterialId int(lodModels[vkm_lodModel()].material)
+
+// For the pack's own terrain programs (no DH programs).
+vec4 vkm_lodEntity() {
+    uint v = lodPackIds[vkm_lodModel()];
+    return vec4(float(v & 0xFFFFu), float(v >> 24), float((v >> 16) & 255u), 1.0);
+}
+
+vec4 vkm_lodTangent() {
+    return vkm_lodFace() >= 4 ? vec4(0.0, 0.0, 1.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+}
+
+#define mc_Entity vkm_lodEntity()
+#define at_tangent vkm_lodTangent()
 //vkm-host-prelude-end
 
 void main() {

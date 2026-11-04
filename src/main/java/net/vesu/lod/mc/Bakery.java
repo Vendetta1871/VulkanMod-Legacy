@@ -221,6 +221,10 @@ public final class Bakery {
         BakedModel baked = new BakedModel(images, translucentLayer && !leaves, leaves, fluid, state.isOpaqueCube(),
                 state.getLightValue(), tintKind, tint, shaded, 0);
         baked.record[15] = dhMaterial(state);
+        // Not part of the dedup key: look-alike states share the first one's block tag, which
+        // packs map through block.properties (PackIds) for distant terrain in their own programs.
+        baked.record[8] = net.minecraft.block.Block.getIdFromBlock(state.getBlock()) & 0xFFF
+                | (state.getBlock().getMetaFromState(state) & 15) << 12;
         Integer known = dedup.get(baked.dedupKey);
         if (known != null) return known;
         if (modelCount >= ModelTables.MAX_MODELS) return ModelSource.NONE;

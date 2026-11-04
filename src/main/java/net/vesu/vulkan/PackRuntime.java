@@ -663,6 +663,8 @@ public final class PackRuntime {
     // Distant terrain (AUDIT 5.16, contract B)
 
     private final LodPackProgram[] lodPrograms = new LodPackProgram[2];
+    /** Distant terrain goes through the pack's terrain and water programs, into the scene depth. */
+    private boolean lodThroughTerrain;
     private int[] attachmentFormats;
     /** The distant terrain's depth, in its own projection (dhDepthTex0/1); null without DH programs or inputs. */
     private Image dhDepth;
@@ -676,6 +678,13 @@ public final class PackRuntime {
         for (int i = 0; i < 2; i++) {
             IrPack.Gbuffer g = plan.routes.get(categories[i]);
             if (g == null) continue;
+            boolean terrain = !g.name.contains("dh_");
+            if (i == 0) {
+                lodThroughTerrain = terrain;
+            } else if (terrain != lodThroughTerrain) {
+                // Both through the DH programs or both through the pack's own: one depth for both.
+                continue;
+            }
             if (g.geometry != null || g.tessControl != null) {
                 Initializer.LOGGER.warn("[shaderpacks] {}: {} has stages the LOD renderer cannot run; no distant terrain through it",
                         pack.id, g.name);
@@ -708,6 +717,11 @@ public final class PackRuntime {
         }
     }
 
+    /** Distant terrain draws through the pack's terrain programs (no DH programs), into the scene depth. */
+    boolean lodThroughTerrain() {
+        return lodPrograms[0] != null && lodThroughTerrain;
+    }
+
     LodPackProgram lodProgram(boolean translucent) {
         return lodPrograms[translucent ? 1 : 0];
     }
@@ -733,7 +747,7 @@ public final class PackRuntime {
     }
 
     private boolean wantsDhDepth() {
-        return lodPrograms[0] != null || plan.hostInputs.contains("dhDepthTex0") || plan.hostInputs.contains("dhDepthTex1");
+        return (lodPrograms[0] != null && !lodThroughTerrain) || plan.hostInputs.contains("dhDepthTex0") || plan.hostInputs.contains("dhDepthTex1");
     }
 
     /** Each frame, before any geometry: no distant terrain yet, so the depth is all far. */
@@ -1789,7 +1803,7 @@ public final class PackRuntime {
         if (plan.handDepthCopy) handDepthCopy = createDepthImage(scene.width(), scene.height());
         if (wantsDhDepth()) {
             dhDepth = createDhDepthImage(scene.width(), scene.height());
-            if (lodPrograms[1] != null) dhDepthOpaque = createDhDepthImage(scene.width(), scene.height());
+            if (lodPrograms[1] != null && !lodThroughTerrain) dhDepthOpaque = createDhDepthImage(scene.width(), scene.height());
             dhDepthFresh = true;
         }
     }

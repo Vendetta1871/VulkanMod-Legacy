@@ -19,6 +19,15 @@ public final class LodPackBridge {
                 && p.lodProgram(false) != null;
     }
 
+    /**
+     * The pack has no DH programs: distant terrain goes through its terrain and water programs
+     * with the scene's projection and depth, as vanilla terrain would.
+     */
+    public static boolean throughTerrainPrograms() {
+        PackRuntime p = FrameTargets.packRuntime();
+        return p != null && p.lodThroughTerrain();
+    }
+
     /** Changes whenever the pack runtime is rebuilt: pipelines made from it must be made again. */
     public static Object token() {
         return FrameTargets.packRuntime();

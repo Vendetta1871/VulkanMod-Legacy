@@ -107,6 +107,12 @@ public class VRenderSystem {
     public static float fogScale = 1.0f, fogScaleFrom;
     /** Horizontal band where vanilla terrain dissolves into the LODs (start >= end: none). */
     public static float lodEdgeStart, lodEdgeEnd;
+    /**
+     * Forward depth (a pack) with distant terrain through the pack's terrain programs: the
+     * scene's perspective reaches {@link #lodFarPlane} as with reverse-Z.
+     */
+    public static boolean lodFarForward;
+    private static final org.joml.Matrix4f SCRATCH_FAR = new org.joml.Matrix4f();
 
     public static float getLodEdgeStart() { return lodEdgeStart; }
 
@@ -320,6 +326,15 @@ public class VRenderSystem {
      * digits reverse-Z needs.
      */
     public static org.joml.Matrix4f remapDepth(org.joml.Matrix4f gl, org.joml.Matrix4f dest) {
+        if (!reverseZ && lodFarForward && gl.m02() == 0.0f && gl.m12() == 0.0f && gl.m03() == 0.0f
+                && gl.m13() == 0.0f && gl.m23() == -1.0f && gl.m33() == 0.0f) {
+            double m22 = gl.m22(), m32 = gl.m32();
+            double n = m32 / (m22 - 1.0), f = m32 / (m22 + 1.0);
+            if (lodFarPlane > f && f > n) {
+                f = lodFarPlane;
+                gl = SCRATCH_FAR.set(gl).m22((float) (-(f + n) / (f - n))).m32((float) (-2.0 * f * n / (f - n)));
+            }
+        }
         dest.set(gl);
         if (!reverseZ) {
             dest.m02(0.5f * gl.m02() + 0.5f * gl.m03());

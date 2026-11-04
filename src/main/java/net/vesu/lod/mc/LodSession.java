@@ -215,6 +215,8 @@ public final class LodSession {
     private final Matrix4f dhProj = new Matrix4f();
     /** This frame draws through the pack's DH program: the CPU writes the draws, without coverage or SSAO. */
     private boolean packMode;
+    /** This frame's pack draws distant terrain through its terrain programs, in the scene depth. */
+    private boolean packTerrain;
     /** drawPack ran this frame: the distant water may follow. */
     private boolean packOpen;
     private final org.joml.Matrix4f invViewProj = new org.joml.Matrix4f();
@@ -228,11 +230,17 @@ public final class LodSession {
         Minecraft mc = Minecraft.getMinecraft();
         prepare();
         VRenderSystem.captureCameraMatrices(mv, proj);
-        VRenderSystem.undoDepthRemap(proj, dhProj);
-        net.vesu.shader.FrameUniforms.withPlanes(dhProj, net.vesu.shader.FrameUniforms.DH_NEAR_PLANE,
-                net.vesu.shader.FrameUniforms.dhFarPlane(), dhProj);
-        VRenderSystem.remapDepth(dhProj, dhProj);
-        dhProj.mul(mv, viewProj);
+        packTerrain = net.vesu.vulkan.LodPackBridge.throughTerrainPrograms();
+        if (packTerrain) {
+            // The pack's terrain programs: the scene's projection and depth, as vanilla terrain.
+            proj.mul(mv, viewProj);
+        } else {
+            VRenderSystem.undoDepthRemap(proj, dhProj);
+            net.vesu.shader.FrameUniforms.withPlanes(dhProj, net.vesu.shader.FrameUniforms.DH_NEAR_PLANE,
+                    net.vesu.shader.FrameUniforms.dhFarPlane(), dhProj);
+            VRenderSystem.remapDepth(dhProj, dhProj);
+            dhProj.mul(mv, viewProj);
+        }
         for (int i = 0; i < 6; i++) {
             if (planes[i] == null) planes[i] = new Vector4f();
             viewProj.frustumPlane(i, planes[i]);
@@ -249,7 +257,8 @@ public final class LodSession {
         renderer.endUploads();
         int bx = (int) Math.floor(camX), by = (int) Math.floor(camY), bz = (int) Math.floor(camZ);
         packOpen = renderer.drawPack(viewProj, mv, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz),
-                invViewProj.set(viewProj).invert(), cover, coverX, coverZ, coverN, !net.vesu.vulkan.FrameTargets.packSpace());
+                invViewProj.set(viewProj).invert(), cover, coverX, coverZ, coverN, !net.vesu.vulkan.FrameTargets.packSpace(),
+                packTerrain);
         frameOpen = false;
         if ((frame & 255) == 0) cleanup();
     }
@@ -440,9 +449,9 @@ public final class LodSession {
         Node n = node(key);
         n.lastSeen = frame;
         if (!n.ready()) return;
-        // Under a pack vanilla terrain draws over the LODs, and packs fade it out near its edge
-        // for DH to fill: what vanilla has built stays.
-        if (lvl <= 1 && !packMode && coveredBox(x0, y0, z0, size) && insideEdge(x0, z0, size)) return;
+        // Under a pack with DH programs vanilla terrain draws over the LODs, and packs fade it
+        // out near its edge for DH to fill: what vanilla has built stays.
+        if (lvl <= 1 && (!packMode || packTerrain) && coveredBox(x0, y0, z0, size) && insideEdge(x0, z0, size)) return;
         if (lvl > 0 && n.childMask != 0) {
             double dx = Math.max(x0 - camX, Math.max(0, camX - (x0 + size)));
             double dy = Math.max(y0 - camY, Math.max(0, camY - (y0 + size)));

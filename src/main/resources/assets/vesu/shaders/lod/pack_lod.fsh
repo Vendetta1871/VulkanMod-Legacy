@@ -13,7 +13,7 @@ layout(std140, binding = 0) uniform LodPackFrame {
     vec4 LodCamFrac;
     mat4 LodInvMVP;
     ivec4 LodCover;     // x, z: chunk of the coverage grid's corner, y: grid size in chunks, w: 1 when valid
-    vec4 LodScreen;     // x, y: size in pixels, z: -1 when the viewport flips y
+    vec4 LodScreen;     // x, y: size in pixels, z: -1 when the viewport flips y, w: 1 drops covered opaque too
 };
 layout(std430, binding = 5) readonly buffer LodCoverBits { uint lodCoverBits[]; };
 
@@ -21,8 +21,9 @@ layout(std430, binding = 5) readonly buffer LodCoverBits { uint lodCoverBits[]; 
 #define VKM_LOD_DISCARD
 
 void vkm_lodDiscard() {
-    // Only distant water (MC_RENDER_STAGE_TERRAIN_TRANSLUCENT).
-    if (renderStage != 17 || LodCover.w == 0) return;
+    // Distant water (MC_RENDER_STAGE_TERRAIN_TRANSLUCENT); opaque too when it shares the
+    // scene depth (the pack's terrain programs), where coarse terrain would cover vanilla.
+    if ((renderStage != 17 && LodScreen.w == 0.0) || LodCover.w == 0) return;
     vec2 ndc = gl_FragCoord.xy / LodScreen.xy * 2.0 - 1.0;
     ndc.y *= LodScreen.z;
     vec4 p = LodInvMVP * vec4(ndc, gl_FragCoord.z, 1.0);

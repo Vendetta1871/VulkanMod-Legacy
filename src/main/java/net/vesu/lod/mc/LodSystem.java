@@ -219,6 +219,7 @@ public final class LodSystem {
         Minecraft mc = Minecraft.getMinecraft();
         VRenderSystem.lodFarPlane = s != null && Initializer.CONFIG.lodRendering ? (float) (distanceBlocks() + 512.0) : 0.0f;
         VRenderSystem.fogScaleFrom = mc.gameSettings.renderDistanceChunks * 16.0f;
+        VRenderSystem.lodFarForward = VRenderSystem.lodFarPlane > 0 && net.vesu.vulkan.LodPackBridge.throughTerrainPrograms();
         boolean scaleFog = s != null && Initializer.CONFIG.lodRendering && Initializer.CONFIG.lodFog.startsWith("fog");
         VRenderSystem.fogScale = scaleFog ? (float) (distanceBlocks() / VRenderSystem.fogScaleFrom) : 1.0f;
         float[] band = s != null && Initializer.CONFIG.lodRendering ? edgeBand(mc.gameSettings.renderDistanceChunks) : null;

@@ -86,6 +86,18 @@ public final class FrameUniforms {
             DH_NEAR = L.offset("dhNearPlane"), DH_FAR = L.offset("dhFarPlane"), DH_DISTANCE = L.offset("dhRenderDistance"),
             HEIGHT_LIMIT = L.offset("heightLimit"), LOGICAL_HEIGHT = L.offset("logicalHeightLimit"), BEDROCK = L.offset("bedrockLevel");
 
+    /**
+     * {@code far}: the vanilla distance (AUDIT 5.16). A pack without DH programs fogs and fades
+     * at {@code far}, which would hide the LODs drawn through its terrain programs: then it
+     * gets the LOD distance instead.
+     */
+    static float farUniform(net.minecraft.client.Minecraft mc) {
+        float vanilla = mc.gameSettings.renderDistanceChunks * 16.0f;
+        float lod = net.vesu.vulkan.VRenderSystem.lodFarPlane - 512.0f;
+        if (lod <= vanilla || !net.vesu.vulkan.LodPackBridge.throughTerrainPrograms()) return vanilla;
+        return lod;
+    }
+
     /** Near plane of the distant terrain's own projection (AUDIT 5.16, contract B), in blocks. */
     public static final float DH_NEAR_PLANE = 16.0f;
 
@@ -290,7 +302,7 @@ public final class FrameUniforms {
             break;
         }
         b.putFloat(NEAR, CameraHistory.near());
-        b.putFloat(FAR, mc.gameSettings.renderDistanceChunks * 16.0f);
+        b.putFloat(FAR, farUniform(mc));
         int w = FrameTargets.scene.width(), h = FrameTargets.scene.height();
         b.putFloat(VIEW_WIDTH, w);
         b.putFloat(VIEW_HEIGHT, h);

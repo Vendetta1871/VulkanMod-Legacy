@@ -32,9 +32,12 @@ public enum GeometryCategory {
     SPIDER_EYES("spidereyes", "textured", "basic"),
     BEACON_BEAM("beaconbeam", "textured", "basic"),
     ENTITIES_TRANSLUCENT("entities_translucent", "entities", "textured_lit", "textured", "basic"),
-    /** Distant terrain (AUDIT 5.16, contract B): Iris' Distant Horizons programs. Drawn by the LOD renderer. */
-    LOD_OPAQUE("dh_terrain"),
-    LOD_TRANSLUCENT("dh_water");
+    /**
+     * Distant terrain (AUDIT 5.16), drawn by the LOD renderer: Iris' Distant Horizons programs
+     * (contract B), else the pack's own terrain and water programs (OptiFine-only packs).
+     */
+    LOD_OPAQUE("dh_terrain", "terrain"),
+    LOD_TRANSLUCENT("dh_water", "water");
 
     /** Every program name a pack may define. */
     /** In a fixed order: it decides the attachments, and {@code Set.of} iterates differently in each JVM, which defeats the SPIR-V cache. */

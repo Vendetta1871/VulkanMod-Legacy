@@ -45,6 +45,9 @@ public final class LodRenderer {
     private long sectionsBuf, sectionsAlloc, sectionsPtr;
     private long modelsBuf, modelsAlloc, modelsPtr;
     private long tintsBuf, tintsAlloc, tintsPtr;
+    /** Per model: the pack's block.properties attribute of its block tag (record word 8). */
+    private long packIdsBuf, packIdsAlloc, packIdsPtr;
+    private int modelCount;
     private final long[] uboBuf, uboAlloc, uboPtr, cmdBuf, cmdAlloc, cmdPtr, coverBuf, coverAlloc, coverPtr, stagingBuf, stagingAlloc, stagingPtr;
 
     // GPU culling (L6): per-slot meta, per-frame candidates, device-written commands and counts, Hi-Z.
@@ -101,6 +104,8 @@ public final class LodRenderer {
             r = hostBuffer(stack, 65536L * 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             modelsBuf = r[0]; modelsAlloc = r[1]; modelsPtr = r[2];
             MemoryUtil.memSet(modelsPtr, 0, 65536L * 64);
+            r = hostBuffer(stack, 65536L * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            packIdsBuf = r[0]; packIdsAlloc = r[1]; packIdsPtr = r[2];
             r = hostBuffer(stack, (long) Bakery.TINT_STRIDE * Bakery.TINT_SLOTS * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             tintsBuf = r[0]; tintsAlloc = r[1]; tintsPtr = r[2];
         }
@@ -187,6 +192,8 @@ public final class LodRenderer {
     public void uploadModel(Bakery.Upload u) {
         long base = modelsPtr + (long) u.model() * 64;
         for (int i = 0; i < 16; i++) MemoryUtil.memPutInt(base + i * 4L, u.record()[i]);
+        MemoryUtil.memPutInt(packIdsPtr + u.model() * 4L, net.vesu.shader.PackIds.block(u.record()[8]));
+        modelCount = Math.max(modelCount, u.model() + 1);
         while (tiles.size() <= u.model()) tiles.add(null);
         tiles.set(u.model(), u.tiles());
         int rowsNeeded = (u.model() >> 8) + 1;
@@ -812,18 +819,20 @@ public final class LodRenderer {
         if (packSetLayout != 0) return;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
-            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(6, stack);
+            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(7, stack);
             b.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
             for (int i = 1; i < 5; i++) {
                 b.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
             }
             // The coverage grid: distant water drops what vanilla has built.
             b.get(5).binding(5).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
+            // The pack's block ids per model (mc_Entity in its own terrain programs).
+            b.get(6).binding(6).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
             check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(b), null, p), "pack set layout");
             packSetLayout = p.get(0);
             VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
             sizes.get(0).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(frames);
-            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 5);
+            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 6);
             check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
                     .maxSets(frames).pPoolSizes(sizes), null, p), "pack pool");
             packPool = p.get(0);
@@ -842,9 +851,9 @@ public final class LodRenderer {
                 packUbo[i] = r[0];
                 packUboAlloc[i] = r[1];
                 packUboPtr[i] = r[2];
-                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf, coverBuf[i]};
-                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(6, stack);
-                for (int k = 0; k < 6; k++) {
+                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf, coverBuf[i], packIdsBuf};
+                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(7, stack);
+                for (int k = 0; k < 7; k++) {
                     VkDescriptorBufferInfo.Buffer bi = VkDescriptorBufferInfo.calloc(1, stack).buffer(bufs[k]).offset(0).range(VK_WHOLE_SIZE);
                     w.get(k).sType$Default().dstSet(packSets[i]).dstBinding(k).descriptorCount(1).pBufferInfo(bi)
                             .descriptorType(k == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -861,6 +870,10 @@ public final class LodRenderer {
         destroyPackPipeline();
         packToken = token;
         ensurePackSets();
+        // Another pack, other block.properties ids.
+        for (int m = 0; m < modelCount; m++) {
+            MemoryUtil.memPutInt(packIdsPtr + m * 4L, net.vesu.shader.PackIds.block(MemoryUtil.memGetInt(modelsPtr + m * 64L + 32)));
+        }
         net.vesu.vulkan.LodPackProgram prog = net.vesu.vulkan.LodPackBridge.program(false);
         if (prog == null) return false;
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -951,7 +964,7 @@ public final class LodRenderer {
      */
     public boolean drawPack(org.joml.Matrix4f mvp, org.joml.Matrix4f modelView, int camBX, int camBY, int camBZ,
                             float fx, float fy, float fz, org.joml.Matrix4f invMvp, int[] coverBits, int coverX, int coverZ,
-                            int coverN, boolean flipY) {
+                            int coverN, boolean flipY, boolean dropCovered) {
         if (!packPipelines()) return false;
         int words = (coverN * coverN * 16 + 31) / 32;
         for (int i = 0; i < words; i++) MemoryUtil.memPutInt(coverPtr[frame] + i * 4L, coverBits[i]);
@@ -962,7 +975,8 @@ public final class LodRenderer {
         u.putFloat(144, fx).putFloat(148, fy).putFloat(152, fz).putFloat(156, 0);
         invMvp.get(160, u);
         u.putInt(224, coverX).putInt(228, coverN).putInt(232, coverZ).putInt(236, 1);
-        u.putFloat(240, FrameTargets.scene.width()).putFloat(244, FrameTargets.scene.height()).putFloat(248, flipY ? -1 : 1).putFloat(252, 0);
+        u.putFloat(240, FrameTargets.scene.width()).putFloat(244, FrameTargets.scene.height()).putFloat(248, flipY ? -1 : 1)
+                .putFloat(252, dropCovered ? 1 : 0);
         if (opaqueDraws > 0) drawPackPass(packOpaque, false, 0, opaqueDraws, 8);
         return true;
     }
@@ -1035,7 +1049,7 @@ public final class LodRenderer {
                 for (int i = 0; i < ub.length; i++) MemoryManager.freeBuffer(ub[i], ua[i]);
             });
         }
-        long[] all = {arena, arenaAlloc, sectionsBuf, sectionsAlloc, modelsBuf, modelsAlloc, tintsBuf, tintsAlloc};
+        long[] all = {arena, arenaAlloc, sectionsBuf, sectionsAlloc, modelsBuf, modelsAlloc, tintsBuf, tintsAlloc, packIdsBuf, packIdsAlloc};
         // The image defers its own destruction; queued tasks must not queue more tasks.
         atlas.free();
         destroyHiz();
