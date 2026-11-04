@@ -244,6 +244,8 @@ public final class LodSession {
         } else {
             renderer.drawOpaque();
         }
+        int ao = renderer.ssao().samples();
+        if (ao > 0 && drawnSections > 0) renderer.recordSsao(viewProj, ao);
         if ((frame & 255) == 0) cleanup();
     }
 
@@ -548,6 +550,7 @@ public final class LodSession {
         if (renderer != null) {
             l.add(String.format("LOD arena %d/%d MB", renderer.arenaUsedBytes() >> 20, renderer.arenaCapacityBytes() >> 20));
         }
+        if (renderer != null) l.add("LOD SSAO " + renderer.ssao().modeLabel());
         l.add(String.format("LOD ingest %d, save %d", ingest.queued(), world.saveService().queued()));
         if (importer != null) l.add(importer.progress());
         if (generator != null && Initializer.CONFIG.lodGenerationDistance > 0) l.add(generator.progress());

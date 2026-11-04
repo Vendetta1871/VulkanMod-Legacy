@@ -181,6 +181,17 @@ public final class VesuOptionPages {
                                     default -> "Off";
                                 }, () -> cfg().lodFog, v -> cfg().lodFog = v)
                                 .tooltip("Fog follows the LOD distance instead of the render distance; the fade blends the outer edge into the sky."),
+                        new Option.Cycle<>("LOD Ambient Occlusion", Storage.VESU, new String[]{"auto", "basic", "better", "best", "off"},
+                                m -> switch (m) {
+                                    case "auto" -> "Auto";
+                                    case "basic" -> "Basic";
+                                    case "better" -> "Better";
+                                    case "best" -> "Best";
+                                    default -> "Off";
+                                }, () -> cfg().lodSsao, v -> cfg().lodSsao = v)
+                                .tooltip("Screen-space shading in the corners of distant terrain, which has no smooth lighting. "
+                                        + "Auto picks by the graphics card. Not used with shader packs.")
+                                .impact(Impact.LOW),
                         vesuSlider("LOD Generation Distance", 0, 512, 16.0f,
                                 v -> Math.round(v) == 0 ? "Off" : chunks(v), () -> (float) cfg().lodGenerationDistance,
                                 v -> cfg().lodGenerationDistance = Math.round(v / 16.0f) * 16)

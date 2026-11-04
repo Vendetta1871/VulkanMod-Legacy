@@ -800,11 +800,24 @@ public final class LodRenderer {
         Drawer.forgetBoundPipeline(cmd);
     }
 
+    private LodSsao ssao;
+
+    public LodSsao ssao() {
+        if (ssao == null) ssao = new LodSsao();
+        return ssao;
+    }
+
+    /** SSAO over this frame's LOD pixels (AUDIT 5.15); inside scene rendering, after the opaque LODs. */
+    public void recordSsao(org.joml.Matrix4f viewProj, int samples) {
+        ssao().record(Drawer.currentCommandBuffer(), frame, uboBuf[frame], coverBuf[frame], viewProj, samples);
+    }
+
     public int candidates() {
         return opaqueCandidates + translucentCandidates;
     }
 
     public void destroy() {
+        if (ssao != null) ssao.destroy();
         long[] all = {arena, arenaAlloc, sectionsBuf, sectionsAlloc, modelsBuf, modelsAlloc, tintsBuf, tintsAlloc};
         // The image defers its own destruction; queued tasks must not queue more tasks.
         atlas.free();

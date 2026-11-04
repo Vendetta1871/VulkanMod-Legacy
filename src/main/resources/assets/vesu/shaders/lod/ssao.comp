@@ -1,0 +1,117 @@
+#version 450
+// LOD SSAO (AUDIT 5.15): ambient occlusion for LOD pixels only, without a shader pack.
+// A pixel is a LOD pixel when it has geometry and lies outside the sections vanilla has
+// built (the coverage grid the LOD fragments discard against); entities are not drawn yet.
+// BASIC/BETTER/BEST differ by the sample count of a golden-angle hemisphere around the
+// face normal, which is rebuilt from the depth and snapped to the nearest axis (terrain
+// is made of axis-aligned faces). Samples landing on vanilla pixels read the main depth too.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std140, set = 0, binding = 0) uniform Frame {
+    mat4 viewProj;
+    ivec4 camBlock;
+    vec4 camFrac;
+    vec4 fogColor;
+    vec4 fog;
+    vec4 lodFade;
+    ivec4 cover;
+};
+layout(set = 0, binding = 1) uniform sampler2D depthTex;
+layout(set = 0, binding = 2, r32f) uniform writeonly image2D aoOut;
+layout(std430, set = 0, binding = 3) readonly buffer Cover { uint coverBits[]; };
+
+layout(push_constant) uniform P {
+    mat4 invViewProj;
+    ivec4 params;   // x, y: size; z: samples; w: 1 for reverse-Z
+} pc;
+
+bool reverseZ() { return pc.params.w != 0; }
+
+bool isFar(float d) { return reverseZ() ? d <= 0.0 : d >= 1.0; }
+
+// Depth a is nearer the camera than depth b.
+bool nearer(float a, float b) { return reverseZ() ? a > b : a < b; }
+
+vec3 unproject(vec2 uv, float d) {
+    vec4 p = pc.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+    return p.xyz / p.w;
+}
+
+bool covered(vec3 rel) {
+    if (cover.w == 0) return false;
+    vec3 p = camFrac.xyz + rel;
+    ivec3 b = camBlock.xyz + ivec3(floor(p));
+    if (b.y < 0 || b.y > 255) return false;
+    int gx = (b.x >> 4) - cover.x, gz = (b.z >> 4) - cover.z, n = cover.y;
+    if (gx < 0 || gz < 0 || gx >= n || gz >= n) return false;
+    int bit = (gz * n + gx) * 16 + (b.y >> 4);
+    return (coverBits[bit >> 5] & (1u << (bit & 31))) != 0u;
+}
+
+vec3 axisNormal(vec3 n) {
+    vec3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) return vec3(sign(n.x), 0.0, 0.0);
+    if (a.y >= a.z) return vec3(0.0, sign(n.y), 0.0);
+    return vec3(0.0, 0.0, sign(n.z));
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = pc.params.xy;
+    if (any(greaterThanEqual(px, size))) return;
+    vec2 texel = 1.0 / vec2(size);
+    vec2 uv = (vec2(px) + 0.5) * texel;
+    float d = texelFetch(depthTex, px, 0).r;
+    if (isFar(d)) { imageStore(aoOut, px, vec4(1.0)); return; }
+    vec3 p = unproject(uv, d);
+    // Half a block toward the camera keeps a face on the shared plane inside its own voxel.
+    if (covered(p - normalize(p) * 0.05)) { imageStore(aoOut, px, vec4(1.0)); return; }
+
+    // Normal from the neighbor with the smaller depth step on each axis (no smearing over edges).
+    ivec2 m = size - 1;
+    float dl = texelFetch(depthTex, clamp(px - ivec2(1, 0), ivec2(0), m), 0).r;
+    float dr = texelFetch(depthTex, clamp(px + ivec2(1, 0), ivec2(0), m), 0).r;
+    float du = texelFetch(depthTex, clamp(px - ivec2(0, 1), ivec2(0), m), 0).r;
+    float dd = texelFetch(depthTex, clamp(px + ivec2(0, 1), ivec2(0), m), 0).r;
+    vec3 ex = abs(dr - d) < abs(d - dl) ? unproject(uv + vec2(texel.x, 0), dr) - p : p - unproject(uv - vec2(texel.x, 0), dl);
+    vec3 ey = abs(dd - d) < abs(d - du) ? unproject(uv + vec2(0, texel.y), dd) - p : p - unproject(uv - vec2(0, texel.y), du);
+    vec3 n = cross(ex, ey);
+    if (dot(n, p) > 0.0) n = -n;
+    n = axisNormal(n);
+
+    float dist = length(p);
+    // LOD voxels grow with distance (screen-size descent), so the radius does too.
+    float radius = clamp(dist * 0.006, 1.5, 24.0);
+    vec3 t = abs(n.y) > 0.5 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 b = normalize(cross(n, t));
+    t = cross(b, n);
+
+    int samples = pc.params.z;
+    // The spiral turns with the pixel's place in a 4x4 tile; the apply pass averages each 4x4
+    // block, so the pattern cancels out instead of showing as noise.
+    const float BAYER[16] = float[](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);
+    float rot = (BAYER[(px.y & 3) * 4 + (px.x & 3)] + 0.5) / 16.0 * 6.2831853;
+    vec3 origin = p + n * 0.05 * radius;
+    float hits = 0.0;
+    for (int i = 0; i < samples; i++) {
+        float f = (float(i) + 0.5) / float(samples);
+        float a = float(i) * 2.3999632 + rot;
+        float r = sqrt(f);
+        vec3 h = vec3(cos(a) * r, sin(a) * r, sqrt(max(0.0, 1.0 - f)));
+        float len = mix(0.15, 1.0, f * f) * radius;
+        vec3 s = origin + (t * h.x + b * h.y + n * h.z) * len;
+        vec4 c = viewProj * vec4(s, 1.0);
+        if (c.w <= 0.0) continue;
+        vec3 ndc = c.xyz / c.w;
+        vec2 suv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0)))) continue;
+        float sd = textureLod(depthTex, suv, 0.0).r;
+        if (!nearer(sd, ndc.z)) continue;
+        // Range check: geometry far in front of the sample does not occlude it.
+        float gap = length(s) - length(unproject(suv, sd));
+        hits += 1.0 - smoothstep(radius, radius * 2.0, gap);
+    }
+    // Softer than a full hemisphere term: vanilla terrain next to the LODs has only smooth lighting.
+    float ao = pow(1.0 - hits / float(max(samples, 1)), 1.25);
+    imageStore(aoOut, px, vec4(ao));
+}
