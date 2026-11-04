@@ -52,7 +52,7 @@ public final class RtScene {
     static final boolean LOG = Env.get("VESU_RT_LOG") != null;
 
     /** Per-section state, owned by the section's VBO. */
-    public static final class Section {
+    public static final class Section implements RtCompaction.Target {
         int index = -1;
         int arenaOffset, vertexCount;
         int originX, originY, originZ;
@@ -66,6 +66,14 @@ public final class RtScene {
 
         /** Holds geometry in the scene (unplaced/closed sections are not re-added by a draw). */
         public boolean isRegistered() { return index >= 0; }
+
+        @Override public long blas() { return blas; }
+        @Override public RtBuffer blasBuffer() { return blasBuffer; }
+        @Override public void compacted(long blas, RtBuffer buffer, long address) {
+            this.blas = blas;
+            this.blasBuffer = buffer;
+            this.blasAddress = address;
+        }
     }
 
     private static final ArrayList<Section> sections = new ArrayList<>();

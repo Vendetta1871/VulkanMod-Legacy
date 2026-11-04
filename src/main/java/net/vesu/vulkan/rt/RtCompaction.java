@@ -29,7 +29,17 @@ final class RtCompaction {
     /** Below this saving the copy is not worth its build-stage time. */
     private static final double MIN_SAVING = 0.10;
 
-    private record Pending(RtScene.Section section, long blas, int query, long readyFrame) {}
+    /** A BLAS owner: a vanilla section or a LOD node. */
+    interface Target {
+        long blas();
+
+        RtBuffer blasBuffer();
+
+        /** The compacted copy replaces the BLAS (the original is released by the caller). */
+        void compacted(long blas, RtBuffer buffer, long address);
+    }
+
+    private record Pending(Target section, long blas, int query, long readyFrame) {}
 
     private static long pool;
     private static final int[] freeQueries = new int[QUERIES];
@@ -54,10 +64,10 @@ final class RtCompaction {
     }
 
     /** A section's BLAS was just recorded for building; its size is queried after the build barrier. */
-    static void onBuilt(RtScene.Section s) {
+    static void onBuilt(Target s) {
         ensurePool();
         if (freeTop == 0) return;
-        built.add(new Pending(s, s.blas, freeQueries[--freeTop], RtBuffer.frame() + RtBuffer.delayFrames()));
+        built.add(new Pending(s, s.blas(), freeQueries[--freeTop], RtBuffer.frame() + RtBuffer.delayFrames()));
     }
 
     /** After the barrier that ends the BLAS builds: writes this frame's compacted-size queries. */
@@ -86,8 +96,8 @@ final class RtCompaction {
             while (!waiting.isEmpty() && copies < MAX_COPIES_PER_FRAME
                     && waiting.peek().readyFrame <= RtBuffer.frame()) {
                 Pending p = waiting.peek();
-                RtScene.Section s = p.section;
-                if (s.blas != p.blas) {
+                Target s = p.section;
+                if (s.blas() != p.blas) {
                     waiting.poll();
                     freeQueries[freeTop++] = p.query;
                     continue;
@@ -98,7 +108,7 @@ final class RtCompaction {
                 waiting.poll();
                 freeQueries[freeTop++] = p.query;
                 long size = result.get(0);
-                if (rc != VK_SUCCESS || size <= 0 || size > s.blasBuffer.size * (1.0 - MIN_SAVING)) continue;
+                if (rc != VK_SUCCESS || size <= 0 || size > s.blasBuffer().size * (1.0 - MIN_SAVING)) continue;
 
                 RtBuffer buffer = RtBuffer.create(size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false);
                 LongBuffer pAs = stack.mallocLong(1);
@@ -112,10 +122,10 @@ final class RtCompaction {
                 }
                 long compactedAs = pAs.get(0);
                 vkCmdCopyAccelerationStructureKHR(cmd, VkCopyAccelerationStructureInfoKHR.calloc(stack).sType$Default()
-                        .src(s.blas).dst(compactedAs).mode(VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR));
+                        .src(s.blas()).dst(compactedAs).mode(VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR));
 
-                long oldAs = s.blas;
-                RtBuffer oldBuffer = s.blasBuffer;
+                long oldAs = s.blas();
+                RtBuffer oldBuffer = s.blasBuffer();
                 bytesBefore += oldBuffer.size;
                 bytesAfter += size;
                 // This frame's copy and earlier frames' traces still read the original.
@@ -123,11 +133,9 @@ final class RtCompaction {
                     vkDestroyAccelerationStructureKHR(Vulkan.getDevice(), oldAs, null);
                     oldBuffer.destroyNow();
                 });
-                s.blas = compactedAs;
-                s.blasBuffer = buffer;
-                s.blasAddress = vkGetAccelerationStructureDeviceAddressKHR(Vulkan.getDevice(),
+                s.compacted(compactedAs, buffer, vkGetAccelerationStructureDeviceAddressKHR(Vulkan.getDevice(),
                         VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack).sType$Default()
-                                .accelerationStructure(compactedAs));
+                                .accelerationStructure(compactedAs)));
                 copies++;
             }
         }

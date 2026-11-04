@@ -31,7 +31,7 @@ import static org.lwjgl.vulkan.VK13.*;
  * quad: color RGBA8, sky | block light << 8; then four positions per quad, node-relative),
  * so the instances carry {@code INSTANCE_ENTITY} and {@link RtScene#MASK_ENTITY}: shadow,
  * indirect and reflection rays see them, primary rays (terrain masks) do not. Translucent
- * quads (water) stay out. Builds are budgeted per frame; a node the LOD renderer stops
+ * quads (water) stay out. Builds are budgeted per frame and compacted (RtCompaction); a node the LOD renderer stops
  * drawing is released after a while, and with the node.</p>
  */
 public final class RtLod {
@@ -41,7 +41,7 @@ public final class RtLod {
     /** Frames a node stays in the scene after its last draw (turning around keeps the ring). */
     private static final int KEEP_FRAMES = 600;
 
-    private static final class Entry {
+    private static final class Entry implements RtCompaction.Target {
         final long key;
         final int ox, oy, oz, scale;
         long[] quads;
@@ -51,6 +51,14 @@ public final class RtLod {
         int builtQuads;
         long lastWanted;
         boolean queued;
+
+        @Override public long blas() { return blas; }
+        @Override public RtBuffer blasBuffer() { return blasBuffer; }
+        @Override public void compacted(long blas, RtBuffer buffer, long address) {
+            this.blas = blas;
+            this.blasBuffer = buffer;
+            this.blasAddress = address;
+        }
 
         Entry(long key, int ox, int oy, int oz, int scale) {
             this.key = key;
@@ -223,7 +231,8 @@ public final class RtLod {
             geometry.get(0).geometry().triangles().indexData().deviceAddress(RtBuffer.addressOf(ib.getId()));
             VkAccelerationStructureBuildGeometryInfoKHR info = infos.get(i).sType$Default()
                     .type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                    .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+                    .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
                     .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
                     .geometryCount(1)
                     .pGeometries(geometry);
@@ -257,6 +266,7 @@ public final class RtLod {
         long base = (scratch.address + scratchAlign - 1) / scratchAlign * scratchAlign;
         for (int i = 0; i < count; i++) infos.get(i).scratchData().deviceAddress(base + scratchOffsets[i]);
         vkCmdBuildAccelerationStructuresKHR(cmd, infos, ranges);
+        for (Entry e : batch) RtCompaction.onBuilt(e);
         if (RtScene.LOG) {
             Initializer.LOGGER.info("[rt] LOD: built {} BLAS ({} quads), {} in the scene, {} queued", count, quads,
                     entries.size(), queue.size());
