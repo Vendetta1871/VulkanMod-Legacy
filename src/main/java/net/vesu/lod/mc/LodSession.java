@@ -47,6 +47,8 @@ public final class LodSession {
         int childMask = -1;
         int lastSeen;
         int requestedAt = -1000;
+        /** The frame its mesh arrived: its copy runs after the shadow map's commands. */
+        int meshFrame = -1;
 
         Node(long key) {
             this.key = key;
@@ -259,6 +261,7 @@ public final class LodSession {
         packOpen = renderer.drawPack(viewProj, mv, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz),
                 invViewProj.set(viewProj).invert(), cover, coverX, coverZ, coverN, !net.vesu.vulkan.FrameTargets.packSpace(),
                 packTerrain);
+        renderShadow(mc);
         frameOpen = false;
         if ((frame & 255) == 0) cleanup();
     }
@@ -347,6 +350,7 @@ public final class LodSession {
             if (n.quadStart >= 0) renderer.freeQuads(n.quadStart, n.quadCount);
             n.quadStart = start;
             n.quadCount = r.quads.length;
+            n.meshFrame = frame;
             System.arraycopy(r.counts, 0, n.counts, 0, MeshResult.GROUPS);
             n.childMask = r.childMask;
             if (n.slot < 0 && r.quads.length > 0) {
@@ -429,6 +433,10 @@ public final class LodSession {
     }
 
     private boolean inFrustum(double x0, double y0, double z0, double size) {
+        return inPlanes(planes, x0, y0, z0, size);
+    }
+
+    private boolean inPlanes(Vector4f[] planes, double x0, double y0, double z0, double size) {
         float ax = (float) (x0 - camX), ay = (float) (y0 - camY), az = (float) (z0 - camZ);
         float bx = ax + (float) size, by = ay + (float) size, bz = az + (float) size;
         for (Vector4f p : planes) {
@@ -478,6 +486,73 @@ public final class LodSession {
             }
         }
         draw(n, x0, y0, z0, size);
+    }
+
+    // ---- The pack's shadow map ----
+
+    private final Matrix4f shadowMvp = new Matrix4f(), shadowInv = new Matrix4f();
+    private final Vector4f[] shadowPlanes = new Vector4f[6];
+    private double vanillaBlocks;
+
+    /**
+     * Levels 3 and 4 into the pack's shadow map past the vanilla distance, for long-range sun
+     * shadows (AUDIT 5.16, the lodPackShadows option). Positions are camera-relative, so the
+     * light's view applies as it does to vanilla terrain.
+     */
+    private void renderShadow(Minecraft mc) {
+        if (!Initializer.CONFIG.lodPackShadows || net.vesu.vulkan.LodPackBridge.shadowProgram() == null
+                || net.vesu.vulkan.LodPackBridge.shadowCommands() == null) return;
+        Matrix4f view = net.vesu.shader.FrameUniforms.shadowView();
+        net.vesu.shader.FrameUniforms.shadowProjectionRemapped().mul(view, shadowMvp);
+        for (int i = 0; i < 6; i++) {
+            if (shadowPlanes[i] == null) shadowPlanes[i] = new Vector4f();
+            shadowMvp.frustumPlane(i, shadowPlanes[i]);
+        }
+        vanillaBlocks = mc.gameSettings.renderDistanceChunks * 16.0;
+        int r = (int) Math.ceil(lodBlocks / 512.0);
+        int cx = (int) Math.floor(camX / 512.0), cz = (int) Math.floor(camZ / 512.0);
+        for (int dz = -r; dz <= r; dz++) {
+            for (int dx = -r; dx <= r; dx++) {
+                shadowVisit(SectionKey.of(4, cx + dx, 0, cz + dz));
+            }
+        }
+        int bx = (int) Math.floor(camX), by = (int) Math.floor(camY), bz = (int) Math.floor(camZ);
+        renderer.drawPackShadow(shadowMvp, view, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz),
+                shadowInv.set(shadowMvp).invert(), net.vesu.vulkan.LodPackBridge.shadowResolution(), (int) vanillaBlocks);
+    }
+
+    private void shadowVisit(long key) {
+        int lvl = SectionKey.lvl(key);
+        double size = 32 << lvl;
+        double x0 = SectionKey.x(key) * size, y0 = SectionKey.y(key) * size, z0 = SectionKey.z(key) * size;
+        if (y0 >= 256 || y0 + size <= 0) return;
+        if (!inRange(x0, z0, size)) return;
+        // Wholly inside the vanilla distance: vanilla terrain is in the map there.
+        double fx = Math.max(Math.abs(x0 - camX), Math.abs(x0 + size - camX));
+        double fz = Math.max(Math.abs(z0 - camZ), Math.abs(z0 + size - camZ));
+        if (fx * fx + fz * fz < vanillaBlocks * vanillaBlocks) return;
+        if (!inPlanes(shadowPlanes, x0, y0, z0, size)) return;
+        Node n = nodes.get(key);
+        if (n == null || !n.ready()) return;
+        if (lvl == 4 && n.childMask != 0) {
+            boolean all = true;
+            for (int o = 0; o < 8 && all; o++) {
+                if ((n.childMask & 1 << o) == 0) continue;
+                Node c = nodes.get(SectionKey.child(key, o));
+                all = c != null && c.ready() && c.meshFrame != frame;
+            }
+            if (all) {
+                for (int o = 0; o < 8; o++) if ((n.childMask & 1 << o) != 0) shadowVisit(SectionKey.child(key, o));
+                return;
+            }
+        }
+        if (n.quadStart < 0 || n.slot < 0 || n.meshFrame == frame) return;
+        long q = n.quadStart;
+        for (int g = 0; g < MeshResult.GROUPS; g++) {
+            int c = n.counts[g];
+            if (c > 0 && g != MeshResult.G_TRANSLUCENT) renderer.addShadow(q, c, n.slot);
+            q += c;
+        }
     }
 
     private int[] opaqueSlots = new int[4096], transSlots = new int[1024];

@@ -86,7 +86,17 @@ ivec2 vkm_lodLight() {
     return ivec2(int(light >> 4) * 16 + 8, int(light & 15u) * 16 + 8);
 }
 
-#define vaPosition vkm_lodPosition()
+// The camera-relative position for the fragment stage: the shadow map's distance cut,
+// which the fragment's coordinates cannot give once a pack distorts its map.
+layout(location = 31) out vec3 vkmLodRel;
+
+vec3 vkm_lodPositionOut() {
+    vec3 p = vkm_lodPosition();
+    vkmLodRel = p;
+    return p;
+}
+
+#define vaPosition vkm_lodPositionOut()
 #define vaColor vkm_lodColor()
 #define vaUV0 vec2(0.0)
 #define vaUV2 vkm_lodLight()

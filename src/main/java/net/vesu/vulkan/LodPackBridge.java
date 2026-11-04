@@ -38,6 +38,36 @@ public final class LodPackBridge {
         return FrameTargets.packRuntime().lodProgram(translucent);
     }
 
+    /** The pack's shadow program for distant terrain, or null. */
+    public static LodPackProgram shadowProgram() {
+        PackRuntime p = FrameTargets.packRuntime();
+        return p != null ? p.lodShadowProgram() : null;
+    }
+
+    /** The shadow map's command buffer while its opaque part records, or null. */
+    public static VkCommandBuffer shadowCommands() {
+        PackRuntime p = FrameTargets.packRuntime();
+        ShadowPass s = p != null ? p.shadowPass() : null;
+        return s != null ? s.lodCommands() : null;
+    }
+
+    public static int[] shadowColorFormats() {
+        return FrameTargets.packRuntime().shadowPass().colorFormats();
+    }
+
+    public static int shadowResolution() {
+        return FrameTargets.packRuntime().shadowPass().resolution();
+    }
+
+    public static int shadowDepthFormat() {
+        return FrameTargets.depthFormat();
+    }
+
+    /** Set 0 of the shadow program. */
+    public static long shadowSet() {
+        return FrameTargets.packRuntime().opaqueSet();
+    }
+
     public static int[] colorFormats() {
         return FrameTargets.packRuntime().attachmentFormats();
     }

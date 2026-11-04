@@ -673,6 +673,8 @@ public final class PackRuntime {
     private boolean dhDepthFresh;
     /** dhDepthTex1: the distant terrain's depth before dh_water; null without dh_water. */
     private Image dhDepthOpaque;
+    /** The pack's shadow program against the LOD host source: distant terrain in the shadow map (lodPackShadows). */
+    private LodPackProgram lodShadow;
 
     /** Compiles dh_terrain and dh_water against the LOD host source. A failure leaves the pack without LODs. */
     private void buildLod(IncludeExpander expander) {
@@ -717,6 +719,33 @@ public final class PackRuntime {
                 if (fs != null) fs.free();
             }
         }
+        buildLodShadow(expander);
+    }
+
+    /** The shadow program for distant terrain in the shadow map; a failure leaves the map without it. */
+    private void buildLodShadow(IncludeExpander expander) {
+        IrPack.Gbuffer g = plan.shadowProgram;
+        if (shadow == null || g == null || g.geometry != null || g.tessControl != null) return;
+        ShaderSPIRVUtils.SPIRV vs = null, fs = null;
+        try {
+            vs = ShaderSPIRVUtils.compilePackShader(pack.id + "/" + g.vertex + "#lod",
+                    expander.expandProgram(g.vertex, GeometryPrelude.vertex(plan, g, hostSource("lod/pack_lod.vsh"))),
+                    ShaderSPIRVUtils.ShaderKind.VERTEX_SHADER);
+            fs = ShaderSPIRVUtils.compilePackShader(pack.id + "/" + g.fragment + "#lod",
+                    expander.expandProgram(g.fragment, GeometryPrelude.fragment(plan, g, hostSource("lod/pack_lod.fsh"))),
+                    ShaderSPIRVUtils.ShaderKind.FRAGMENT_SHADER);
+            int mask = 0;
+            for (String t : g.targets) {
+                int at = plan.shadowTargets.indexOf(t);
+                if (at >= 0) mask |= 1 << at;
+            }
+            lodShadow = new LodPackProgram(vs.bytecode(), fs.bytecode(), mask, null, null);
+        } catch (RuntimeException | IOException e) {
+            Initializer.LOGGER.warn("[shaderpacks] {}: {} cannot draw distant terrain: {}", pack.id, g.name, e.getMessage());
+        } finally {
+            if (vs != null) vs.free();
+            if (fs != null) fs.free();
+        }
     }
 
     /** Distant terrain draws through the pack's terrain programs (no DH programs), into the scene depth. */
@@ -726,6 +755,14 @@ public final class PackRuntime {
 
     LodPackProgram lodProgram(boolean translucent) {
         return lodPrograms[translucent ? 1 : 0];
+    }
+
+    LodPackProgram lodShadowProgram() {
+        return lodShadow;
+    }
+
+    ShadowPass shadowPass() {
+        return shadow;
     }
 
     int[] attachmentFormats() {
@@ -2226,6 +2263,7 @@ public final class PackRuntime {
         destroyImages();
         for (Pipeline.Program p : programs) p.destroy();
         for (LodPackProgram p : lodPrograms) if (p != null) p.free();
+        if (lodShadow != null) lodShadow.free();
         programTables.keySet().forEach(p -> p.packPrograms = null);
         if (geometrySetLayout != 0L) vkDestroyDescriptorSetLayout(device, geometrySetLayout, null);
         if (shadow != null) shadow.destroy();

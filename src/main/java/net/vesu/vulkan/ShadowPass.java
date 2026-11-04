@@ -310,6 +310,19 @@ public final class ShadowPass {
     // ------------------------------------------------------------------------------------
     // Drawing
 
+    /** The command buffer while the opaque part of the map records (distant terrain goes there), else null. */
+    VkCommandBuffer lodCommands() {
+        return recording == this && !translucent ? cmd : null;
+    }
+
+    int[] colorFormats() {
+        return colorFormats;
+    }
+
+    int resolution() {
+        return config.resolution;
+    }
+
     /** Sends draws to the shadow command buffer until {@link #leave}. */
     public void enter() {
         mainCmd = Drawer.swapCommandBuffer(cmd);

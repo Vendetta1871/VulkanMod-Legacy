@@ -347,6 +347,7 @@ public final class LodRenderer {
         transferCmd = null;
         uploadedThisFrame = false;
         opaqueDraws = 0;
+        shadowDraws = 0;
         translucentDraws = 0;
         translucentCount = 0;
     }
@@ -371,6 +372,21 @@ public final class LodRenderer {
         MemoryUtil.memPutInt(p + 8, (int) (firstQuad * 6));
         MemoryUtil.memPutInt(p + 12, slot);
         opaqueDraws++;
+    }
+
+    /** Draws into the pack's shadow map, at the end of the translucent region (lodPackShadows). */
+    private static final int SHADOW_DRAWS = 16384;
+    private static final long SHADOW_OFFSET = (long) (2 * MAX_DRAWS - SHADOW_DRAWS) * 16;
+    private int shadowDraws;
+
+    public void addShadow(long firstQuad, int count, int slot) {
+        if (shadowDraws >= SHADOW_DRAWS || count <= 0) return;
+        long p = cmdPtr[frame] + SHADOW_OFFSET + (long) shadowDraws * 16;
+        MemoryUtil.memPutInt(p, count * 6);
+        MemoryUtil.memPutInt(p + 4, 1);
+        MemoryUtil.memPutInt(p + 8, (int) (firstQuad * 6));
+        MemoryUtil.memPutInt(p + 12, slot);
+        shadowDraws++;
     }
 
     /** Translucent draws are sorted far to near before drawing; {@code distance} in blocks. */
@@ -604,7 +620,7 @@ public final class LodRenderer {
         if (translucentCount == 0) return;
         java.util.Arrays.sort(translucentSort, 0, translucentCount);
         long base = cmdPtr[frame] + (long) MAX_DRAWS * 16;
-        int n = Math.min(translucentCount, MAX_DRAWS);
+        int n = Math.min(translucentCount, MAX_DRAWS - SHADOW_DRAWS);
         for (int k = 0; k < n; k++) {
             int i = (int) translucentSort[k];
             long p = base + (long) k * 16;
@@ -810,7 +826,7 @@ public final class LodRenderer {
     // ---- Under a shader pack (AUDIT 5.16, contract B) ----
 
     private static final int PACK_UBO_SIZE = 256;
-    private long packSetLayout, packPool, packLayout, packOpaque, packTranslucent;
+    private long packSetLayout, packPool, packLayout, packOpaque, packTranslucent, packShadow;
     private long[] packSets, packUbo, packUboAlloc, packUboPtr;
     private Object packToken;
     private final ByteBuffer drawBlock = MemoryUtil.memCalloc(net.vesu.vulkan.Drawer.DRAW_BLOCK_SIZE);
@@ -831,27 +847,29 @@ public final class LodRenderer {
             check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(b), null, p), "pack set layout");
             packSetLayout = p.get(0);
             VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
-            sizes.get(0).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(frames);
-            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 6);
+            // A set per frame for the scene, and one for the shadow map: its commands run first.
+            int sets = frames * 2;
+            sizes.get(0).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(sets);
+            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(sets * 6);
             check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
-                    .maxSets(frames).pPoolSizes(sizes), null, p), "pack pool");
+                    .maxSets(sets).pPoolSizes(sizes), null, p), "pack pool");
             packPool = p.get(0);
-            LongBuffer layouts = stack.mallocLong(frames);
-            for (int i = 0; i < frames; i++) layouts.put(i, packSetLayout);
-            LongBuffer out = stack.mallocLong(frames);
+            LongBuffer layouts = stack.mallocLong(sets);
+            for (int i = 0; i < sets; i++) layouts.put(i, packSetLayout);
+            LongBuffer out = stack.mallocLong(sets);
             check(vkAllocateDescriptorSets(device, VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
                     .descriptorPool(packPool).pSetLayouts(layouts), out), "pack sets");
-            packSets = new long[frames];
-            packUbo = new long[frames];
-            packUboAlloc = new long[frames];
-            packUboPtr = new long[frames];
-            for (int i = 0; i < frames; i++) {
+            packSets = new long[sets];
+            packUbo = new long[sets];
+            packUboAlloc = new long[sets];
+            packUboPtr = new long[sets];
+            for (int i = 0; i < sets; i++) {
                 packSets[i] = out.get(i);
                 long[] r = hostBuffer(stack, PACK_UBO_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
                 packUbo[i] = r[0];
                 packUboAlloc[i] = r[1];
                 packUboPtr[i] = r[2];
-                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf, coverBuf[i], packIdsBuf};
+                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf, coverBuf[i % frames], packIdsBuf};
                 VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(7, stack);
                 for (int k = 0; k < 7; k++) {
                     VkDescriptorBufferInfo.Buffer bi = VkDescriptorBufferInfo.calloc(1, stack).buffer(bufs[k]).offset(0).range(VK_WHOLE_SIZE);
@@ -875,7 +893,8 @@ public final class LodRenderer {
             MemoryUtil.memPutInt(packIdsPtr + m * 4L, net.vesu.shader.PackIds.block(MemoryUtil.memGetInt(modelsPtr + m * 64L + 32)));
         }
         net.vesu.vulkan.LodPackProgram prog = net.vesu.vulkan.LodPackBridge.program(false);
-        if (prog == null) return false;
+        net.vesu.vulkan.LodPackProgram shadowProg = net.vesu.vulkan.LodPackBridge.shadowProgram();
+        if (prog == null && shadowProg == null) return false;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             long res = net.vesu.vulkan.LodPackBridge.resourceSetLayout();
@@ -886,9 +905,15 @@ public final class LodRenderer {
             check(vkCreatePipelineLayout(device, VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pSetLayouts(setLayouts).pPushConstantRanges(pcr), null, p), "pack pipeline layout");
             packLayout = p.get(0);
-            packOpaque = packPipeline(stack, prog, false, "dh_terrain");
+            int[] formats = net.vesu.vulkan.LodPackBridge.colorFormats();
+            int depth = net.vesu.vulkan.LodPackBridge.DEPTH_FORMAT;
+            if (prog != null) packOpaque = packPipeline(stack, prog, false, "dh_terrain", formats, depth);
             net.vesu.vulkan.LodPackProgram water = net.vesu.vulkan.LodPackBridge.program(true);
-            if (packOpaque != 0 && water != null) packTranslucent = packPipeline(stack, water, true, "dh_water");
+            if (packOpaque != 0 && water != null) packTranslucent = packPipeline(stack, water, true, "dh_water", formats, depth);
+            if (shadowProg != null) {
+                packShadow = packPipeline(stack, shadowProg, false, "shadow", net.vesu.vulkan.LodPackBridge.shadowColorFormats(),
+                        net.vesu.vulkan.LodPackBridge.shadowDepthFormat());
+            }
         }
         return packOpaque != 0;
     }
@@ -896,10 +921,10 @@ public final class LodRenderer {
     /** Vanilla's translucent layer: alpha blending, alpha kept from the source. */
     private static final net.vesu.vulkan.Pipeline.BlendState WATER_BLEND = new net.vesu.vulkan.Pipeline.BlendState(770, 771, 1, 0);
 
-    private long packPipeline(MemoryStack stack, net.vesu.vulkan.LodPackProgram prog, boolean translucent, String name) {
+    private long packPipeline(MemoryStack stack, net.vesu.vulkan.LodPackProgram prog, boolean translucent, String name,
+                              int[] formats, int depthFormat) {
         LongBuffer p = stack.mallocLong(1);
         long vm = module(stack, prog.vertex), fm = module(stack, prog.fragment);
-        int[] formats = net.vesu.vulkan.LodPackBridge.colorFormats();
         VkPipelineColorBlendAttachmentState.Buffer blend = VkPipelineColorBlendAttachmentState.calloc(formats.length, stack);
         for (int i = 0; i < formats.length; i++) {
             net.vesu.vulkan.Pipeline.BlendState bs = prog.targetBlend != null && prog.targetBlend[i] != null ? prog.targetBlend[i] : prog.blend != null ? prog.blend : translucent ? WATER_BLEND : null;
@@ -932,7 +957,7 @@ public final class LodRenderer {
                 .layout(packLayout)
                 .pNext(VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
                         .colorAttachmentCount(formats.length).pColorAttachmentFormats(stack.ints(formats))
-                        .depthAttachmentFormat(net.vesu.vulkan.LodPackBridge.DEPTH_FORMAT)
+                        .depthAttachmentFormat(depthFormat)
                         .stencilAttachmentFormat(VK_FORMAT_UNDEFINED).address());
         int rc = vkCreateGraphicsPipelines(device, Pipeline.getPipelineCache(), info, null, p);
         vkDestroyShaderModule(device, vm, null);
@@ -945,12 +970,13 @@ public final class LodRenderer {
     }
 
     private void destroyPackPipeline() {
-        long pl = packOpaque, tl = packTranslucent, lay = packLayout;
-        packOpaque = packTranslucent = packLayout = 0;
+        long pl = packOpaque, tl = packTranslucent, sl = packShadow, lay = packLayout;
+        packOpaque = packTranslucent = packShadow = packLayout = 0;
         packToken = null;
-        if (pl == 0 && tl == 0 && lay == 0) return;
+        if (pl == 0 && tl == 0 && sl == 0 && lay == 0) return;
         MemoryManager.addToFreeable(() -> {
             if (pl != 0) vkDestroyPipeline(device, pl, null);
+            if (sl != 0) vkDestroyPipeline(device, sl, null);
             if (tl != 0) vkDestroyPipeline(device, tl, null);
             if (lay != 0) vkDestroyPipelineLayout(device, lay, null);
         });
@@ -990,7 +1016,7 @@ public final class LodRenderer {
         if (packTranslucent == 0) return;
         java.util.Arrays.sort(translucentSort, 0, translucentCount);
         long base = cmdPtr[frame] + (long) MAX_DRAWS * 16;
-        int n = Math.min(translucentCount, MAX_DRAWS);
+        int n = Math.min(translucentCount, MAX_DRAWS - SHADOW_DRAWS);
         for (int k = 0; k < n; k++) {
             int i = (int) translucentSort[k];
             long p = base + (long) k * 16;
@@ -1000,6 +1026,44 @@ public final class LodRenderer {
             MemoryUtil.memPutInt(p + 12, translucentCmd[i * 4 + 2]);
         }
         drawPackPass(packTranslucent, true, (long) MAX_DRAWS * 16, n, 17);
+    }
+
+    /**
+     * Records this frame's shadow draws (levels 3 and 4) into the pack's shadow map, through its
+     * shadow program. {@code mvp} is the light's remapped projection times its view; fragments
+     * within {@code clipRadius} blocks of the camera are dropped, vanilla terrain is there.
+     */
+    public void drawPackShadow(org.joml.Matrix4f mvp, org.joml.Matrix4f modelView, int camBX, int camBY, int camBZ,
+                               float fx, float fy, float fz, org.joml.Matrix4f invMvp, int size, int clipRadius) {
+        packPipelines();
+        VkCommandBuffer cmd = net.vesu.vulkan.LodPackBridge.shadowCommands();
+        if (packShadow == 0 || shadowDraws == 0 || cmd == null) return;
+        int set = frames + frame;
+        ByteBuffer u = MemoryUtil.memByteBuffer(packUboPtr[set], PACK_UBO_SIZE);
+        mvp.get(0, u);
+        modelView.get(64, u);
+        u.putInt(128, camBX).putInt(132, camBY).putInt(136, camBZ).putInt(140, 0);
+        u.putFloat(144, fx).putFloat(148, fy).putFloat(152, fz).putFloat(156, 0);
+        invMvp.get(160, u);
+        u.putInt(224, 0).putInt(228, clipRadius).putInt(232, 0).putInt(236, 2);
+        u.putFloat(240, size).putFloat(244, size).putFloat(248, 1).putFloat(252, 1);
+        drawBlock.putFloat(0, 1).putFloat(4, 1).putFloat(8, 1).putFloat(12, 1);
+        drawBlock.putInt(48, 8);
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+            viewport.x(0.0f).y(0.0f).width(size).height(size).minDepth(0.0f).maxDepth(1.0f);
+            vkCmdSetViewport(cmd, 0, viewport);
+            VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+            scissor.extent().set(size, size);
+            vkCmdSetScissor(cmd, 0, scissor);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, packShadow);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, packLayout, 0,
+                    stack.longs(net.vesu.vulkan.LodPackBridge.shadowSet(), packSets[set]), null);
+            net.vesu.vulkan.LodPackBridge.bindResources(cmd, packLayout);
+            vkCmdPushConstants(cmd, packLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, drawBlock);
+            drawIndirect(cmd, SHADOW_OFFSET, shadowDraws);
+        }
+        Drawer.forgetBoundPipeline(cmd);
     }
 
     private void drawPackPass(long pipeline, boolean translucent, long offset, int count, int renderStage) {
