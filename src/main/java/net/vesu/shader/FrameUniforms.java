@@ -99,6 +99,18 @@ public final class FrameUniforms {
         return lod;
     }
 
+    /**
+     * The end of the distance fog while a pack draws distant terrain: the LOD distance, as
+     * Distant Horizons moves vanilla fog out of the way; packs fog with fogStart/fogEnd and
+     * would hide the LODs. Fog that ends short of the vanilla distance (water, blindness) stays.
+     */
+    static float lodFogEnd(net.minecraft.client.Minecraft mc, float fogEnd) {
+        float vanilla = mc.gameSettings.renderDistanceChunks * 16.0f;
+        float lod = net.vesu.vulkan.VRenderSystem.lodFarPlane - 512.0f;
+        if (lod <= vanilla || fogEnd < vanilla * 0.5f || !net.vesu.vulkan.LodPackBridge.drawsLod()) return fogEnd;
+        return lod;
+    }
+
     /** Near plane of the distant terrain's own projection (AUDIT 5.16, contract B), in blocks. */
     public static final float DH_NEAR_PLANE = 16.0f;
 
@@ -332,8 +344,14 @@ public final class FrameUniforms {
         float[] fog = VRenderSystem.getShaderFogColor();
         putVec3(b, FOG_COLOR, fog[0], fog[1], fog[2]);
         b.putFloat(FOG_DENSITY, VRenderSystem.getFogDensity());
-        b.putFloat(FOG_START, VRenderSystem.getFogStart());
-        b.putFloat(FOG_END, VRenderSystem.getFogEnd());
+        float fogStart = VRenderSystem.getFogStart(), fogEnd = VRenderSystem.getFogEnd();
+        float lodFogEnd = lodFogEnd(mc, fogEnd);
+        if (lodFogEnd > fogEnd) {
+            fogStart *= lodFogEnd / fogEnd;
+            fogEnd = lodFogEnd;
+        }
+        b.putFloat(FOG_START, fogStart);
+        b.putFloat(FOG_END, fogEnd);
         b.putInt(FOG_MODE, glFogMode());
 
         long time = world.getWorldTime();

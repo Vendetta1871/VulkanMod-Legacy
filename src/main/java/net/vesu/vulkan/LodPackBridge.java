@@ -19,6 +19,12 @@ public final class LodPackBridge {
                 && p.lodProgram(false) != null;
     }
 
+    /** The current pack has a program that draws distant terrain. */
+    public static boolean drawsLod() {
+        PackRuntime p = FrameTargets.packRuntime();
+        return p != null && p.lodProgram(false) != null;
+    }
+
     /**
      * The pack has no DH programs: distant terrain goes through its terrain and water programs
      * with the scene's projection and depth, as vanilla terrain would.
