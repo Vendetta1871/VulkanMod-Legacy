@@ -667,6 +667,8 @@ public final class PackRuntime {
     /** The distant terrain's depth, in its own projection (dhDepthTex0/1); null without DH programs or inputs. */
     private Image dhDepth;
     private boolean dhDepthFresh;
+    /** dhDepthTex1: the distant terrain's depth before dh_water; null without dh_water. */
+    private Image dhDepthOpaque;
 
     /** Compiles dh_terrain and dh_water against the LOD host source. A failure leaves the pack without LODs. */
     private void buildLod(IncludeExpander expander) {
@@ -736,9 +738,13 @@ public final class PackRuntime {
 
     /** Each frame, before any geometry: no distant terrain yet, so the depth is all far. */
     private void clearDhDepth(VkCommandBuffer cmd, MemoryStack stack) {
-        if (dhDepth == null) return;
+        if (dhDepth != null) clearDepth(cmd, dhDepth.image, stack);
+        if (dhDepthOpaque != null) clearDepth(cmd, dhDepthOpaque.image, stack);
+    }
+
+    private static void clearDepth(VkCommandBuffer cmd, long image, MemoryStack stack) {
         VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
-        FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+        FrameTargets.imageBarrier(b.get(0), image, VK_IMAGE_ASPECT_DEPTH_BIT,
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
                         | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, 0,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -747,8 +753,8 @@ public final class PackRuntime {
         VkClearDepthStencilValue clear = VkClearDepthStencilValue.calloc(stack).depth(1.0f).stencil(0);
         VkImageSubresourceRange.Buffer range = VkImageSubresourceRange.calloc(1, stack);
         range.get(0).aspectMask(VK_IMAGE_ASPECT_DEPTH_BIT).levelCount(1).layerCount(1);
-        vkCmdClearDepthStencilImage(cmd, dhDepth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, clear, range);
-        FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+        vkCmdClearDepthStencilImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, clear, range);
+        FrameTargets.imageBarrier(b.get(0), image, VK_IMAGE_ASPECT_DEPTH_BIT,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
                         | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -756,6 +762,39 @@ public final class PackRuntime {
                         | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         FrameTargets.pipelineBarrier(cmd, b, stack);
+    }
+
+    /** Rendering is not active, before dh_water: dhDepthTex1 keeps the depth without distant water. */
+    void snapshotDhDepth(VkCommandBuffer cmd, MemoryStack stack) {
+        if (dhDepthOpaque == null) return;
+        long read = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        long tests = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        long rw = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(2, stack);
+        FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT, read | tests, 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        FrameTargets.imageBarrier(b.get(1), dhDepthOpaque.image, VK_IMAGE_ASPECT_DEPTH_BIT, read, 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        FrameTargets.pipelineBarrier(cmd, b, stack);
+        VkImageCopy.Buffer region = VkImageCopy.calloc(1, stack);
+        region.get(0).srcSubresource().aspectMask(VK_IMAGE_ASPECT_DEPTH_BIT).layerCount(1);
+        region.get(0).dstSubresource().aspectMask(VK_IMAGE_ASPECT_DEPTH_BIT).layerCount(1);
+        region.get(0).extent().width(dhDepth.width).height(dhDepth.height).depth(1);
+        vkCmdCopyImage(cmd, dhDepth.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                dhDepthOpaque.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0, read | tests, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | rw,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        FrameTargets.imageBarrier(b.get(1), dhDepthOpaque.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, read, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        FrameTargets.pipelineBarrier(cmd, b, stack);
+    }
+
+    private long dhDepthTex1View() {
+        return (dhDepthOpaque != null ? dhDepthOpaque : dhDepth).view;
     }
 
     /** Rendering is not active: the distant terrain's depth becomes an attachment, or readable again. */
@@ -1750,6 +1789,7 @@ public final class PackRuntime {
         if (plan.handDepthCopy) handDepthCopy = createDepthImage(scene.width(), scene.height());
         if (wantsDhDepth()) {
             dhDepth = createDhDepthImage(scene.width(), scene.height());
+            if (lodPrograms[1] != null) dhDepthOpaque = createDhDepthImage(scene.width(), scene.height());
             dhDepthFresh = true;
         }
     }
@@ -1760,7 +1800,8 @@ public final class PackRuntime {
             LongBuffer pImage = stack.mallocLong(1);
             PointerBuffer pMemory = stack.mallocPointer(1);
             MemoryManager.createImage(w, h, 1, LodPackBridge.DEPTH_FORMAT, VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                            | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pImage, pMemory);
             img.image = pImage.get(0);
             img.memory = pMemory.get(0);
@@ -1852,7 +1893,8 @@ public final class PackRuntime {
                             case "actorSpecular" -> info.get(0).sampler(nearestSampler).imageView(net.vesu.shader.PbrAtlases.actorSpecular().getTextureImageView());
                             case "specular" -> info.get(0).sampler(nearestSampler).imageView(net.vesu.shader.PbrAtlases.specular().getTextureImageView());
                             case "depthtex2" -> info.get(0).sampler(nearestSampler).imageView(handDepthCopy.view);
-                            case "dhDepthTex0", "dhDepthTex1" -> info.get(0).sampler(nearestSampler).imageView(dhDepth.view);
+                            case "dhDepthTex0" -> info.get(0).sampler(nearestSampler).imageView(dhDepth.view);
+                            case "dhDepthTex1" -> info.get(0).sampler(nearestSampler).imageView(dhDepthTex1View());
                             case "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2",
                                  "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7" -> shadow.bind(info.get(0), in.host());
                             default -> info.get(0).sampler(nearestSampler).imageView(MotionVectorPass.motionVectors.view);
@@ -1902,7 +1944,7 @@ public final class PackRuntime {
                 };
                 info.get(0).sampler(nearestSampler).imageView(atlas.getTextureImageView());
             } else if (in.isHost() && in.host().startsWith("dhDepthTex")) {
-                info.get(0).sampler(nearestSampler).imageView(dhDepth.view);
+                info.get(0).sampler(nearestSampler).imageView(in.host().equals("dhDepthTex1") ? dhDepthTex1View() : dhDepth.view);
             } else if (in.isHost()) {
                 info.get(0).sampler(nearestSampler).imageView(in.host().equals("depthtex2") ? handDepthCopy.view : depthCopy.view);
             } else {
@@ -2126,12 +2168,12 @@ public final class PackRuntime {
         }
         sceneCopy.destroy();
         if (shadow != null) shadow.destroyImages();
-        for (Image depth : new Image[]{depthCopy, handDepthCopy, dhDepth}) {
+        for (Image depth : new Image[]{depthCopy, handDepthCopy, dhDepth, dhDepthOpaque}) {
             if (depth == null) continue;
             vkDestroyImageView(Vulkan.getDevice(), depth.view, null);
             MemoryManager.freeImage(depth.image, depth.memory);
         }
-        depthCopy = handDepthCopy = dhDepth = null;
+        depthCopy = handDepthCopy = dhDepth = dhDepthOpaque = null;
         for (long[] s : staging) MemoryManager.freeBuffer(s[0], s[1]);
         staging.clear();
         boundGeneration = -1;

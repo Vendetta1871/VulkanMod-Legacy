@@ -689,8 +689,9 @@ public final class FrameTargets {
     }
 
     /** Distant terrain under a pack (AUDIT 5.16): the pack's color targets with the DH depth. */
-    static void beginLodPackPass(VkCommandBuffer cmd, MemoryStack stack) {
+    static void beginLodPackPass(VkCommandBuffer cmd, MemoryStack stack, boolean translucent) {
         VkCompat.endRendering(cmd);
+        if (translucent) pack.snapshotDhDepth(cmd, stack);
         pack.dhDepthBarrier(cmd, true, stack);
         lodPackDepth = pack.dhDepthView();
         beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);

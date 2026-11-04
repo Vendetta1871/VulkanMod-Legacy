@@ -50,9 +50,12 @@ public final class LodPackBridge {
         FrameTargets.packRuntime().bindResources(cmd, org.lwjgl.vulkan.VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layout);
     }
 
-    /** Leaves scene rendering and renders the pack's targets with the distant terrain's depth. */
-    public static void begin(VkCommandBuffer cmd, MemoryStack stack) {
-        FrameTargets.beginLodPackPass(cmd, stack);
+    /**
+     * Leaves scene rendering and renders the pack's targets with the distant terrain's depth.
+     * Before distant water, dhDepthTex1 takes a copy of that depth first.
+     */
+    public static void begin(VkCommandBuffer cmd, MemoryStack stack, boolean translucent) {
+        FrameTargets.beginLodPackPass(cmd, stack, translucent);
     }
 
     /** Back to scene rendering, everything loaded; dhDepthTex0 is readable. */

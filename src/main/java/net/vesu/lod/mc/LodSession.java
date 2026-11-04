@@ -216,6 +216,9 @@ public final class LodSession {
     private final Matrix4f dhProj = new Matrix4f();
     /** This frame draws through the pack's DH program: the CPU writes the draws, without coverage or SSAO. */
     private boolean packMode;
+    /** drawPack ran this frame: the distant water may follow. */
+    private boolean packOpen;
+    private final org.joml.Matrix4f invViewProj = new org.joml.Matrix4f();
 
     /**
      * Under a shader pack with DH programs (AUDIT 5.16, contract B), before vanilla's solid
@@ -246,7 +249,8 @@ public final class LodSession {
         }
         renderer.endUploads();
         int bx = (int) Math.floor(camX), by = (int) Math.floor(camY), bz = (int) Math.floor(camZ);
-        renderer.drawPack(viewProj, mv, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz));
+        packOpen = renderer.drawPack(viewProj, mv, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz),
+                invViewProj.set(viewProj).invert(), cover, coverX, coverZ, coverN, !net.vesu.vulkan.FrameTargets.packSpace());
         frameOpen = false;
         if ((frame & 255) == 0) cleanup();
     }
@@ -289,6 +293,12 @@ public final class LodSession {
         int ao = renderer.ssao().samples();
         if (ao > 0 && drawnSections > 0) renderer.recordSsao(viewProj, ao);
         if ((frame & 255) == 0) cleanup();
+    }
+
+    void renderPackTranslucent() {
+        if (!packOpen || renderer == null) return;
+        packOpen = false;
+        renderer.drawPackTranslucent();
     }
 
     void renderTranslucent() {
@@ -431,7 +441,9 @@ public final class LodSession {
         Node n = node(key);
         n.lastSeen = frame;
         if (!n.ready()) return;
-        if (lvl <= 1 && coveredBox(x0, y0, z0, size)) return;
+        // Under a pack vanilla terrain draws over the LODs, and packs fade it out near its edge
+        // for DH to fill: what vanilla has built stays.
+        if (lvl <= 1 && !packMode && coveredBox(x0, y0, z0, size)) return;
         if (lvl > 0 && n.childMask != 0) {
             double dx = Math.max(x0 - camX, Math.max(0, camX - (x0 + size)));
             double dy = Math.max(y0 - camY, Math.max(0, camY - (y0 + size)));

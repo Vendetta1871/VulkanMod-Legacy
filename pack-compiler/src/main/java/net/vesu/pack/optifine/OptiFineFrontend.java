@@ -1021,7 +1021,10 @@ public final class OptiFineFrontend {
         int texCoords = texCoordCount(vertex + String.join("", middleTexts), fragment);
         head.append(legacyVaryings(program, "in", texCoords, program.legacyBase(middles.size()), "", ""));
 
-        String tail = "\nvoid main() {\n    vkm_main();\n" + (geometry && written.contains(0) ? alphaTest(name) : "") + "}\n";
+        // VKM_LOD_DISCARD: a host that draws distant terrain drops what vanilla hides, after the
+        // pack's main as the alpha test.
+        String tail = "\nvoid main() {\n    vkm_main();\n" + (geometry && written.contains(0) ? alphaTest(name) : "")
+                + "#ifdef VKM_LOD_DISCARD\n    vkm_lodDiscard();\n#endif\n}\n";
         String fragmentText = head + GlslLowering.finish(fragment) + tail;
 
         StringBuilder vhead = new StringBuilder(compatHeader(program, shadow, geometry, GlslLowering.Stage.VERTEX));

@@ -20,6 +20,9 @@ layout(std140, binding = 0) uniform LodPackFrame {
     mat4 ModelViewMat;
     ivec4 LodCamBlock;
     vec4 LodCamFrac;
+    mat4 LodInvMVP;
+    ivec4 LodCover;     // x, z: chunk of the coverage grid's corner, y: grid size in chunks, w: 1 when valid
+    vec4 LodScreen;     // x, y: size in pixels, z: -1 when the viewport flips y
 };
 layout(std430, binding = 1) readonly buffer LodQuads { uvec2 lodQuads[]; };
 layout(std430, binding = 2) readonly buffer LodSections { ivec4 lodSections[]; };

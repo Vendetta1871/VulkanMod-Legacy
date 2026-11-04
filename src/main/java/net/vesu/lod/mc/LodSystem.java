@@ -308,6 +308,18 @@ public final class LodSystem {
     /** Before vanilla's translucent layer. */
     public static void renderTranslucent() {
         LodSession s = session;
+        if (s != null && net.vesu.vulkan.LodPackBridge.active() && net.vesu.vulkan.Drawer.isActive()) {
+            // The pack's DEFERRED passes run first; distant water then draws into its translucent targets.
+            net.vesu.vulkan.Drawer.snapshotOpaque();
+            net.vesu.vulkan.Drawer.enterTranslucent();
+            try {
+                s.renderPackTranslucent();
+            } catch (RuntimeException t) {
+                Initializer.LOGGER.error("[lod] render failed; LOD drawing stops", t);
+                Initializer.CONFIG.lodRendering = false;
+            }
+            return;
+        }
         if (s == null || !VRenderSystem.reverseZ || FrameTargets.phase() != FrameTargets.Phase.SCENE
                 || net.vesu.vulkan.ShadowPass.active() || !net.vesu.vulkan.Drawer.isActive()) return;
         try {

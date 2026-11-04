@@ -145,6 +145,7 @@ public final class GeometryPrelude {
             if (!isInput(plan, target)) sb.append("#define ").append(target).append(" vkmOut_").append(target).append('\n');
         }
         sb.append("#define vkm_FragCoord gl_FragCoord\n");
+        sb.append(hostPrelude(hostSource));
         if (g.name.equals("shadow")) sb.append("#define VKM_SHADOW_PASS\n");
         if (hostSource.contains("AlphaFunc")) sb.append("#define VKM_ALPHA_TEST\n").append(ALPHA_TEST);
         sb.append(Prelude.helpers());

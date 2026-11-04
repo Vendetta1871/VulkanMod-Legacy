@@ -802,8 +802,8 @@ public final class LodRenderer {
 
     // ---- Under a shader pack (AUDIT 5.16, contract B) ----
 
-    private static final int PACK_UBO_SIZE = 160;
-    private long packSetLayout, packPool, packLayout, packOpaque;
+    private static final int PACK_UBO_SIZE = 256;
+    private long packSetLayout, packPool, packLayout, packOpaque, packTranslucent;
     private long[] packSets, packUbo, packUboAlloc, packUboPtr;
     private Object packToken;
     private final ByteBuffer drawBlock = MemoryUtil.memCalloc(net.vesu.vulkan.Drawer.DRAW_BLOCK_SIZE);
@@ -812,16 +812,18 @@ public final class LodRenderer {
         if (packSetLayout != 0) return;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
-            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(5, stack);
+            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(6, stack);
             b.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
             for (int i = 1; i < 5; i++) {
                 b.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
             }
+            // The coverage grid: distant water drops what vanilla has built.
+            b.get(5).binding(5).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
             check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(b), null, p), "pack set layout");
             packSetLayout = p.get(0);
             VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
             sizes.get(0).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(frames);
-            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 4);
+            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 5);
             check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
                     .maxSets(frames).pPoolSizes(sizes), null, p), "pack pool");
             packPool = p.get(0);
@@ -840,9 +842,9 @@ public final class LodRenderer {
                 packUbo[i] = r[0];
                 packUboAlloc[i] = r[1];
                 packUboPtr[i] = r[2];
-                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf};
-                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(5, stack);
-                for (int k = 0; k < 5; k++) {
+                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf, coverBuf[i]};
+                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(6, stack);
+                for (int k = 0; k < 6; k++) {
                     VkDescriptorBufferInfo.Buffer bi = VkDescriptorBufferInfo.calloc(1, stack).buffer(bufs[k]).offset(0).range(VK_WHOLE_SIZE);
                     w.get(k).sType$Default().dstSet(packSets[i]).dstBinding(k).descriptorCount(1).pBufferInfo(bi)
                             .descriptorType(k == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -852,15 +854,15 @@ public final class LodRenderer {
         }
     }
 
-    /** The pipeline of the pack's dh_terrain, rebuilt with the pack runtime; 0 when it cannot be made. */
-    private long packPipeline() {
+    /** The pipelines of the pack's dh_terrain and dh_water, rebuilt with the pack runtime; false without dh_terrain. */
+    private boolean packPipelines() {
         Object token = net.vesu.vulkan.LodPackBridge.token();
-        if (token == packToken && packOpaque != 0) return packOpaque;
+        if (token == packToken) return packOpaque != 0;
         destroyPackPipeline();
         packToken = token;
         ensurePackSets();
         net.vesu.vulkan.LodPackProgram prog = net.vesu.vulkan.LodPackBridge.program(false);
-        if (prog == null) return 0;
+        if (prog == null) return false;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             long res = net.vesu.vulkan.LodPackBridge.resourceSetLayout();
@@ -871,60 +873,72 @@ public final class LodRenderer {
             check(vkCreatePipelineLayout(device, VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pSetLayouts(setLayouts).pPushConstantRanges(pcr), null, p), "pack pipeline layout");
             packLayout = p.get(0);
-            long vm = module(stack, prog.vertex), fm = module(stack, prog.fragment);
-            int[] formats = net.vesu.vulkan.LodPackBridge.colorFormats();
-            VkPipelineColorBlendAttachmentState.Buffer blend = VkPipelineColorBlendAttachmentState.calloc(formats.length, stack);
-            for (int i = 0; i < formats.length; i++) {
-                net.vesu.vulkan.Pipeline.BlendState bs = prog.targetBlend != null && prog.targetBlend[i] != null ? prog.targetBlend[i] : prog.blend;
-                VkPipelineColorBlendAttachmentState a = blend.get(i).colorWriteMask((prog.targetMask & 1 << i) != 0 ? 0xF : 0);
-                if (bs != null && bs.enabled) {
-                    a.blendEnable(true).srcColorBlendFactor(bs.srcRgbFactor).dstColorBlendFactor(bs.dstRgbFactor).colorBlendOp(VK_BLEND_OP_ADD)
-                            .srcAlphaBlendFactor(bs.srcAlphaFactor).dstAlphaBlendFactor(bs.dstAlphaFactor).alphaBlendOp(VK_BLEND_OP_ADD);
-                }
-            }
-            VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
-            stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT).module(vm).pName(stack.UTF8("main"));
-            stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fm).pName(stack.UTF8("main"));
-            VkGraphicsPipelineCreateInfo.Buffer info = VkGraphicsPipelineCreateInfo.calloc(1, stack);
-            info.get(0).sType$Default()
-                    .pStages(stages)
-                    .pVertexInputState(VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default())
-                    .pInputAssemblyState(VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
-                            .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST))
-                    .pViewportState(VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default().viewportCount(1).scissorCount(1))
-                    .pRasterizationState(VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
-                            .polygonMode(VK_POLYGON_MODE_FILL).cullMode(VK_CULL_MODE_NONE).frontFace(VK_FRONT_FACE_CLOCKWISE)
-                            .lineWidth(1.0f))
-                    .pMultisampleState(VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
-                            .rasterizationSamples(VK_SAMPLE_COUNT_1_BIT))
-                    .pDepthStencilState(VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
-                            .depthTestEnable(true).depthWriteEnable(true).depthCompareOp(VK_COMPARE_OP_LESS_OR_EQUAL))
-                    .pColorBlendState(VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default().pAttachments(blend))
-                    .pDynamicState(VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
-                            .pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR)))
-                    .layout(packLayout)
-                    .pNext(VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
-                            .colorAttachmentCount(formats.length).pColorAttachmentFormats(stack.ints(formats))
-                            .depthAttachmentFormat(net.vesu.vulkan.LodPackBridge.DEPTH_FORMAT)
-                            .stencilAttachmentFormat(VK_FORMAT_UNDEFINED).address());
-            int rc = vkCreateGraphicsPipelines(device, Pipeline.getPipelineCache(), info, null, p);
-            vkDestroyShaderModule(device, vm, null);
-            vkDestroyShaderModule(device, fm, null);
-            if (rc != VK_SUCCESS) {
-                Initializer.LOGGER.warn("[lod] the pack's dh_terrain pipeline failed: {}", rc);
-                return 0;
-            }
-            packOpaque = p.get(0);
+            packOpaque = packPipeline(stack, prog, false, "dh_terrain");
+            net.vesu.vulkan.LodPackProgram water = net.vesu.vulkan.LodPackBridge.program(true);
+            if (packOpaque != 0 && water != null) packTranslucent = packPipeline(stack, water, true, "dh_water");
         }
-        return packOpaque;
+        return packOpaque != 0;
+    }
+
+    /** Vanilla's translucent layer: alpha blending, alpha kept from the source. */
+    private static final net.vesu.vulkan.Pipeline.BlendState WATER_BLEND = new net.vesu.vulkan.Pipeline.BlendState(770, 771, 1, 0);
+
+    private long packPipeline(MemoryStack stack, net.vesu.vulkan.LodPackProgram prog, boolean translucent, String name) {
+        LongBuffer p = stack.mallocLong(1);
+        long vm = module(stack, prog.vertex), fm = module(stack, prog.fragment);
+        int[] formats = net.vesu.vulkan.LodPackBridge.colorFormats();
+        VkPipelineColorBlendAttachmentState.Buffer blend = VkPipelineColorBlendAttachmentState.calloc(formats.length, stack);
+        for (int i = 0; i < formats.length; i++) {
+            net.vesu.vulkan.Pipeline.BlendState bs = prog.targetBlend != null && prog.targetBlend[i] != null ? prog.targetBlend[i] : prog.blend != null ? prog.blend : translucent ? WATER_BLEND : null;
+            VkPipelineColorBlendAttachmentState a = blend.get(i).colorWriteMask((prog.targetMask & 1 << i) != 0 ? 0xF : 0);
+            if (bs != null && bs.enabled) {
+                a.blendEnable(true).srcColorBlendFactor(bs.srcRgbFactor).dstColorBlendFactor(bs.dstRgbFactor).colorBlendOp(VK_BLEND_OP_ADD)
+                        .srcAlphaBlendFactor(bs.srcAlphaFactor).dstAlphaBlendFactor(bs.dstAlphaFactor).alphaBlendOp(VK_BLEND_OP_ADD);
+            }
+        }
+        VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+        stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT).module(vm).pName(stack.UTF8("main"));
+        stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fm).pName(stack.UTF8("main"));
+        VkGraphicsPipelineCreateInfo.Buffer info = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+        info.get(0).sType$Default()
+                .pStages(stages)
+                .pVertexInputState(VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default())
+                .pInputAssemblyState(VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
+                        .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST))
+                .pViewportState(VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default().viewportCount(1).scissorCount(1))
+                .pRasterizationState(VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
+                        .polygonMode(VK_POLYGON_MODE_FILL).cullMode(VK_CULL_MODE_NONE).frontFace(VK_FRONT_FACE_CLOCKWISE)
+                        .lineWidth(1.0f))
+                .pMultisampleState(VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
+                        .rasterizationSamples(VK_SAMPLE_COUNT_1_BIT))
+                .pDepthStencilState(VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
+                        .depthTestEnable(true).depthWriteEnable(true).depthCompareOp(VK_COMPARE_OP_LESS_OR_EQUAL))
+                .pColorBlendState(VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default().pAttachments(blend))
+                .pDynamicState(VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
+                        .pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR)))
+                .layout(packLayout)
+                .pNext(VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
+                        .colorAttachmentCount(formats.length).pColorAttachmentFormats(stack.ints(formats))
+                        .depthAttachmentFormat(net.vesu.vulkan.LodPackBridge.DEPTH_FORMAT)
+                        .stencilAttachmentFormat(VK_FORMAT_UNDEFINED).address());
+        int rc = vkCreateGraphicsPipelines(device, Pipeline.getPipelineCache(), info, null, p);
+        vkDestroyShaderModule(device, vm, null);
+        vkDestroyShaderModule(device, fm, null);
+        if (rc != VK_SUCCESS) {
+            Initializer.LOGGER.warn("[lod] the pack's {} pipeline failed: {}", name, rc);
+            return 0;
+        }
+        return p.get(0);
     }
 
     private void destroyPackPipeline() {
-        long pl = packOpaque, lay = packLayout;
-        packOpaque = packLayout = 0;
-        if (pl == 0 && lay == 0) return;
+        long pl = packOpaque, tl = packTranslucent, lay = packLayout;
+        packOpaque = packTranslucent = packLayout = 0;
+        packToken = null;
+        if (pl == 0 && tl == 0 && lay == 0) return;
         MemoryManager.addToFreeable(() -> {
             if (pl != 0) vkDestroyPipeline(device, pl, null);
+            if (tl != 0) vkDestroyPipeline(device, tl, null);
             if (lay != 0) vkDestroyPipelineLayout(device, lay, null);
         });
     }
@@ -933,28 +947,61 @@ public final class LodRenderer {
      * Under a pack: draws this frame's opaque LOD commands through the pack's dh_terrain into
      * the pack's targets, with the distant terrain's own depth (dhDepthTex0). {@code mvp} is
      * the depth-remapped DH projection times {@code modelView}; positions are camera-relative.
+     * False when the pack's programs cannot draw: no distant water either.
      */
-    public void drawPack(org.joml.Matrix4f mvp, org.joml.Matrix4f modelView, int camBX, int camBY, int camBZ,
-                         float fx, float fy, float fz) {
-        if (opaqueDraws == 0) return;
-        long pipeline = packPipeline();
-        if (pipeline == 0) return;
+    public boolean drawPack(org.joml.Matrix4f mvp, org.joml.Matrix4f modelView, int camBX, int camBY, int camBZ,
+                            float fx, float fy, float fz, org.joml.Matrix4f invMvp, int[] coverBits, int coverX, int coverZ,
+                            int coverN, boolean flipY) {
+        if (!packPipelines()) return false;
+        int words = (coverN * coverN * 16 + 31) / 32;
+        for (int i = 0; i < words; i++) MemoryUtil.memPutInt(coverPtr[frame] + i * 4L, coverBits[i]);
         ByteBuffer u = MemoryUtil.memByteBuffer(packUboPtr[frame], PACK_UBO_SIZE);
         mvp.get(0, u);
         modelView.get(64, u);
         u.putInt(128, camBX).putInt(132, camBY).putInt(136, camBZ).putInt(140, 0);
         u.putFloat(144, fx).putFloat(148, fy).putFloat(152, fz).putFloat(156, 0);
+        invMvp.get(160, u);
+        u.putInt(224, coverX).putInt(228, coverN).putInt(232, coverZ).putInt(236, 1);
+        u.putFloat(240, FrameTargets.scene.width()).putFloat(244, FrameTargets.scene.height()).putFloat(248, flipY ? -1 : 1).putFloat(252, 0);
+        if (opaqueDraws > 0) drawPackPass(packOpaque, false, 0, opaqueDraws, 8);
+        return true;
+    }
+
+    /**
+     * Under a pack, after drawPack and the DEFERRED passes, before vanilla's translucent layer:
+     * the translucent LOD commands, far to near, through dh_water. Runs without draws too, so
+     * dhDepthTex1 is taken every frame.
+     */
+    public void drawPackTranslucent() {
+        if (packTranslucent == 0) return;
+        java.util.Arrays.sort(translucentSort, 0, translucentCount);
+        long base = cmdPtr[frame] + (long) MAX_DRAWS * 16;
+        int n = Math.min(translucentCount, MAX_DRAWS);
+        for (int k = 0; k < n; k++) {
+            int i = (int) translucentSort[k];
+            long p = base + (long) k * 16;
+            MemoryUtil.memPutInt(p, translucentCmd[i * 4]);
+            MemoryUtil.memPutInt(p + 4, 1);
+            MemoryUtil.memPutInt(p + 8, translucentCmd[i * 4 + 1]);
+            MemoryUtil.memPutInt(p + 12, translucentCmd[i * 4 + 2]);
+        }
+        drawPackPass(packTranslucent, true, (long) MAX_DRAWS * 16, n, 17);
+    }
+
+    private void drawPackPass(long pipeline, boolean translucent, long offset, int count, int renderStage) {
         drawBlock.putFloat(0, 1).putFloat(4, 1).putFloat(8, 1).putFloat(12, 1);
-        drawBlock.putInt(48, 8);
+        drawBlock.putInt(48, renderStage);
         VkCommandBuffer cmd = Drawer.currentCommandBuffer();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            net.vesu.vulkan.LodPackBridge.begin(cmd, stack);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, packLayout, 0,
-                    stack.longs(net.vesu.vulkan.LodPackBridge.sharedSet(), packSets[frame]), null);
-            net.vesu.vulkan.LodPackBridge.bindResources(cmd, packLayout);
-            vkCmdPushConstants(cmd, packLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, drawBlock);
-            drawIndirect(cmd, 0, opaqueDraws);
+            net.vesu.vulkan.LodPackBridge.begin(cmd, stack, translucent);
+            if (count > 0) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, packLayout, 0,
+                        stack.longs(net.vesu.vulkan.LodPackBridge.sharedSet(), packSets[frame]), null);
+                net.vesu.vulkan.LodPackBridge.bindResources(cmd, packLayout);
+                vkCmdPushConstants(cmd, packLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, drawBlock);
+                drawIndirect(cmd, offset, count);
+            }
             net.vesu.vulkan.LodPackBridge.end(cmd, stack);
         }
         Drawer.forgetBoundPipeline(cmd);
