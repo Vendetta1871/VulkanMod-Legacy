@@ -91,6 +91,9 @@ public final class OptiFineFrontend {
         macroValues.put("MC_HAND_DEPTH", "0.125");
         macroValues.put("MC_NORMAL_MAP", "");
         macroValues.put("MC_SPECULAR_MAP", "");
+        String[] dh = {"UNKNOWN", "LEAVES", "STONE", "WOOD", "METAL", "DIRT", "LAVA", "DEEPSLATE", "SNOW", "SAND", "TERRACOTTA",
+                "NETHER_STONE", "WATER", "GRASS", "AIR", "ILLUMINATED"};
+        for (int i = 0; i < dh.length; i++) macroValues.put("DH_BLOCK_" + dh[i], String.valueOf(i));
     }
 
     /**
@@ -310,7 +313,8 @@ public final class OptiFineFrontend {
         String prefix = GENERATED + folders[0].replace("/", "") + "/";
 
         for (String name : GeometryCategory.PROGRAMS) {
-            String program = name.equals("shadow") ? "shadow" : "gbuffers_" + name;
+            String program = GeometryCategory.fileName(name);
+            if (name.startsWith("dh_") && !macroValues.containsKey("DISTANT_HORIZONS")) continue;
             if (!enabled(program, folders)) continue;
             Lowered l = lowerProgram(program, folders, prefix, true, false);
             if (l == null) continue;
@@ -343,7 +347,8 @@ public final class OptiFineFrontend {
             g.add("inputs", inputs);
             applyBlend(g, program);
             gbuffers.add(name, g);
-            vertex.addAll(l.vertexAttributes);
+            // The LOD renderer brings its own vertices: they do not widen the terrain format.
+            if (!name.startsWith("dh_")) vertex.addAll(l.vertexAttributes);
         }
 
         // Iris's stages: G5 has none of these, and a pack ships them for Iris only.
@@ -1091,7 +1096,7 @@ public final class OptiFineFrontend {
 
     /** The stage of {@code texture.<stage>.<name>} a program belongs to. */
     private static String stageOf(String program) {
-        if (program.startsWith("gbuffers_")) return "gbuffers";
+        if (program.startsWith("gbuffers_") || program.startsWith("dh_")) return "gbuffers";
         if (program.startsWith("deferred")) return "deferred";
         if (program.startsWith("composite") || program.equals("final")) return "composite";
         return program;
@@ -1252,7 +1257,8 @@ public final class OptiFineFrontend {
         p.samplers.add("vkf_white");
         if (stage == GlslLowering.Stage.VERTEX) {
             String projection = shadow ? "shadowProjection"
-                    : p.name.startsWith("gbuffers_hand") ? "(vkm_unremap * vkm_mvp * inverse(vkm_modelView))" : "gbufferProjection";
+                    : p.name.startsWith("gbuffers_hand") ? "(vkm_unremap * vkm_mvp * inverse(vkm_modelView))"
+                    : p.name.startsWith("dh_") ? "dhProjection" : "gbufferProjection";
             h.append("""
                     const mat4 vkm_unremap = mat4(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, -1.0, 1.0);
                     #define vkm_glVertex vec4(vaPosition, 1.0)

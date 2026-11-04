@@ -35,7 +35,8 @@ public final class IrPack {
             "gtexture", "texture", "tex", "lightmap", "normals", "specular", "actorNormals", "actorSpecular",
             "depthtex0", "depthtex1", "depthtex2",
             "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2",
-            "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7", "noisetex");
+            "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7", "noisetex",
+            "dhDepthTex0", "dhDepthTex1");
 
     /** The color attachments of the shadow pass, in order. */
     public static final List<String> SHADOW_COLORS = List.of("shadowcolor0", "shadowcolor1", "shadowcolor2", "shadowcolor3",

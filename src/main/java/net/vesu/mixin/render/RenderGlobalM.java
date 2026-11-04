@@ -34,6 +34,8 @@ public abstract class RenderGlobalM {
                                      org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> ci) {
         if (layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT && Initializer.isVulkanActive()) {
             net.vesu.lod.mc.LodSystem.renderTranslucent();
+        } else if (layer == net.minecraft.util.BlockRenderLayer.SOLID && Initializer.isVulkanActive()) {
+            net.vesu.lod.mc.LodSystem.renderPack();
         }
     }
 

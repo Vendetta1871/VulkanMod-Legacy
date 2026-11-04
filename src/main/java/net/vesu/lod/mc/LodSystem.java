@@ -43,6 +43,9 @@ public final class LodSystem {
         // VESU_LOD_GEN=<chunks>: generation distance for test runs.
         String gen = net.vesu.Env.get("VESU_LOD_GEN");
         if (gen != null) Initializer.CONFIG.lodGenerationDistance = Integer.parseInt(gen.trim());
+        // VESU_LOD_DISTANCE=<chunks>: LOD distance for test runs.
+        String distance = net.vesu.Env.get("VESU_LOD_DISTANCE");
+        if (distance != null) Initializer.CONFIG.lodDistance = Integer.parseInt(distance.trim());
     }
 
     /** VESU_LOD=0/1 overrides the setting (comparison runs). */
@@ -121,6 +124,7 @@ public final class LodSystem {
     /** Settings changed: start or stop to match them. */
     public static void applySettings() {
         Minecraft mc = Minecraft.getMinecraft();
+        net.vesu.shader.PackManager.lodChanged();
         if (!enabled()) {
             close();
             WorkerPool.stop();
@@ -273,6 +277,20 @@ public final class LodSystem {
     }
 
     // ---- Render hooks ----
+
+    /** Before vanilla's solid layer: distant terrain through the pack's DH program (AUDIT 5.16). */
+    public static void renderPack() {
+        LodSession s = session;
+        // A pack's shadow pass records alongside the whole scene: it says nothing about this draw.
+        if (s == null || !Initializer.CONFIG.lodRendering || !net.vesu.vulkan.LodPackBridge.active()
+                || !net.vesu.vulkan.Drawer.isActive()) return;
+        try {
+            s.renderPack();
+        } catch (RuntimeException t) {
+            Initializer.LOGGER.error("[lod] render failed; LOD drawing stops", t);
+            Initializer.CONFIG.lodRendering = false;
+        }
+    }
 
     /** After vanilla's cutout layer (RenderGlobal.renderBlockLayer). */
     public static void renderOpaque() {

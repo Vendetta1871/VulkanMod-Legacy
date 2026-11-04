@@ -187,9 +187,8 @@ public final class LodSession {
     private boolean frameOpen;
     private final List<Node> evict = new ArrayList<>();
 
-    /** After the vanilla opaque layers: upload what arrived, select, draw the opaque LODs. */
-    void renderOpaque() {
-        Minecraft mc = Minecraft.getMinecraft();
+    /** Start of a frame's LOD work: uploads of what arrived. */
+    private void prepare() {
         if (renderer == null) {
             long budget = (long) Math.max(64, Math.min(1024, Initializer.CONFIG.lodMeshCacheMb / 2)) << 20;
             renderer = new LodRenderer(budget);
@@ -212,7 +211,50 @@ public final class LodSession {
             renderer.uploadTints(bakery.tintTable);
         }
         applyResults();
+    }
 
+    private final Matrix4f dhProj = new Matrix4f();
+    /** This frame draws through the pack's DH program: the CPU writes the draws, without coverage or SSAO. */
+    private boolean packMode;
+
+    /**
+     * Under a shader pack with DH programs (AUDIT 5.16, contract B), before vanilla's solid
+     * layer: the LODs go into the pack's targets with their own projection and depth, and
+     * vanilla terrain drawn afterwards covers them where it exists.
+     */
+    void renderPack() {
+        Minecraft mc = Minecraft.getMinecraft();
+        prepare();
+        VRenderSystem.captureCameraMatrices(mv, proj);
+        VRenderSystem.undoDepthRemap(proj, dhProj);
+        net.vesu.shader.FrameUniforms.withPlanes(dhProj, net.vesu.shader.FrameUniforms.DH_NEAR_PLANE,
+                net.vesu.shader.FrameUniforms.dhFarPlane(), dhProj);
+        VRenderSystem.remapDepth(dhProj, dhProj);
+        dhProj.mul(mv, viewProj);
+        for (int i = 0; i < 6; i++) {
+            if (planes[i] == null) planes[i] = new Vector4f();
+            viewProj.frustumPlane(i, planes[i]);
+        }
+        buildCover(mc);
+        candOpaque = 0;
+        candTranslucent = 0;
+        packMode = true;
+        try {
+            select(mc);
+        } finally {
+            packMode = false;
+        }
+        renderer.endUploads();
+        int bx = (int) Math.floor(camX), by = (int) Math.floor(camY), bz = (int) Math.floor(camZ);
+        renderer.drawPack(viewProj, mv, bx, by, bz, (float) (camX - bx), (float) (camY - by), (float) (camZ - bz));
+        frameOpen = false;
+        if ((frame & 255) == 0) cleanup();
+    }
+
+    /** After the vanilla opaque layers: upload what arrived, select, draw the opaque LODs. */
+    void renderOpaque() {
+        Minecraft mc = Minecraft.getMinecraft();
+        prepare();
         VRenderSystem.captureCameraMatrices(mv, proj);
         proj.mul(mv, viewProj);
         for (int i = 0; i < 6; i++) {
@@ -425,7 +467,7 @@ public final class LodSession {
     private void draw(Node n, double x0, double y0, double z0, double size) {
         if (n.quadStart < 0 || n.slot < 0) return;
         drawnSections++;
-        if (renderer.gpuCull) {
+        if (renderer.gpuCull && !packMode) {
             if (candOpaque == opaqueSlots.length) opaqueSlots = java.util.Arrays.copyOf(opaqueSlots, candOpaque * 2);
             opaqueSlots[candOpaque++] = n.slot;
             if (n.counts[MeshResult.G_TRANSLUCENT] > 0) {

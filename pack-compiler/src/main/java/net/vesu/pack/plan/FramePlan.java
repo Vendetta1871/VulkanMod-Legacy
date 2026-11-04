@@ -41,11 +41,12 @@ public final class FramePlan {
     /** Host textures a post pass can sample. */
     public static final Set<String> POST_HOST_INPUTS = Set.of("sceneColor", "sceneDepth", "motion",
             "depthtex0", "depthtex1", "depthtex2", "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2", "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7",
-            "normals", "specular");
+            "normals", "specular", "dhDepthTex0", "dhDepthTex1");
     /** The shadow map exists before any geometry; the shadow pass itself cannot read it. */
     private static final Set<String> SHADOW_INPUTS = Set.of("shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw",
             "shadowcolor0", "shadowcolor1", "shadowcolor2", "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7");
-    private static final Set<String> GEOMETRY_HOST_INPUTS = Set.of("depthtex1", "depthtex2", "normals", "specular", "actorNormals", "actorSpecular");
+    private static final Set<String> GEOMETRY_HOST_INPUTS = Set.of("depthtex1", "depthtex2", "normals", "specular", "actorNormals", "actorSpecular",
+            "dhDepthTex0", "dhDepthTex1");
     /** Before and after {@code DEFERRED} in {@link #geometryImages} and {@link #geometryInputs}. */
     public static final int OPAQUE = 0, TRANSLUCENT = 1;
 
@@ -218,7 +219,9 @@ public final class FramePlan {
             for (Input in : inputs) {
                 // The shadow command buffer is submitted first, so SHADOW_COMP finds the map ready.
                 boolean shadowRead = !combination && stages.get(n) == IrPack.Stage.SHADOW_COMP && in.isHost() && in.host().startsWith("shadow");
-                if (in.isHost() && !combination && n < prologueSteps && !shadowRead) {
+                // Before the scene, the distant terrain's depth is the last frame's (Iris draws it earlier).
+                boolean lastFrame = in.isHost() && in.host().startsWith("dhDepthTex");
+                if (in.isHost() && !combination && n < prologueSteps && !shadowRead && !lastFrame) {
                     throw new IllegalArgumentException("pass " + pass.name + ": " + in.host() + " does not exist before the scene");
                 }
                 if (in.isHost() && !combination && n < prologueSteps + deferredSteps && !DEFERRED_READS.contains(in.host())) {
@@ -377,6 +380,7 @@ public final class FramePlan {
 
     /** Host textures a {@code DEFERRED} pass can sample: what exists before the translucent layer. */
     private static final Set<String> DEFERRED_READS = Set.of("sceneColor", "sceneDepth", "depthtex0", "depthtex1", "depthtex2",
+            "dhDepthTex0", "dhDepthTex1",
             "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2", "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7", "normals", "specular");
 
     private static boolean rendererFalse(IrPack pack, String key) {

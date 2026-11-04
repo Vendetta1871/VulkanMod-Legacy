@@ -168,6 +168,13 @@ public final class PackManager {
         active = null;
     }
 
+    private static boolean loadedWithLod;
+
+    /** Turning LODs on or off changes what an OptiFine pack compiles (DISTANT_HORIZONS): load it again. */
+    public static synchronized void lodChanged() {
+        if (activeOptions != null && loadedWithLod != net.vesu.lod.mc.LodSystem.enabled()) loadSelected();
+    }
+
     /** Selects a pack by id (null = none), loads it and saves the config. */
     public static synchronized void select(String id) {
         Initializer.CONFIG.shaderPack = id;
@@ -358,6 +365,9 @@ public final class PackManager {
         macros.put(os.contains("win") ? "MC_OS_WINDOWS" : os.contains("mac") ? "MC_OS_MAC" : "MC_OS_LINUX", "");
         var device = net.vesu.vulkan.Vulkan.getDeviceInfo();
         if (device != null) deviceMacros(device.vendorId, device.deviceName, macros);
+        // Distant terrain through the pack's own DH programs (AUDIT 5.16, contract B).
+        loadedWithLod = net.vesu.lod.mc.LodSystem.enabled();
+        if (loadedWithLod) macros.put("DISTANT_HORIZONS", "");
         return OptiFineFrontend.lower(src, id, readOptions(id), macros);
     }
 

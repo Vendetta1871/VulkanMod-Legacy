@@ -81,7 +81,26 @@ public final class FrameUniforms {
             HIDE_GUI = L.offset("hideGUI"), DIMENSION = L.offset("vkm_dimension"), BIOME = L.offset("vkm_biome"),
             JITTER = L.offset("vkm_jitter"), DISPLAY_SIZE = L.offset("vkm_displaySize"),
             RENDER_SCALE = L.offset("vkm_renderScale"), RT_ENABLED = L.offset("vkm_rtEnabled"),
-            ATLAS_SIZE = L.offset("atlasSize"), TERRAIN_SIZE = L.offset("terrainTextureSize"), ICON_SIZE = L.offset("terrainIconSize");
+            ATLAS_SIZE = L.offset("atlasSize"), TERRAIN_SIZE = L.offset("terrainTextureSize"), ICON_SIZE = L.offset("terrainIconSize"),
+            DH_P = L.offset("dhProjection"), DH_P_INV = L.offset("dhProjectionInverse"), DH_PREV_P = L.offset("dhPreviousProjection"),
+            DH_NEAR = L.offset("dhNearPlane"), DH_FAR = L.offset("dhFarPlane"), DH_DISTANCE = L.offset("dhRenderDistance"),
+            HEIGHT_LIMIT = L.offset("heightLimit"), LOGICAL_HEIGHT = L.offset("logicalHeightLimit"), BEDROCK = L.offset("bedrockLevel");
+
+    /** Near plane of the distant terrain's own projection (AUDIT 5.16, contract B), in blocks. */
+    public static final float DH_NEAR_PLANE = 16.0f;
+
+    /** Far plane of the distant terrain's projection: the LOD distance plus one top-level section. */
+    public static float dhFarPlane() {
+        return net.vesu.Initializer.CONFIG.lodDistance * 16.0f + 512.0f;
+    }
+
+    /** {@code gl}, a GL perspective matrix, with other near and far planes. */
+    public static Matrix4f withPlanes(Matrix4f gl, float n, float f, Matrix4f dest) {
+        dest.set(gl);
+        dest.m22(-(f + n) / (f - n));
+        dest.m32(-2.0f * f * n / (f - n));
+        return dest;
+    }
 
     private static final Matrix4f IDENTITY = new Matrix4f();
     private static final Matrix4f view = new Matrix4f(), proj = new Matrix4f(), tmp = new Matrix4f(),
@@ -212,6 +231,18 @@ public final class FrameUniforms {
             view.get(PREV_MODEL_VIEW, b);
             proj.get(PREV_PROJECTION, b);
         }
+        float dhFar = dhFarPlane();
+        withPlanes(proj, DH_NEAR_PLANE, dhFar, tmp).get(DH_P, b);
+        tmp.invert().get(DH_P_INV, b);
+        if (CameraHistory.hasPrevious()) withPlanes(undoDepthRemap(CameraHistory.prevProj(), tmp), DH_NEAR_PLANE, dhFar, tmp);
+        else withPlanes(proj, DH_NEAR_PLANE, dhFar, tmp);
+        tmp.get(DH_PREV_P, b);
+        b.putFloat(DH_NEAR, DH_NEAR_PLANE);
+        b.putFloat(DH_FAR, dhFar);
+        b.putInt(DH_DISTANCE, net.vesu.Initializer.CONFIG.lodDistance * 16);
+        b.putInt(HEIGHT_LIMIT, 256);
+        b.putInt(LOGICAL_HEIGHT, 256);
+        b.putInt(BEDROCK, 0);
         double camX = CameraHistory.camX(), camY = CameraHistory.camY(), camZ = CameraHistory.camZ();
         cameraX = camX;
         cameraY = camY;

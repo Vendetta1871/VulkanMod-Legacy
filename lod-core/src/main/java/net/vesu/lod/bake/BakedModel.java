@@ -9,7 +9,8 @@ import java.util.Arrays;
  * (AUDIT 5.14).
  *
  * <p>GPU record (64 B): {@code uint faceData[6]; uint flags; uint tint; uint customId;
- * uint pad[7]}. faceData: bits 0..15 pixel bounds as nibbles (minU, minV, maxU, maxV);
+ * uint faceColor[6]; uint material}. faceColor: the face's average RGBA8, alpha its coverage
+ * (the vertex color of pack programs, AUDIT 5.16); material: the DH material id. faceData: bits 0..15 pixel bounds as nibbles (minU, minV, maxU, maxV);
  * 16..21 indentation in 1/64 (63 = 1.0); 22 alpha discard; 23 discard override; 24..25 tint
  * (1 partial, 2 full). flags: bit 0 tinted, 1 biome-dependent tint, 2 translucent, 3 shaded.</p>
  */
@@ -80,6 +81,11 @@ public final class BakedModel {
             for (int i = 0; i < FaceBaker.PIXELS; i++) {
                 long p = img[i];
                 tiles[f][i] = p == FaceBaker.CLEAR ? 0 : (int) p;
+            }
+            if (written > 0) {
+                int cover = Math.min(255, written * 255 / FaceBaker.PIXELS);
+                int n = Math.max(1, Math.min(written, FaceBaker.PIXELS));
+                record[9 + f] = cover << 24 | Math.min(255, b / n) << 16 | Math.min(255, g / n) << 8 | Math.min(255, r / n);
             }
             if (written == 0) {
                 faces[f] = ModelMeta.NO_FACE;

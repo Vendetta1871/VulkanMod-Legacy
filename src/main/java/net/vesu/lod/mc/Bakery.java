@@ -220,6 +220,7 @@ public final class Bakery {
         }
         BakedModel baked = new BakedModel(images, translucentLayer && !leaves, leaves, fluid, state.isOpaqueCube(),
                 state.getLightValue(), tintKind, tint, shaded, 0);
+        baked.record[15] = dhMaterial(state);
         Integer known = dedup.get(baked.dedupKey);
         if (known != null) return known;
         if (modelCount >= ModelTables.MAX_MODELS) return ModelSource.NONE;
@@ -348,5 +349,27 @@ public final class Bakery {
         if (registryBiomes() != tintBiomes) {
             requests.add(0);
         }
+    }
+
+    /** Distant Horizons' material of a state (DH_BLOCK_* in pack programs, AUDIT 5.16). */
+    static int dhMaterial(net.minecraft.block.state.IBlockState state) {
+        Material m = state.getMaterial();
+        net.minecraft.block.Block b = state.getBlock();
+        if (m == Material.AIR) return 14;
+        if (m == Material.WATER) return 12;
+        if (m == Material.LAVA) return 6;
+        if (state.getLightValue() > 0) return 15;
+        if (m == Material.LEAVES || b instanceof BlockLeaves) return 1;
+        if (m == Material.WOOD) return 3;
+        if (m == Material.IRON || m == Material.ANVIL) return 4;
+        if (m == Material.GRASS || m == Material.PLANTS || m == Material.VINE) return 13;
+        if (m == Material.GROUND || m == Material.CLAY) return 5;
+        if (m == Material.SAND) return 9;
+        if (m == Material.SNOW || m == Material.CRAFTED_SNOW || m == Material.ICE || m == Material.PACKED_ICE) return 8;
+        if (b == net.minecraft.init.Blocks.HARDENED_CLAY || b == net.minecraft.init.Blocks.STAINED_HARDENED_CLAY) return 10;
+        if (b == net.minecraft.init.Blocks.NETHERRACK || b == net.minecraft.init.Blocks.SOUL_SAND
+                || b == net.minecraft.init.Blocks.QUARTZ_ORE || b == net.minecraft.init.Blocks.NETHER_BRICK) return 11;
+        if (m == Material.ROCK) return 2;
+        return 0;
     }
 }

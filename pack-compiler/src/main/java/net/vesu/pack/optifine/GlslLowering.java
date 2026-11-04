@@ -172,10 +172,11 @@ final class GlslLowering {
             Map.entry("gaux3", "colortex6"), Map.entry("gaux4", "colortex7"), Map.entry("gdepthtex", "depthtex0"),
             Map.entry("shadowcolor", "shadowcolor0"), Map.entry("watershadow", "shadowtex0"),
             Map.entry("tex", "gtexture"), Map.entry("texture", "gtexture"),
-            Map.entry("shadowtex0HW", "shadowtex0"), Map.entry("shadowtex1HW", "shadowtex1"));
+            Map.entry("shadowtex0HW", "shadowtex0"), Map.entry("shadowtex1HW", "shadowtex1"),
+            Map.entry("dhDepthTex", "dhDepthTex0"));
 
     private static final java.util.regex.Pattern KNOWN_SAMPLER = java.util.regex.Pattern.compile(
-            "colortex([0-9]|1[0-5])|depthtex[0-2]|shadowtex[01](Hw)?|shadowcolor[0-7]|gtexture|lightmap|normals|specular|vkf_noisetex");
+            "colortex([0-9]|1[0-5])|depthtex[0-2]|shadowtex[01](Hw)?|shadowcolor[0-7]|gtexture|lightmap|normals|specular|vkf_noisetex|dhDepthTex[01]");
 
     private static final Set<String> QUALIFIERS = Set.of("const", "uniform", "attribute", "varying", "in", "out", "inout",
             "flat", "smooth", "noperspective", "centroid", "invariant", "highp", "mediump", "lowp", "precision",

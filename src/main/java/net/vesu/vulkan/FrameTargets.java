@@ -688,6 +688,25 @@ public final class FrameTargets {
         net.vesu.vulkan.rt.RtScene.breadcrumb(cmd, stack, 5);
     }
 
+    /** Distant terrain under a pack (AUDIT 5.16): the pack's color targets with the DH depth. */
+    static void beginLodPackPass(VkCommandBuffer cmd, MemoryStack stack) {
+        VkCompat.endRendering(cmd);
+        pack.dhDepthBarrier(cmd, true, stack);
+        lodPackDepth = pack.dhDepthView();
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+        lodPackDepth = 0L;
+    }
+
+    static void endLodPackPass(VkCommandBuffer cmd, MemoryStack stack) {
+        VkCompat.endRendering(cmd);
+        pack.dhDepthBarrier(cmd, false, stack);
+        Drawer.invalidateBoundPipeline(cmd);
+        beginRendering(cmd, scene, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+    }
+
+    /** While set, scene rendering attaches this depth instead of the scene's. */
+    private static long lodPackDepth;
+
     private static void beginRendering(VkCommandBuffer cmd, RenderTarget target, int colorLoadOp,
                                        float[] clearColor, int depthLoadOp, MemoryStack stack) {
         PackRuntime extra = target == scene && geometry ? pack : null;
@@ -707,7 +726,7 @@ public final class FrameTargets {
         }
 
         VkRenderingAttachmentInfo depth = VkRenderingAttachmentInfo.calloc(stack).sType$Default()
-                .imageView(target.depthView())
+                .imageView(lodPackDepth != 0L ? lodPackDepth : target.depthView())
                 .imageLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .loadOp(depthLoadOp)
                 .storeOp(VK_ATTACHMENT_STORE_OP_STORE);

@@ -475,6 +475,7 @@ public final class PackRuntime {
                 steps[i] = buildStep(plan.steps.get(i), expander, frames);
             }
             if (!plan.routes.isEmpty() || plan.sceneTarget != null) buildGeometry(expander, frames);
+            if (plan.routes.containsKey(GeometryCategory.LOD_OPAQUE) && geometrySetLayout != 0L) buildLod(expander);
         } catch (RuntimeException | IOException e) {
             destroyAll();
             throw e;
@@ -601,6 +602,7 @@ public final class PackRuntime {
             formats[i + firstAttachment()] = vkFormats[geometryTextures[i]];
         }
         mrtBits = Pipeline.registerMrt(formats);
+        attachmentFormats = formats;
 
         List<FramePlan.Input> inputs = plan.geometryInputs.get(FramePlan.OPAQUE);
         int stages = VK_SHADER_STAGE_ALL_GRAPHICS;
@@ -655,6 +657,122 @@ public final class PackRuntime {
 
     private int attachmentCount() {
         return plan.geometryTargets.size() + firstAttachment();
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Distant terrain (AUDIT 5.16, contract B)
+
+    private final LodPackProgram[] lodPrograms = new LodPackProgram[2];
+    private int[] attachmentFormats;
+    /** The distant terrain's depth, in its own projection (dhDepthTex0/1); null without DH programs or inputs. */
+    private Image dhDepth;
+    private boolean dhDepthFresh;
+
+    /** Compiles dh_terrain and dh_water against the LOD host source. A failure leaves the pack without LODs. */
+    private void buildLod(IncludeExpander expander) {
+        GeometryCategory[] categories = {GeometryCategory.LOD_OPAQUE, GeometryCategory.LOD_TRANSLUCENT};
+        for (int i = 0; i < 2; i++) {
+            IrPack.Gbuffer g = plan.routes.get(categories[i]);
+            if (g == null) continue;
+            if (g.geometry != null || g.tessControl != null) {
+                Initializer.LOGGER.warn("[shaderpacks] {}: {} has stages the LOD renderer cannot run; no distant terrain through it",
+                        pack.id, g.name);
+                continue;
+            }
+            ShaderSPIRVUtils.SPIRV vs = null, fs = null;
+            try {
+                vs = ShaderSPIRVUtils.compilePackShader(pack.id + "/" + g.vertex + "#lod",
+                        expander.expandProgram(g.vertex, GeometryPrelude.vertex(plan, g, hostSource("lod/pack_lod.vsh"))),
+                        ShaderSPIRVUtils.ShaderKind.VERTEX_SHADER);
+                fs = ShaderSPIRVUtils.compilePackShader(pack.id + "/" + g.fragment + "#lod",
+                        expander.expandProgram(g.fragment, GeometryPrelude.fragment(plan, g, hostSource("lod/pack_lod.fsh"))),
+                        ShaderSPIRVUtils.ShaderKind.FRAGMENT_SHADER);
+                int mask = 0;
+                for (String t : g.targets) mask |= 1 << plan.attachment(t);
+                Pipeline.BlendState[] targetBlend = null;
+                if (!g.targetBlend.isEmpty()) {
+                    targetBlend = new Pipeline.BlendState[attachmentCount()];
+                    for (Map.Entry<String, IrPack.Blend> e : g.targetBlend.entrySet()) {
+                        if (g.targets.contains(e.getKey())) targetBlend[plan.attachment(e.getKey())] = blendState(e.getValue());
+                    }
+                }
+                lodPrograms[i] = new LodPackProgram(vs.bytecode(), fs.bytecode(), mask, blendState(g.blend), targetBlend);
+            } catch (RuntimeException | IOException e) {
+                Initializer.LOGGER.warn("[shaderpacks] {}: {} cannot draw distant terrain: {}", pack.id, g.name, e.getMessage());
+            } finally {
+                if (vs != null) vs.free();
+                if (fs != null) fs.free();
+            }
+        }
+    }
+
+    LodPackProgram lodProgram(boolean translucent) {
+        return lodPrograms[translucent ? 1 : 0];
+    }
+
+    int[] attachmentFormats() {
+        return attachmentFormats;
+    }
+
+    long geometrySetLayout() {
+        return geometrySetLayout;
+    }
+
+    long resourceSetLayout() {
+        return resources != null ? resources.setLayout() : 0L;
+    }
+
+    long dhDepthView() {
+        return dhDepth != null ? dhDepth.view : 0L;
+    }
+
+    long dhDepthImage() {
+        return dhDepth != null ? dhDepth.image : 0L;
+    }
+
+    private boolean wantsDhDepth() {
+        return lodPrograms[0] != null || plan.hostInputs.contains("dhDepthTex0") || plan.hostInputs.contains("dhDepthTex1");
+    }
+
+    /** Each frame, before any geometry: no distant terrain yet, so the depth is all far. */
+    private void clearDhDepth(VkCommandBuffer cmd, MemoryStack stack) {
+        if (dhDepth == null) return;
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                        | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, 0,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        FrameTargets.pipelineBarrier(cmd, b, stack);
+        VkClearDepthStencilValue clear = VkClearDepthStencilValue.calloc(stack).depth(1.0f).stencil(0);
+        VkImageSubresourceRange.Buffer range = VkImageSubresourceRange.calloc(1, stack);
+        range.get(0).aspectMask(VK_IMAGE_ASPECT_DEPTH_BIT).levelCount(1).layerCount(1);
+        vkCmdClearDepthStencilImage(cmd, dhDepth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, clear, range);
+        FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                        | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                        | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        FrameTargets.pipelineBarrier(cmd, b, stack);
+    }
+
+    /** Rendering is not active: the distant terrain's depth becomes an attachment, or readable again. */
+    void dhDepthBarrier(VkCommandBuffer cmd, boolean toAttachment, MemoryStack stack) {
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        long read = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        long tests = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        long rw = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        if (toAttachment) {
+            FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT, read | tests, rw, tests, rw,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        } else {
+            FrameTargets.imageBarrier(b.get(0), dhDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT, tests, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    read | tests, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | rw,
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        FrameTargets.pipelineBarrier(cmd, b, stack);
     }
 
     private Pipeline.Program buildProgram(Pipeline pipeline, IrPack.Gbuffer g, IncludeExpander expander) throws IOException {
@@ -871,6 +989,11 @@ public final class PackRuntime {
             if (resources != null) resources.begin(cmd, stack);
             recordBegin(cmd, stack);
         }
+        if (dhDepthFresh) {
+            // A pass before the scene reads the last frame's DH depth: a new image has none yet.
+            dhDepthFresh = false;
+            clearDhDepth(cmd, stack);
+        }
         if (plan.prologueSteps == 0) return;
         uploadFrame(cmd);
         uploadFiles(cmd, stack);
@@ -892,6 +1015,7 @@ public final class PackRuntime {
 
     void beginGeometry(VkCommandBuffer cmd, MemoryStack stack) {
         startFrame();
+        clearDhDepth(cmd, stack);
         if (resources != null) resources.barrier(cmd, stack);
         uploadFiles(cmd, stack);
         geometryPhase = FramePlan.OPAQUE;
@@ -1624,6 +1748,27 @@ public final class PackRuntime {
         if (plan.combinationReadsScene) sceneCopy.ensure(scene.width(), scene.height());
         if (plan.depthCopy) depthCopy = createDepthImage(scene.width(), scene.height());
         if (plan.handDepthCopy) handDepthCopy = createDepthImage(scene.width(), scene.height());
+        if (wantsDhDepth()) {
+            dhDepth = createDhDepthImage(scene.width(), scene.height());
+            dhDepthFresh = true;
+        }
+    }
+
+    private static Image createDhDepthImage(int w, int h) {
+        Image img = new Image();
+        try (MemoryStack stack = stackPush()) {
+            LongBuffer pImage = stack.mallocLong(1);
+            PointerBuffer pMemory = stack.mallocPointer(1);
+            MemoryManager.createImage(w, h, 1, LodPackBridge.DEPTH_FORMAT, VK_IMAGE_TILING_OPTIMAL,
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pImage, pMemory);
+            img.image = pImage.get(0);
+            img.memory = pMemory.get(0);
+        }
+        img.view = Vulkan.createImageView(img.image, LodPackBridge.DEPTH_FORMAT, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+        img.width = w;
+        img.height = h;
+        return img;
     }
 
     /** Called right before the hand, inside rendering: depthtex2 has no hand in it. */
@@ -1707,6 +1852,7 @@ public final class PackRuntime {
                             case "actorSpecular" -> info.get(0).sampler(nearestSampler).imageView(net.vesu.shader.PbrAtlases.actorSpecular().getTextureImageView());
                             case "specular" -> info.get(0).sampler(nearestSampler).imageView(net.vesu.shader.PbrAtlases.specular().getTextureImageView());
                             case "depthtex2" -> info.get(0).sampler(nearestSampler).imageView(handDepthCopy.view);
+                            case "dhDepthTex0", "dhDepthTex1" -> info.get(0).sampler(nearestSampler).imageView(dhDepth.view);
                             case "shadowtex0", "shadowtex1", "shadowtex0Hw", "shadowtex1Hw", "shadowcolor0", "shadowcolor1", "shadowcolor2",
                                  "shadowcolor3", "shadowcolor4", "shadowcolor5", "shadowcolor6", "shadowcolor7" -> shadow.bind(info.get(0), in.host());
                             default -> info.get(0).sampler(nearestSampler).imageView(MotionVectorPass.motionVectors.view);
@@ -1755,6 +1901,8 @@ public final class PackRuntime {
                     default -> net.vesu.shader.PbrAtlases.actorSpecular();
                 };
                 info.get(0).sampler(nearestSampler).imageView(atlas.getTextureImageView());
+            } else if (in.isHost() && in.host().startsWith("dhDepthTex")) {
+                info.get(0).sampler(nearestSampler).imageView(dhDepth.view);
             } else if (in.isHost()) {
                 info.get(0).sampler(nearestSampler).imageView(in.host().equals("depthtex2") ? handDepthCopy.view : depthCopy.view);
             } else {
@@ -1978,12 +2126,12 @@ public final class PackRuntime {
         }
         sceneCopy.destroy();
         if (shadow != null) shadow.destroyImages();
-        for (Image depth : new Image[]{depthCopy, handDepthCopy}) {
+        for (Image depth : new Image[]{depthCopy, handDepthCopy, dhDepth}) {
             if (depth == null) continue;
             vkDestroyImageView(Vulkan.getDevice(), depth.view, null);
             MemoryManager.freeImage(depth.image, depth.memory);
         }
-        depthCopy = handDepthCopy = null;
+        depthCopy = handDepthCopy = dhDepth = null;
         for (long[] s : staging) MemoryManager.freeBuffer(s[0], s[1]);
         staging.clear();
         boundGeneration = -1;
@@ -1996,6 +2144,7 @@ public final class PackRuntime {
         VkDevice device = Vulkan.getDevice();
         destroyImages();
         for (Pipeline.Program p : programs) p.destroy();
+        for (LodPackProgram p : lodPrograms) if (p != null) p.free();
         programTables.keySet().forEach(p -> p.packPrograms = null);
         if (geometrySetLayout != 0L) vkDestroyDescriptorSetLayout(device, geometrySetLayout, null);
         if (shadow != null) shadow.destroy();

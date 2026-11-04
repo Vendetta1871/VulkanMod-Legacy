@@ -77,6 +77,16 @@ public final class FrameBlock {
             .add("relativeEyePosition", VEC3)
             .add("playerLookVector", VEC3)
             .add("lightningBoltPosition", VEC4)
+            // Distant terrain (AUDIT 5.16, contract B): GL matrices of the LOD projection.
+            .add("dhProjection", MAT4)
+            .add("dhProjectionInverse", MAT4)
+            .add("dhPreviousProjection", MAT4)
+            .add("dhNearPlane", FLOAT)
+            .add("dhFarPlane", FLOAT)
+            .add("dhRenderDistance", INT)
+            .add("heightLimit", INT)
+            .add("logicalHeightLimit", INT)
+            .add("bedrockLevel", INT)
             // Dynamic lights as the terrain shaders get them (filled from M3 on).
             .add("vkm_dynLights", VEC4, 16)
             // Custom uniforms of the pack, one slot each (pack-format.md).

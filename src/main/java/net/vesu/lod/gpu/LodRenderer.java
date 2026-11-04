@@ -800,6 +800,166 @@ public final class LodRenderer {
         Drawer.forgetBoundPipeline(cmd);
     }
 
+    // ---- Under a shader pack (AUDIT 5.16, contract B) ----
+
+    private static final int PACK_UBO_SIZE = 160;
+    private long packSetLayout, packPool, packLayout, packOpaque;
+    private long[] packSets, packUbo, packUboAlloc, packUboPtr;
+    private Object packToken;
+    private final ByteBuffer drawBlock = MemoryUtil.memCalloc(net.vesu.vulkan.Drawer.DRAW_BLOCK_SIZE);
+
+    private void ensurePackSets() {
+        if (packSetLayout != 0) return;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            LongBuffer p = stack.mallocLong(1);
+            VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(5, stack);
+            b.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
+            for (int i = 1; i < 5; i++) {
+                b.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS);
+            }
+            check(vkCreateDescriptorSetLayout(device, VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(b), null, p), "pack set layout");
+            packSetLayout = p.get(0);
+            VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
+            sizes.get(0).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).descriptorCount(frames);
+            sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(frames * 4);
+            check(vkCreateDescriptorPool(device, VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
+                    .maxSets(frames).pPoolSizes(sizes), null, p), "pack pool");
+            packPool = p.get(0);
+            LongBuffer layouts = stack.mallocLong(frames);
+            for (int i = 0; i < frames; i++) layouts.put(i, packSetLayout);
+            LongBuffer out = stack.mallocLong(frames);
+            check(vkAllocateDescriptorSets(device, VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
+                    .descriptorPool(packPool).pSetLayouts(layouts), out), "pack sets");
+            packSets = new long[frames];
+            packUbo = new long[frames];
+            packUboAlloc = new long[frames];
+            packUboPtr = new long[frames];
+            for (int i = 0; i < frames; i++) {
+                packSets[i] = out.get(i);
+                long[] r = hostBuffer(stack, PACK_UBO_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+                packUbo[i] = r[0];
+                packUboAlloc[i] = r[1];
+                packUboPtr[i] = r[2];
+                long[] bufs = {packUbo[i], arena, sectionsBuf, modelsBuf, tintsBuf};
+                VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(5, stack);
+                for (int k = 0; k < 5; k++) {
+                    VkDescriptorBufferInfo.Buffer bi = VkDescriptorBufferInfo.calloc(1, stack).buffer(bufs[k]).offset(0).range(VK_WHOLE_SIZE);
+                    w.get(k).sType$Default().dstSet(packSets[i]).dstBinding(k).descriptorCount(1).pBufferInfo(bi)
+                            .descriptorType(k == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                }
+                vkUpdateDescriptorSets(device, w, null);
+            }
+        }
+    }
+
+    /** The pipeline of the pack's dh_terrain, rebuilt with the pack runtime; 0 when it cannot be made. */
+    private long packPipeline() {
+        Object token = net.vesu.vulkan.LodPackBridge.token();
+        if (token == packToken && packOpaque != 0) return packOpaque;
+        destroyPackPipeline();
+        packToken = token;
+        ensurePackSets();
+        net.vesu.vulkan.LodPackProgram prog = net.vesu.vulkan.LodPackBridge.program(false);
+        if (prog == null) return 0;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            LongBuffer p = stack.mallocLong(1);
+            long res = net.vesu.vulkan.LodPackBridge.resourceSetLayout();
+            LongBuffer setLayouts = res != 0 ? stack.longs(net.vesu.vulkan.LodPackBridge.sharedSetLayout(), packSetLayout, res)
+                    : stack.longs(net.vesu.vulkan.LodPackBridge.sharedSetLayout(), packSetLayout);
+            VkPushConstantRange.Buffer pcr = VkPushConstantRange.calloc(1, stack);
+            pcr.get(0).stageFlags(VK_SHADER_STAGE_ALL_GRAPHICS).offset(0).size(net.vesu.vulkan.Drawer.DRAW_BLOCK_SIZE);
+            check(vkCreatePipelineLayout(device, VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
+                    .pSetLayouts(setLayouts).pPushConstantRanges(pcr), null, p), "pack pipeline layout");
+            packLayout = p.get(0);
+            long vm = module(stack, prog.vertex), fm = module(stack, prog.fragment);
+            int[] formats = net.vesu.vulkan.LodPackBridge.colorFormats();
+            VkPipelineColorBlendAttachmentState.Buffer blend = VkPipelineColorBlendAttachmentState.calloc(formats.length, stack);
+            for (int i = 0; i < formats.length; i++) {
+                net.vesu.vulkan.Pipeline.BlendState bs = prog.targetBlend != null && prog.targetBlend[i] != null ? prog.targetBlend[i] : prog.blend;
+                VkPipelineColorBlendAttachmentState a = blend.get(i).colorWriteMask((prog.targetMask & 1 << i) != 0 ? 0xF : 0);
+                if (bs != null && bs.enabled) {
+                    a.blendEnable(true).srcColorBlendFactor(bs.srcRgbFactor).dstColorBlendFactor(bs.dstRgbFactor).colorBlendOp(VK_BLEND_OP_ADD)
+                            .srcAlphaBlendFactor(bs.srcAlphaFactor).dstAlphaBlendFactor(bs.dstAlphaFactor).alphaBlendOp(VK_BLEND_OP_ADD);
+                }
+            }
+            VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+            stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT).module(vm).pName(stack.UTF8("main"));
+            stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fm).pName(stack.UTF8("main"));
+            VkGraphicsPipelineCreateInfo.Buffer info = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+            info.get(0).sType$Default()
+                    .pStages(stages)
+                    .pVertexInputState(VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default())
+                    .pInputAssemblyState(VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
+                            .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST))
+                    .pViewportState(VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default().viewportCount(1).scissorCount(1))
+                    .pRasterizationState(VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
+                            .polygonMode(VK_POLYGON_MODE_FILL).cullMode(VK_CULL_MODE_NONE).frontFace(VK_FRONT_FACE_CLOCKWISE)
+                            .lineWidth(1.0f))
+                    .pMultisampleState(VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
+                            .rasterizationSamples(VK_SAMPLE_COUNT_1_BIT))
+                    .pDepthStencilState(VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
+                            .depthTestEnable(true).depthWriteEnable(true).depthCompareOp(VK_COMPARE_OP_LESS_OR_EQUAL))
+                    .pColorBlendState(VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default().pAttachments(blend))
+                    .pDynamicState(VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
+                            .pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR)))
+                    .layout(packLayout)
+                    .pNext(VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
+                            .colorAttachmentCount(formats.length).pColorAttachmentFormats(stack.ints(formats))
+                            .depthAttachmentFormat(net.vesu.vulkan.LodPackBridge.DEPTH_FORMAT)
+                            .stencilAttachmentFormat(VK_FORMAT_UNDEFINED).address());
+            int rc = vkCreateGraphicsPipelines(device, Pipeline.getPipelineCache(), info, null, p);
+            vkDestroyShaderModule(device, vm, null);
+            vkDestroyShaderModule(device, fm, null);
+            if (rc != VK_SUCCESS) {
+                Initializer.LOGGER.warn("[lod] the pack's dh_terrain pipeline failed: {}", rc);
+                return 0;
+            }
+            packOpaque = p.get(0);
+        }
+        return packOpaque;
+    }
+
+    private void destroyPackPipeline() {
+        long pl = packOpaque, lay = packLayout;
+        packOpaque = packLayout = 0;
+        if (pl == 0 && lay == 0) return;
+        MemoryManager.addToFreeable(() -> {
+            if (pl != 0) vkDestroyPipeline(device, pl, null);
+            if (lay != 0) vkDestroyPipelineLayout(device, lay, null);
+        });
+    }
+
+    /**
+     * Under a pack: draws this frame's opaque LOD commands through the pack's dh_terrain into
+     * the pack's targets, with the distant terrain's own depth (dhDepthTex0). {@code mvp} is
+     * the depth-remapped DH projection times {@code modelView}; positions are camera-relative.
+     */
+    public void drawPack(org.joml.Matrix4f mvp, org.joml.Matrix4f modelView, int camBX, int camBY, int camBZ,
+                         float fx, float fy, float fz) {
+        if (opaqueDraws == 0) return;
+        long pipeline = packPipeline();
+        if (pipeline == 0) return;
+        ByteBuffer u = MemoryUtil.memByteBuffer(packUboPtr[frame], PACK_UBO_SIZE);
+        mvp.get(0, u);
+        modelView.get(64, u);
+        u.putInt(128, camBX).putInt(132, camBY).putInt(136, camBZ).putInt(140, 0);
+        u.putFloat(144, fx).putFloat(148, fy).putFloat(152, fz).putFloat(156, 0);
+        drawBlock.putFloat(0, 1).putFloat(4, 1).putFloat(8, 1).putFloat(12, 1);
+        drawBlock.putInt(48, 8);
+        VkCommandBuffer cmd = Drawer.currentCommandBuffer();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            net.vesu.vulkan.LodPackBridge.begin(cmd, stack);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, packLayout, 0,
+                    stack.longs(net.vesu.vulkan.LodPackBridge.sharedSet(), packSets[frame]), null);
+            net.vesu.vulkan.LodPackBridge.bindResources(cmd, packLayout);
+            vkCmdPushConstants(cmd, packLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, drawBlock);
+            drawIndirect(cmd, 0, opaqueDraws);
+            net.vesu.vulkan.LodPackBridge.end(cmd, stack);
+        }
+        Drawer.forgetBoundPipeline(cmd);
+    }
+
     private LodSsao ssao;
 
     public LodSsao ssao() {
@@ -818,6 +978,16 @@ public final class LodRenderer {
 
     public void destroy() {
         if (ssao != null) ssao.destroy();
+        destroyPackPipeline();
+        if (packSetLayout != 0) {
+            long sl = packSetLayout, pp = packPool;
+            long[] ub = packUbo.clone(), ua = packUboAlloc.clone();
+            MemoryManager.addToFreeable(() -> {
+                vkDestroyDescriptorPool(device, pp, null);
+                vkDestroyDescriptorSetLayout(device, sl, null);
+                for (int i = 0; i < ub.length; i++) MemoryManager.freeBuffer(ub[i], ua[i]);
+            });
+        }
         long[] all = {arena, arenaAlloc, sectionsBuf, sectionsAlloc, modelsBuf, modelsAlloc, tintsBuf, tintsAlloc};
         // The image defers its own destruction; queued tasks must not queue more tasks.
         atlas.free();

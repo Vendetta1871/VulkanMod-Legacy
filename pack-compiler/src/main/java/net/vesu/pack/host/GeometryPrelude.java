@@ -28,6 +28,16 @@ public final class GeometryPrelude {
     private static final Pattern SAMPLER =
             Pattern.compile("layout\\(binding\\s*=\\s*(\\d+)\\)\\s*uniform\\s+sampler2D\\s+(\\w+)\\s*;");
 
+    private static final String HOST_PRELUDE_BEGIN = "//vkm-host-prelude-begin", HOST_PRELUDE_END = "//vkm-host-prelude-end";
+    private static final Pattern DEFINE = Pattern.compile("(?m)^#define\\s+(\\w+)");
+
+    /** The text a host source puts into the prelude between its markers, or nothing. */
+    private static String hostPrelude(String hostSource) {
+        int b = hostSource.indexOf(HOST_PRELUDE_BEGIN), e = hostSource.indexOf(HOST_PRELUDE_END);
+        if (b < 0 || e < b) return "";
+        return hostSource.substring(b + HOST_PRELUDE_BEGIN.length(), e).strip() + "\n";
+    }
+
     /** Vanilla attribute names and the names programs use. */
     private static final Map<String, String> ATTRIBUTES = Map.of(
             "Position", "vaPosition", "Color", "vaColor", "VertexColor", "vaColor", "UV0", "vaUV0",
@@ -67,12 +77,17 @@ public final class GeometryPrelude {
                     .append(name).append(";\n");
         }
         if (batched) extendedAttributes(plan.vertexFlags, sb, present);
+        // A host source without a vertex format (the LOD renderer's) brings its own stand-ins.
+        String hostPrelude = hostPrelude(hostSource);
+        Matcher defined = DEFINE.matcher(hostPrelude);
+        while (defined.find()) present.put(defined.group(1), true);
         for (Map.Entry<String, String> d : ATTRIBUTE_DEFAULTS.entrySet()) {
             if (!present.containsKey(d.getKey())) {
                 sb.append("#define ").append(d.getKey()).append(' ').append(d.getValue()).append('\n');
             }
         }
         sb.append(drawBlocks);
+        sb.append(hostPrelude);
         if (batched) {
             String slot = shadow ? "int(vkm_chunkSlot) + " + SHADOW_SLOT_BASE : "int(vkm_chunkSlot)";
             sb.append("#define vkm_mvp chunks[").append(slot).append("].mvp\n");
