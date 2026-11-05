@@ -140,6 +140,8 @@ public abstract class EntityRendererM implements net.vesu.render.IHandInScene {
         GuiRenderer.setGuiPass(false);
         net.vesu.render.EntityRenderer.onFrameBegin();
         net.vesu.render.ChunkBatcher.applyVertexFlags();
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
+        net.vesu.vulkan.FrameTargets.setWorldFrame(mc.world != null && !mc.skipRenderWorld);
         FrameProfiler.syncBegin();
         Initializer.beginFrame();
         FrameProfiler.syncEnd();

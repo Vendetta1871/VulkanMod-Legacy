@@ -488,15 +488,31 @@ public final class FrameTargets {
         return requested && !blitOnly && net.vesu.render.TerrainRenderer.BATCH && Fsr3Upscaler.available();
     }
 
+    /**
+     * Set at the head of {@code updateCameraAndRender} when it will render the world. Frames
+     * opened anywhere else are loading screens ({@code LoadingScreenRenderer} draws and presents
+     * outside it, its GUI lands in the scene target): a pack would draw its sky and composite
+     * over them, so they run without it.
+     */
+    private static boolean worldFrame;
+
+    public static void setWorldFrame(boolean world) {
+        worldFrame = world;
+    }
+
     /** Starts the SCENE phase: clears and begins rendering into the scene target. */
     static void beginFrame(VkCommandBuffer cmd, float[] clearColor, MemoryStack stack) {
         recording++;
         GpuTimer.beginFrame(cmd);
-        pack = PackRuntime.forFrame();
+        PackRuntime selected = PackRuntime.forFrame();
+        // The vertex format and the scene format stay the pack's: no chunk rebuild or target
+        // recreation around a loading screen.
+        pack = worldFrame ? selected : null;
+        worldFrame = false;
         // Packs keep forward depth until their programs are rewritten for reverse-Z (AUDIT 5.16).
         VRenderSystem.reverseZ = pack == null && !FORWARD_Z;
-        net.vesu.render.ChunkBatcher.requestVertexFlags(pack != null ? pack.vertexFlags() : 0);
-        int wantedFormat = pack != null && pack.hdrScene() ? HDR_SCENE_FORMAT : COLOR_FORMAT;
+        net.vesu.render.ChunkBatcher.requestVertexFlags(selected != null ? selected.vertexFlags() : 0);
+        int wantedFormat = selected != null && selected.hdrScene() ? HDR_SCENE_FORMAT : COLOR_FORMAT;
         if (wantedFormat != sceneFormat) {
             // Only when the pack changes: nothing of this frame touched the targets yet.
             sceneFormat = wantedFormat;

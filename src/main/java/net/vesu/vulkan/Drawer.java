@@ -733,6 +733,24 @@ public class Drawer {
         captureFile = file;
     }
 
+    // Burst: every presented frame for a while, numbered, also through the loading loops
+    // that bypass the client tick (autotest of world transitions).
+    private static java.io.File burstDir;
+    private static int burstIndex, burstLeft;
+
+    public static void requestBurst(java.io.File dir, int frames) {
+        dir.mkdirs();
+        burstDir = dir;
+        burstIndex = 0;
+        burstLeft = frames - 1;
+        captureFile = new java.io.File(dir, "0000.png");
+    }
+
+    /** Number of the burst frame captured next, or -1 when no burst runs. */
+    public static int burstFrame() {
+        return burstDir != null && (burstLeft > 0 || captureFile != null) ? burstIndex : -1;
+    }
+
     private void recordCapture(VkCommandBuffer commandBuffer) {
         try(MemoryStack stack = stackPush()) {
             int width = getSwapchainExtent().width();
@@ -885,6 +903,10 @@ public class Drawer {
                 writeCapture();
                 captureRecorded = false;
                 captureFile = null;
+                if (burstLeft > 0) {
+                    burstLeft--;
+                    captureFile = new java.io.File(burstDir, String.format("%04d.png", ++burstIndex));
+                }
             }
 
             VkPresentInfoKHR presentInfo = VkPresentInfoKHR.calloc(stack);

@@ -130,6 +130,14 @@ public class AutoTest {
      */
     private static final boolean BURST_MODE = Env.get("VESU_AUTOTEST_BURST") != null;
 
+    /**
+     * World transitions: with {@code VESU_AUTOTEST_TRANSITIONS=1} every presented frame is
+     * captured ({@code vm_transitions/NNNN.png}) while the game quits to the title screen, waits
+     * there and enters the world again; the log names the frame each step starts at.
+     */
+    private static final boolean TRANSITIONS_MODE = Env.get("VESU_AUTOTEST_TRANSITIONS") != null;
+    private static final int STAGE_TITLE = 10, STAGE_REENTER = 11;
+
     /** Player position captured on the first burst tick, to pin the camera still. */
     private static double[] pinPos;
 
@@ -188,6 +196,8 @@ public class AutoTest {
      * lengths match its probe. {@code VESU_AUTOTEST_SIZE="w h"} sets the window size.
      */
     private static final String SCENES_FILE = Env.get("VESU_AUTOTEST_SCENES");
+    /** {@code VESU_AUTOTEST_HIDEHUD=1}: hide the HUD, chat and first-person hand for screenshots. */
+    private static final boolean HIDE_HUD = Env.get("VESU_AUTOTEST_HIDEHUD") != null;
     /** A flat world and commands run once before the first scene, for the 26.2 comparison. */
     private static final boolean FLAT_WORLD = Env.get("VESU_AUTOTEST_FLAT") != null;
     private static final String SCENE_COMMANDS = Env.get("VESU_AUTOTEST_COMMANDS");
@@ -669,10 +679,26 @@ public class AutoTest {
         }
 
         Minecraft mc = Minecraft.getMinecraft();
-        if (stage >= 2) {
+        if (stage >= 2 && stage < STAGE_TITLE) {
             sampleInput(mc);
         }
         switch (stage) {
+            case STAGE_TITLE -> {
+                if (mc.currentScreen instanceof GuiMainMenu && ++ticks == 40) {
+                    Initializer.LOGGER.info("[autotest] transition: enter world at frame {}", net.vesu.vulkan.Drawer.burstFrame());
+                    WorldSettings settings = new WorldSettings(0x5EEDL, GameType.CREATIVE, false, false, WorldType.DEFAULT);
+                    settings.enableCommands();
+                    mc.launchIntegratedServer(WORLD_NAME, WORLD_NAME, settings);
+                    stage = STAGE_REENTER;
+                    ticks = 0;
+                }
+            }
+            case STAGE_REENTER -> {
+                if (mc.player != null && mc.world != null && mc.currentScreen == null && ++ticks == 100) {
+                    Initializer.LOGGER.info("[autotest] transition: done at frame {}", net.vesu.vulkan.Drawer.burstFrame());
+                    mc.shutdown();
+                }
+            }
             case 0 -> {
                 if (GUI_MODE) {
                     guiStage(mc);
@@ -739,11 +765,29 @@ public class AutoTest {
                     mc.shutdown();
                     return;
                 }
+                if (HIDE_HUD && !mc.gameSettings.hideGUI) {
+                    mc.gameSettings.hideGUI = true;
+                    if (mc.ingameGUI != null) mc.ingameGUI.getChatGUI().clearChatMessages(false);
+                }
                 if (rainOn && mc.world != null) {
                     // The server ramps rain strength by 0.01/tick (~1000 ticks to a full
                     // downpour), so re-assert full rain on the client every tick: the rain
                     // window is immediate and identical between the Vulkan and GL runs.
                     mc.world.setRainStrength(1.0f);
+                }
+                if (TRANSITIONS_MODE) {
+                    if (++ticks == 100) {
+                        net.vesu.vulkan.Drawer.requestBurst(new File(mc.gameDir, "vm_transitions"), envInt("VESU_AUTOTEST_FRAMES", 900));
+                    } else if (ticks == 110) {
+                        Initializer.LOGGER.info("[autotest] transition: quit to title at frame {}", net.vesu.vulkan.Drawer.burstFrame());
+                        mc.world.sendQuittingDisconnectingPacket();
+                        mc.loadWorld(null);
+                        mc.displayGuiScreen(new GuiMainMenu());
+                        Initializer.LOGGER.info("[autotest] transition: title at frame {}", net.vesu.vulkan.Drawer.burstFrame());
+                        stage = STAGE_TITLE;
+                        ticks = 0;
+                    }
+                    return;
                 }
                 if (BURST_MODE) {
                     // Let the world load and the player settle for ~1.2 s, then pin the camera
@@ -2592,6 +2636,10 @@ public class AutoTest {
             }
             mc.gameSettings.limitFramerate = Integer.MAX_VALUE;
             mc.gameSettings.enableVsync = false;
+            if (HIDE_HUD) {
+                mc.gameSettings.hideGUI = true;
+                if (mc.ingameGUI != null) mc.ingameGUI.getChatGUI().clearChatMessages(false);
+            }
             if (Initializer.isVulkanActive()) {
                 net.vesu.vulkan.Vulkan.setVsync(false);
             }
