@@ -399,7 +399,11 @@ public final class VesuOptionPages {
                                 .tooltip("How many frames the CPU may prepare ahead of the GPU. More frames smooth out the frame rate, "
                                         + "fewer lower the input latency.")
                                 .impact(Impact.MEDIUM)
-                                .restart())));
+                                .restart(),
+                        new Option.Toggle("Fast Chunk Builder", Storage.VESU, () -> cfg().fastBlockRenderer, v -> cfg().fastBlockRenderer = v)
+                                .tooltip("Builds the blocks of chunks with less work than the Forge light pipeline, with the same result: "
+                                        + "chunks load and update faster. Turn it off only to compare.")
+                                .impact(Impact.MEDIUM))));
     }
 
     /** A row for a setting that is planned but not there yet: shown, greyed out. */

@@ -74,7 +74,8 @@
     "render.ParticleM",
     "render.RenderEntityItemM",
     "render.GuiIngameForgeM",
-    "render.GuiIngameForgeInvoker"
+    "render.GuiIngameForgeInvoker",
+    "render.ForgeBlockModelRendererM"
   ],
   "injectors": {
     "defaultRequire": 1

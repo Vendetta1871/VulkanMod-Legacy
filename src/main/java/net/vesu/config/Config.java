@@ -83,6 +83,8 @@ public class Config {
      * See {@link net.vesu.render.HudCache}.
      */
     public int hudFramerate = 60;
+    /** Chunk blocks built by {@link net.vesu.render.FastBlockRenderer} (same output as Forge, less work). */
+    public boolean fastBlockRenderer = true;
     /** Particle billboards built on the GPU from one record each; see {@link net.vesu.render.GpuParticles}. */
     public boolean gpuParticles = true;
     /** Spawn chance 0..1 per particle name (EnumParticleTypes, e.g. "smoke"); unlisted types always spawn. */

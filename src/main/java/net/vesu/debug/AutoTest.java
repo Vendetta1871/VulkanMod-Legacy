@@ -205,6 +205,15 @@ public class AutoTest {
     private static final boolean PACK_GUI = Env.get("VESU_AUTOTEST_PACKGUI") != null;
     /** {@code VESU_AUTOTEST_OPTIONS=<page>}: the Vesu settings screen on that page (0-based), captured as vm_autotest_options. */
     private static final String OPTIONS_PAGE = Env.get("VESU_AUTOTEST_OPTIONS");
+    /**
+     * Chunk build benchmark: {@code VESU_AUTOTEST_REBUILD=<n>} reloads all render chunks n times at
+     * the scene position after it settled and logs how long each took until no chunk update is left.
+     */
+    private static final int REBUILDS = envInt("VESU_AUTOTEST_REBUILD", 0);
+    private static int rebuildIndex, rebuildIdle;
+    private static long rebuildStart;
+    private static boolean rebuildBusy;
+    private static int rebuildChunks;
     private static int packGuiTick;
     private static final int SCENE_SETTLE = envInt("VESU_AUTOTEST_SETTLE", 200), SCENE_MEASURE = envInt("VESU_AUTOTEST_MEASURE", 400);
     private static java.util.List<String[]> scenes;
@@ -2703,6 +2712,27 @@ public class AutoTest {
             }
         }
         sceneTick++;
+        if (REBUILDS > 0 && sceneTick > SCENE_SETTLE && rebuildIndex < REBUILDS) {
+            if (rebuildStart == 0) {
+                mc.renderGlobal.loadRenderers();
+                rebuildStart = System.nanoTime();
+                rebuildIdle = 0;
+                rebuildBusy = false;
+                rebuildChunks = net.minecraft.client.renderer.chunk.RenderChunk.renderChunksUpdated;
+            } else if (!mc.renderGlobal.hasNoChunkUpdates()) {
+                rebuildBusy = true;
+                rebuildIdle = 0;
+            } else if (rebuildBusy && ++rebuildIdle == 3) {
+                // Three idle ticks in a row: the last uploads are through (not counted).
+                Initializer.LOGGER.info("[autotest] REBUILD {} {} ms, {} sections", rebuildIndex,
+                        String.format("%.0f", (System.nanoTime() - rebuildStart) / 1e6 - 100.0),
+                        net.minecraft.client.renderer.chunk.RenderChunk.renderChunksUpdated - rebuildChunks);
+                rebuildIndex++;
+                rebuildStart = 0;
+            }
+            sceneTick = SCENE_SETTLE;
+            return;
+        }
         if (sceneTick == SCENE_SETTLE) {
             capture(mc, s[0]);
             sceneFrames = net.vesu.render.GuiRenderer.getRenderedFrames();
