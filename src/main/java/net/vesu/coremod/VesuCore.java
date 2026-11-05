@@ -18,6 +18,13 @@ import zone.rong.mixinbooter.IEarlyMixinLoader;
 @IFMLLoadingPlugin.SortingIndex(1001)
 public class VesuCore implements IFMLLoadingPlugin, IEarlyMixinLoader {
 
+    static {
+        // The window is not AWT's: AWT only draws into BufferedImages (banner layers, skins).
+        // Without headless the first Graphics opens an X11 connection, which fails under
+        // Wayland without a reachable Xwayland and crashes the client (creative inventory).
+        if (System.getProperty("java.awt.headless") == null) System.setProperty("java.awt.headless", "true");
+    }
+
     @Override
     public String[] getASMTransformerClass() {
         return new String[0];
