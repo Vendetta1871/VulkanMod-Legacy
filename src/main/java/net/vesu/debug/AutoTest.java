@@ -203,6 +203,8 @@ public class AutoTest {
     private static final String SCENE_COMMANDS = Env.get("VESU_AUTOTEST_COMMANDS");
     /** Drives the pack option screen with real clicks: a slider, then Done. */
     private static final boolean PACK_GUI = Env.get("VESU_AUTOTEST_PACKGUI") != null;
+    /** {@code VESU_AUTOTEST_OPTIONS=<page>}: the Vesu settings screen on that page (0-based), captured as vm_autotest_options. */
+    private static final String OPTIONS_PAGE = Env.get("VESU_AUTOTEST_OPTIONS");
     private static int packGuiTick;
     private static final int SCENE_SETTLE = envInt("VESU_AUTOTEST_SETTLE", 200), SCENE_MEASURE = envInt("VESU_AUTOTEST_MEASURE", 400);
     private static java.util.List<String[]> scenes;
@@ -831,6 +833,33 @@ public class AutoTest {
 
                 if (PACK_GUI) {
                     packGuiStage(mc);
+                    return;
+                }
+
+                if (OPTIONS_PAGE != null) {
+                    int t = ++packGuiTick;
+                    if (t == 1) {
+                        serverCommand(mc, "gamerule sendCommandFeedback false");
+                        serverCommand(mc, "time set 6000");
+                        serverCommand(mc, "weather clear 100000");
+                        String size = Env.get("VESU_AUTOTEST_SIZE");
+                        if (size != null) {
+                            String[] wh = size.trim().split("\\s+");
+                            org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(org.lwjgl.sdl.SDLVideo.SDL_GL_GetCurrentWindow(),
+                                    Integer.parseInt(wh[0]), Integer.parseInt(wh[1]));
+                        }
+                    }
+                    // No hover tooltip on the shot: the pointer sits in a corner.
+                    if (t >= 20) org.lwjgl.input.Mouse.setCursorPosition(0, 0);
+                    if (t == 20) {
+                        net.vesu.config.gui.VesuOptionsScreen screen = new net.vesu.config.gui.VesuOptionsScreen(null);
+                        mc.displayGuiScreen(screen);
+                        screen.selectPage(Integer.parseInt(OPTIONS_PAGE.trim()));
+                    } else if (t == 60) {
+                        capture(mc, "options");
+                    } else if (t == 70) {
+                        mc.shutdown();
+                    }
                     return;
                 }
 
