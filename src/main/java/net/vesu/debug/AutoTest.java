@@ -210,6 +210,8 @@ public class AutoTest {
      * the scene position after it settled and logs how long each took until no chunk update is left.
      */
     private static final int REBUILDS = envInt("VESU_AUTOTEST_REBUILD", 0);
+    /** {@code VESU_AUTOTEST_MOVE="<blocks per tick> [<yaw degrees per tick>]"}: the camera moves while a scene is measured. */
+    private static final String SCENE_MOVE = Env.get("VESU_AUTOTEST_MOVE");
     private static int rebuildIndex, rebuildIdle;
     private static long rebuildStart;
     private static boolean rebuildBusy;
@@ -2732,6 +2734,16 @@ public class AutoTest {
             }
             sceneTick = SCENE_SETTLE;
             return;
+        }
+        if (SCENE_MOVE != null && sceneTick > SCENE_SETTLE) {
+            // Camera motion while measuring: blocks per tick forward, degrees per tick of yaw.
+            String[] m = SCENE_MOVE.trim().split("\\s+");
+            float speed = Float.parseFloat(m[0]), spin = m.length > 1 ? Float.parseFloat(m[1]) : 0.0f;
+            net.minecraft.client.entity.EntityPlayerSP p = mc.player;
+            p.rotationYaw += spin;
+            double rad = Math.toRadians(p.rotationYaw);
+            p.setPosition(p.posX - Math.sin(rad) * speed, p.posY, p.posZ + Math.cos(rad) * speed);
+            p.motionX = p.motionY = p.motionZ = 0;
         }
         if (sceneTick == SCENE_SETTLE) {
             capture(mc, s[0]);

@@ -203,4 +203,42 @@ public abstract class RenderGlobalM {
             net.vesu.render.EntityRenderer.setEntityPass(false);
         }
     }
+
+    // --- Camera-section visibility cache ---
+    // setupTerrain floods again on every frame the camera moves, and every flood starts with
+    // getVisibleFacings: a VisGraph of the camera's section built from its 4096 blocks. The result
+    // depends only on the camera block and that section's blocks, so it is kept until the camera
+    // changes block, a block or light change touches its section (markBlocksForUpdate) or the
+    // renderers reload. Chunks loading elsewhere, constant while flying, leave it alone.
+    private long vesu$facingsPos = Long.MIN_VALUE;
+    private java.util.Set<net.minecraft.util.EnumFacing> vesu$facings;
+
+    @Inject(method = "getVisibleFacings", at = @At("HEAD"), cancellable = true)
+    private void vesu$cachedFacings(net.minecraft.util.math.BlockPos pos,
+                                    org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<java.util.Set<net.minecraft.util.EnumFacing>> cir) {
+        if (vesu$facings != null && pos.toLong() == vesu$facingsPos) {
+            cir.setReturnValue(java.util.EnumSet.copyOf(vesu$facings));
+        }
+    }
+
+    @Inject(method = "getVisibleFacings", at = @At("RETURN"))
+    private void vesu$storeFacings(net.minecraft.util.math.BlockPos pos,
+                                   org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<java.util.Set<net.minecraft.util.EnumFacing>> cir) {
+        java.util.Set<net.minecraft.util.EnumFacing> set = cir.getReturnValue();
+        vesu$facings = set.isEmpty() ? java.util.EnumSet.noneOf(net.minecraft.util.EnumFacing.class) : java.util.EnumSet.copyOf(set);
+        vesu$facingsPos = pos.toLong();
+    }
+
+    @Inject(method = "markBlocksForUpdate", at = @At("HEAD"))
+    private void vesu$blocksChanged(int x1, int y1, int z1, int x2, int y2, int z2, boolean now, CallbackInfo ci) {
+        if (vesu$facings == null) return;
+        net.minecraft.util.math.BlockPos p = net.minecraft.util.math.BlockPos.fromLong(vesu$facingsPos);
+        int sx = p.getX() & ~15, sy = p.getY() & ~15, sz = p.getZ() & ~15;
+        if (x2 >= sx && x1 <= sx + 15 && y2 >= sy && y1 <= sy + 15 && z2 >= sz && z1 <= sz + 15) vesu$facings = null;
+    }
+
+    @Inject(method = "loadRenderers", at = @At("HEAD"))
+    private void vesu$renderersReloaded(CallbackInfo ci) {
+        vesu$facings = null;
+    }
 }
