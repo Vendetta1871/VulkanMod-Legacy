@@ -381,6 +381,10 @@ public final class VesuOptionPages {
                                 .impact(Impact.MEDIUM),
                         new Option.Toggle("Particle Culling", Storage.VESU, () -> cfg().particleCulling, v -> cfg().particleCulling = v)
                                 .tooltip("Particles outside the view are not drawn, and breaking a block out of view spawns no particles.")
+                                .impact(Impact.LOW),
+                        new Option.Toggle("GPU Particles", Storage.VESU, () -> cfg().gpuParticles, v -> cfg().gpuParticles = v)
+                                .tooltip("The graphics card builds the particle quads, which takes most of their cost off the CPU. "
+                                        + "Not used with shader packs.")
                                 .impact(Impact.LOW)),
                 List.of(
                         vanillaToggle(GameSettings.Options.ANAGLYPH, () -> gs().anaglyph)

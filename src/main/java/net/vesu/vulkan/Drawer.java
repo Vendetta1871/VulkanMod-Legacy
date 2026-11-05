@@ -166,6 +166,30 @@ public class Drawer {
     }
 
     /**
+     * {@code instances} quads from one record each ({@link net.vesu.render.GpuParticles}): the
+     * records go to the vertex ring and bind at instance rate, the six indices of the first quad
+     * give the corners.
+     */
+    public void drawInstancedQuads(ByteBuffer buffer, VertexFormat vertexFormat, int instances) {
+        assertCommandBufferState();
+        if (instances <= 0 || shadowOnly) return;
+        VertexBuffer vertexBuffer = this.vertexBuffers[currentFrame];
+        vertexBuffer.copyToVertexBuffer(vertexFormat.getSize(), instances, buffer);
+        IndexBuffer indexBuffer = this.quadsIndexBuffer.getIndexBuffer(4);
+
+        Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
+        bindPipeline(boundPipeline);
+        uploadAndBindUBOs(boundPipeline);
+        try (MemoryStack stack = stackPush()) {
+            VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
+            vkCmdBindVertexBuffers(commandBuffer, 0, stack.longs(vertexBuffer.getId()), stack.longs(vertexBuffer.getOffset()));
+            vkCmdBindIndexBuffer(commandBuffer, indexBuffer.getId(), indexBuffer.getOffset(), indexBuffer.indexType.vkType);
+            vkCmdDrawIndexed(commandBuffer, 6, instances, 0, 0, 0);
+        }
+        currentIndex++;
+    }
+
+    /**
      * Non-indexed line draw for the debug-box / selection-box capture (GL_LINES,
      * GL_LINE_STRIP). The caller sets {@link VRenderSystem#topology} to the matching line
      * topology and binds the POSITION_COLOR line pipeline; the width is taken from

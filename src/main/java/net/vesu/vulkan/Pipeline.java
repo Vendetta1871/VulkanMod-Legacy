@@ -1146,7 +1146,9 @@ public class Pipeline {
 
         bindingDescription.binding(0);
         bindingDescription.stride(vertexFormat.getSize());
-        bindingDescription.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+        // GPU particles: one record per instance, the quad corners come from gl_VertexIndex.
+        bindingDescription.inputRate(vertexFormat == net.vesu.render.GpuParticles.FORMAT
+                ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX);
 
         return bindingDescription;
     }

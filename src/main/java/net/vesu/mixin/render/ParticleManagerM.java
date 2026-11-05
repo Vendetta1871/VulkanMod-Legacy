@@ -34,12 +34,14 @@ public class ParticleManagerM {
             // F2: particles and translucent geometry are what the reactive mask marks.
             net.vesu.vulkan.Drawer.snapshotOpaque();
             EntityRenderer.setParticlePass(true);
+            net.vesu.render.GpuParticles.begin();
         }
     }
 
     @Inject(method = "renderParticles(Lnet/minecraft/entity/Entity;F)V", at = @At("RETURN"))
     private void vesu$endParticles(Entity entity, float partialTicks, CallbackInfo ci) {
         if (Initializer.isVulkanActive()) {
+            net.vesu.render.GpuParticles.end();
             EntityRenderer.setParticlePass(false);
         }
     }
@@ -67,5 +69,13 @@ public class ParticleManagerM {
     private void vesu$spawnChance(int particleId, double x, double y, double z, double vx, double vy, double vz, int[] parameters,
                                   CallbackInfoReturnable<Particle> cir) {
         if (!net.vesu.render.ParticleCulling.spawn(particleId)) cir.setReturnValue(null);
+    }
+
+    // A texture layer's CPU quads, then its GPU particle records with the same state.
+    @Redirect(method = "renderParticles(Lnet/minecraft/entity/Entity;F)V", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/Tessellator;draw()V"))
+    private void vesu$drawLayer(net.minecraft.client.renderer.Tessellator tessellator) {
+        tessellator.draw();
+        net.vesu.render.GpuParticles.flush();
     }
 }

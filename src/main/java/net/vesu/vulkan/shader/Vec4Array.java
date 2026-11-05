@@ -18,6 +18,8 @@ public class Vec4Array extends Field {
             this.set = net.vesu.render.DynamicLights::viewSpaceArray;
         } else if (this.name.equals("DynLightsAll")) {
             this.set = net.vesu.render.DynamicLights::viewSpaceArrayAll;
+        } else if (this.name.equals("ParticleAxes")) {
+            this.set = net.vesu.render.GpuParticles::axes;
         }
     }
 

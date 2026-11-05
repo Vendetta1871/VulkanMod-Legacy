@@ -83,6 +83,8 @@ public class Config {
      * See {@link net.vesu.render.HudCache}.
      */
     public int hudFramerate = 60;
+    /** Particle billboards built on the GPU from one record each; see {@link net.vesu.render.GpuParticles}. */
+    public boolean gpuParticles = true;
     /** Spawn chance 0..1 per particle name (EnumParticleTypes, e.g. "smoke"); unlisted types always spawn. */
     public java.util.Map<String, Float> particleSpawnChance = new java.util.HashMap<>();
 

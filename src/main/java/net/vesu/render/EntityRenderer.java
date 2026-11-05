@@ -39,6 +39,7 @@ public class EntityRenderer {
     private static Pipeline shadowPipeline;   // POSITION_TEX_COLOR: entity drop shadow
     private static Pipeline flatPipeline;     // POSITION_TEX: burning fire / map / glint quads
     private static Pipeline particlePipeline; // PARTICLE_POSITION_TEX_COLOR_LMAP: billboards
+    private static Pipeline gpuParticlePipeline; // GpuParticles records, instanced
     private static Pipeline blockPipeline;    // BLOCK: held blocks (RenderLivingBase equip)
 
     private static final VertexFormat MODEL_FORMAT = DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL;
@@ -213,6 +214,7 @@ public class EntityRenderer {
         shadowPipeline = new Pipeline(SHADOW_FORMAT, "entity_shadow");
         flatPipeline = new Pipeline(FLAT_FORMAT, "entity_flat");
         particlePipeline = new Pipeline(PARTICLE_FORMAT, "entity_particle");
+        gpuParticlePipeline = new Pipeline(GpuParticles.FORMAT, "particle_gpu");
         blockPipeline = new Pipeline(BLOCK_FORMAT, "terrain", "terrain#entity");
     }
 
@@ -521,6 +523,20 @@ public class EntityRenderer {
         return true;
     }
 
+    public static boolean gpuParticlesReady() {
+        return gpuParticlePipeline != null;
+    }
+
+    /** {@code count} GpuParticles records, drawn in the particle pass with its live state. */
+    public static void submitParticleInstances(ByteBuffer data, int count) {
+        if (!particlePass || !Drawer.isActive() || Drawer.skipRendering || VRenderSystem.colorMask == 0) return;
+        try {
+            submit(data, count, GpuParticles.FORMAT, gpuParticlePipeline);
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("particles", t);
+        }
+    }
+
     /** Replays {@code data} (position 0, {@code vertexCount} verts of {@code format}) in Vulkan. */
     private static void submit(ByteBuffer data, int vertexCount, VertexFormat format, Pipeline pipeline) {
         net.vesu.debug.FrameProfiler.entityVerts(vertexCount);
@@ -593,7 +609,7 @@ public class EntityRenderer {
         // UV2, so multiplying the tint by an entity's light on top of that double-applies a
         // light that is not theirs: the rain and particles inherited the last mob's lightmap
         // and turned black whenever that mob stood in the dark.
-        int packed = (pipeline == blockPipeline || pipeline == particlePipeline) ? -1 : packedLight();
+        int packed = (pipeline == blockPipeline || pipeline == particlePipeline || pipeline == gpuParticlePipeline) ? -1 : packedLight();
         if (packed >= 0) {
             // RenderManager.renderEntityStatic turns the packed light into the lightmap
             // unit's texture coordinate: block * 16 across, sky * 16 up.
@@ -655,7 +671,8 @@ public class EntityRenderer {
                     light % 65536, light / 65536, net.vesu.shader.PackIds.entityId(currentEntity),
                     net.vesu.shader.PackIds.blockEntityId(currentTile));
         }
-        drawer.draw(data, 7, format, vertexCount);
+        if (pipeline == gpuParticlePipeline) drawer.drawInstancedQuads(data, format, vertexCount);
+        else drawer.draw(data, 7, format, vertexCount);
         Drawer.clearDrawBlock();
         Drawer.shadowOnly = false;
 
