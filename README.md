@@ -3,7 +3,7 @@
 A Vulkan renderer for Minecraft **1.12.2**, running on [Cleanroom](https://github.com/CleanroomMC/Cleanroom).
 Vesu (short for Vesuvius) began as an unofficial port of [VulkanMod](https://github.com/xCollateral/VulkanMod)
 (by xCollateral, originally for 1.16.5+) to the 1.12.2 rendering pipeline and has since grown its own
-shader pack runtime, ray tracing and upscaling.
+shader pack runtime, ray tracing, upscaling and distant (LOD) terrain.
 
 Instead of Minecraft's OpenGL draw calls being sent to the GPU, Cleanroom's Kirino layer tracks the
 GL state and the mod replays the render passes - terrain, entities, GUI, sky, clouds, weather and more -
@@ -27,8 +27,8 @@ presentation layer is Vulkan.
 
 ## Configuration
 
-Options -> Video Settings opens the Vesu settings screen: pages for General, Quality, Render Distance,
-Ray Tracing, Shader Packs and Advanced in the left column, and a search field on top
+Options -> Video Settings opens the Vesu settings screen: pages for General, Quality, Render Distance
+(with the LOD settings), Ray Tracing, Shader Packs and Advanced in the left column, and a search field on top
 (Ctrl+F). Hover a row for its description; edits wait for Apply or Done (Undo drops them).
 Vanilla options still go to `options.txt`, Vesu's own to `config/vesu_settings.json`, for example:
 
@@ -45,6 +45,12 @@ Vanilla options still go to `options.txt`, Vesu's own to `config/vesu_settings.j
 | `rtPreset`           | `off`   | Ray tracing: `off`, `potato`, `low`, `medium`, `high`, `ultra`, `nasa`, `custom` |
 | `shaderPack`         | none    | Selected pack in `shaderpacks/`, or `builtin:sample_post`, `builtin:vibrant_visuals` |
 | `frameGeneration`    | `false` | FSR 3 frame generation: a generated frame between every two rendered ones, while FSR 3 upscales |
+| `lodEnabled`         | `true`  | Distant terrain past the render distance; off: nothing of it runs |
+| `lodDistance`        | `512`   | LOD distance in chunks, 32..2048 in steps of 32               |
+| `lodQuality`         | `64`    | Detail: `128` low, `64` medium, `40` high (screen size in pixels before a node splits) |
+| `lodFog`             | `fog+fade` | `fog+fade`, `fog`, `fade` or `off`                         |
+| `lodSsao`            | `auto`  | Ambient occlusion of LOD pixels: `auto`, `basic`, `better`, `best`, `off` |
+| `lodGenerationDistance` | `0`  | Singleplayer: generate chunks out to this distance in the background (0 = off) |
 | `frameQueueSize`     | `3`     | Frames in flight; read at startup                             |
 
 Settings and caches of versions named VulkanMod (`config/vulkanmod_settings.json`,
@@ -57,12 +63,15 @@ Environment variables (the older `VULKANMOD_*` spellings still work):
   NRD needs Vulkan 1.3; on 1.2 the RT passes use their own denoiser.
 - `VESU_FRAMEGEN=1` / `0` - force frame generation on or off; `VESU_FRAMEGEN_LOG=1` logs
   rendered against presented frames, `VESU_FRAMEGEN_DEBUG=1` draws FSR's debug overlays.
+- `VESU_LOD=0` / `1` - force distant terrain off or on; `VESU_LOD_DISTANCE=<chunks>` and
+  `VESU_LOD_GEN=<chunks>` override the LOD and generation distances.
 - `VESU_BATCH=1` - opt-in chunk batching: uploads all visible chunk sections into one arena
   buffer and draws them with indirect commands.
 
 ## What is rendered through Vulkan
 
 - Terrain (all chunk layers), with optional indirect chunk batching
+- Distant terrain past the render distance (LOD), also through shader packs and in the RT scene
 - Entities, including item entities, shadows, glowing eyes, hurt tint and the first-person hand
   (held items, maps, overlays)
 - Block entities (chests, signs, banners, skulls, ...)
@@ -73,6 +82,16 @@ Environment variables (the older `VULKANMOD_*` spellings still work):
 - Fog, lightmap (torch / sky lighting), enchantment glint
 - World border forcefield and the border warning vignette
 - F3 debug renderers (chunk borders, collision boxes, ...) and the block selection box
+
+## Distant terrain
+
+Past the render distance Vesu draws simplified terrain out to the LOD distance (512 chunks by
+default). It is built from the chunks the client receives and kept per world and dimension (in a `vesu_lod/`
+folder inside the save, or under `vesu_lod/servers/` for multiplayer), so it grows as you explore; `/vesu lod import current` or
+`/vesu lod import world <name>` fills it from a save, and LOD Generation Distance generates the
+missing chunks in the background in singleplayer. Node selection and occlusion culling run on the
+GPU. Shader packs with Distant Horizons programs (`dh_terrain`, `dh_water`) light it themselves;
+other packs draw it through their terrain and water programs.
 
 ## Known limitations
 
