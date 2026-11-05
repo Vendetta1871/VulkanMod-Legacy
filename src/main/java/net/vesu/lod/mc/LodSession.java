@@ -201,6 +201,9 @@ public final class LodSession {
             renderer = new LodRenderer(budget);
         }
         renderer.beginFrame();
+        // Before any table change of this frame (results, requests, new nodes).
+        LodTraversal trav = traversal();
+        if (trav != null) trav.beginFrame(renderer.frameSlot());
         frameOpen = true;
         frame++;
         camX = CameraHistory.camX();
@@ -220,7 +223,6 @@ public final class LodSession {
         applyResults();
         LodTraversal tr = traversal();
         if (tr != null) {
-            tr.beginFrame();
             int n = tr.takeRequests(renderer.frameSlot(), requestIds);
             for (int i = 0; i < n; i++) {
                 int id = requestIds[i];

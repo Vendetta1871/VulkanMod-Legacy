@@ -36,7 +36,9 @@ public final class LodTraversal {
     private final VkDevice device = Vulkan.getDevice();
     private final int frames = Drawer.framesInFlight();
 
-    private final long nodesBuf, nodesAlloc, nodesPtr, childrenBuf, childrenAlloc, childrenPtr, stampsBuf, stampsAlloc, stampsPtr;
+    /** The node table and the children blocks, one copy per frame in flight. */
+    private final FrameMirror nodes, children;
+    private final long stampsBuf, stampsAlloc, stampsPtr;
     private final long[] requestsBuf, requestsAlloc, requestsPtr, rootsBuf, rootsAlloc, rootsPtr;
     private final long queueBuf, queueAlloc, travBuf, travAlloc, sortBuf, sortAlloc, orderBuf, orderAlloc;
 
@@ -55,13 +57,9 @@ public final class LodTraversal {
 
     public LodTraversal() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            long[] r = host(stack, (long) MAX_NODES * NODE_BYTES);
-            nodesBuf = r[0]; nodesAlloc = r[1]; nodesPtr = r[2];
-            MemoryUtil.memSet(nodesPtr, 0, (long) MAX_NODES * NODE_BYTES);
-            r = host(stack, (long) MAX_BLOCKS * 32);
-            childrenBuf = r[0]; childrenAlloc = r[1]; childrenPtr = r[2];
-            MemoryUtil.memSet(childrenPtr, 0, (long) MAX_BLOCKS * 32);
-            r = host(stack, (long) MAX_NODES * 8);
+            nodes = new FrameMirror(MAX_NODES, NODE_BYTES, frames);
+            children = new FrameMirror(MAX_BLOCKS, 32, frames);
+            long[] r = host(stack, (long) MAX_NODES * 8);
             stampsBuf = r[0]; stampsAlloc = r[1]; stampsPtr = r[2];
             MemoryUtil.memSet(stampsPtr, 0, (long) MAX_NODES * 8);
             requestsBuf = new long[frames]; requestsAlloc = new long[frames]; requestsPtr = new long[frames];
@@ -123,7 +121,7 @@ public final class LodTraversal {
                     .descriptorPool(pool).pSetLayouts(layouts), out), "traversal sets");
             for (int i = 0; i < frames; i++) {
                 sets[i] = out.get(i);
-                long[] bufs = {nodesBuf, childrenBuf, stampsBuf, requestsBuf[i], rootsBuf[i], queueBuf, travBuf, sortBuf, orderBuf};
+                long[] bufs = {nodes.buffer(i), children.buffer(i), stampsBuf, requestsBuf[i], rootsBuf[i], queueBuf, travBuf, sortBuf, orderBuf};
                 VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(BINDINGS, stack);
                 for (int k = 0; k < BINDINGS; k++) {
                     w.get(k).sType$Default().dstSet(sets[i]).dstBinding(k).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1)
@@ -161,8 +159,13 @@ public final class LodTraversal {
 
     // ---- The table ----
 
-    /** Once per frame, before any table change: releases what no frame in flight can read. */
-    public void beginFrame() {
+    /**
+     * Once per frame, before any table change: frame slot {@code frameSlot} takes the changes
+     * made since it last ran, and what no frame in flight can read is released.
+     */
+    public void beginFrame(int frameSlot) {
+        nodes.beginFrame(frameSlot);
+        children.beginFrame(frameSlot);
         frameNo++;
         while (!pending.isEmpty() && pending.peek()[0] <= frameNo) {
             long[] f = pending.poll();
@@ -187,7 +190,10 @@ public final class LodTraversal {
     /** A block of 8 child ids, all empty (0 when none is left). */
     public int allocBlock() {
         int b = freeBlockCount > 0 ? freeBlocks[--freeBlockCount] : nextBlock < MAX_BLOCKS ? nextBlock++ : 0;
-        if (b != 0) MemoryUtil.memSet(childrenPtr + b * 32L, 0, 32);
+        if (b != 0) {
+            MemoryUtil.memSet(children.at(b), 0, 32);
+            children.changed(b);
+        }
         return b;
     }
 
@@ -197,12 +203,14 @@ public final class LodTraversal {
     }
 
     public void setChild(int block, int octant, int id) {
-        if (block != 0) MemoryUtil.memPutInt(childrenPtr + block * 32L + octant * 4L, id);
+        if (block == 0) return;
+        MemoryUtil.memPutInt(children.at(block) + octant * 4L, id);
+        children.changed(block);
     }
 
     public void writeNode(int id, int block, int slot, int childMask, boolean ready, boolean translucent, int lvl, int x, int y, int z) {
         if (id == 0) return;
-        long p = nodesPtr + (long) id * NODE_BYTES;
+        long p = nodes.at(id);
         MemoryUtil.memPutInt(p, block);
         MemoryUtil.memPutInt(p + 4, slot);
         MemoryUtil.memPutInt(p + 8, (childMask & 0xFF) | (ready ? 0x100 : 0) | (translucent ? 0x200 : 0) | lvl << 12);
@@ -211,6 +219,7 @@ public final class LodTraversal {
         MemoryUtil.memPutInt(p + 20, y);
         MemoryUtil.memPutInt(p + 24, z);
         MemoryUtil.memPutInt(p + 28, 0);
+        nodes.changed(id);
     }
 
     /** The last frame the traversal visited the node (0: never). */
@@ -305,7 +314,9 @@ public final class LodTraversal {
 
     public void destroy() {
         destroyPipelines();
-        long[] host = {nodesBuf, nodesAlloc, childrenBuf, childrenAlloc, stampsBuf, stampsAlloc, queueBuf, queueAlloc,
+        nodes.destroy();
+        children.destroy();
+        long[] host = {stampsBuf, stampsAlloc, queueBuf, queueAlloc,
                 travBuf, travAlloc, sortBuf, sortAlloc, orderBuf, orderAlloc};
         long[][] perFrame = {requestsBuf, requestsAlloc, rootsBuf, rootsAlloc};
         long layout = setLayout, p = pool;

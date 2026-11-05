@@ -58,7 +58,8 @@ public final class LodRenderer {
     private final long[] uboBuf, uboAlloc, uboPtr, cmdBuf, cmdAlloc, cmdPtr, coverBuf, coverAlloc, coverPtr, stagingBuf, stagingAlloc, stagingPtr;
 
     // GPU culling (L6): per-slot meta, per-frame candidates, device-written commands and counts, Hi-Z.
-    private long metaBuf, metaAlloc, metaPtr;
+    /** Culling data per slot, one copy per frame in flight (a remeshed slot changes under no frame). */
+    private FrameMirror meta;
     private final long[] candBuf, candAlloc, candPtr, gpuCmdBuf, gpuCmdAlloc, countBuf, countAlloc;
     /** Per frame slot: the opaque draw count the cull pass wrote, copied for the CPU. */
     private final long[] countReadBuf, countReadAlloc, countReadPtr;
@@ -128,8 +129,8 @@ public final class LodRenderer {
         countBuf = new long[frames]; countAlloc = new long[frames];
         countReadBuf = new long[frames]; countReadAlloc = new long[frames]; countReadPtr = new long[frames];
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            long[] r = hostBuffer(stack, (long) MAX_SECTIONS * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            metaBuf = r[0]; metaAlloc = r[1]; metaPtr = r[2];
+            meta = new FrameMirror(MAX_SECTIONS, 32, frames);
+            long[] r;
             for (int i = 0; i < frames; i++) {
                 r = hostBuffer(stack, (long) MAX_SECTIONS * 2 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
                 candBuf[i] = r[0]; candAlloc[i] = r[1]; candPtr[i] = r[2];
@@ -290,13 +291,14 @@ public final class LodRenderer {
 
     /** Culling data of a slot: quad start, AABB and the eight group counts. */
     public void writeMeta(int slot, long quadStart, int aabb, int[] counts) {
-        long p = metaPtr + (long) slot * 32;
+        long p = meta.at(slot);
         MemoryUtil.memPutInt(p, (int) quadStart);
         MemoryUtil.memPutInt(p + 4, aabb);
         for (int g = 0; g < 8; g++) {
             MemoryUtil.memPutShort(p + 8 + g * 2L, (short) Math.min(0xFFFF, counts[g]));
         }
         MemoryUtil.memPutLong(p + 24, 0);
+        meta.changed(slot);
     }
 
     /** GPU path: this frame's candidate sections, opaque ones then translucent ones far to near. */
@@ -395,6 +397,7 @@ public final class LodRenderer {
 
     public void beginFrame() {
         frame = Drawer.getCurrentFrame();
+        meta.beginFrame(frame);
         frameNo++;
         while (!pendingFrees.isEmpty() && pendingFrees.peek()[0] + frames + 1 <= frameNo) {
             long[] f = pendingFrees.poll();
@@ -544,7 +547,7 @@ public final class LodRenderer {
             w.get(7).sType$Default().dstSet(sets[i]).dstBinding(7).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                     .descriptorCount(1).pBufferInfo(ci);
             if (gpuCull) {
-                long[] extra = {metaBuf, candBuf[i], gpuCmdBuf[i], countBuf[i]};
+                long[] extra = {meta.buffer(i), candBuf[i], gpuCmdBuf[i], countBuf[i]};
                 for (int b = 0; b < 4; b++) {
                     VkDescriptorBufferInfo.Buffer bi = VkDescriptorBufferInfo.calloc(1, stack).buffer(extra[b]).offset(0).range(VK_WHOLE_SIZE);
                     w.get(8 + b).sType$Default().dstSet(sets[i]).dstBinding(8 + b).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
@@ -1247,7 +1250,8 @@ public final class LodRenderer {
         atlas.free();
         destroyHiz();
         net.vesu.vulkan.ComputePipeline cp = cullPipeline, hp = hizPipeline;
-        long hl = hizLayout, hpool = hizPool, hs = hizSampler, mb = metaBuf, ma = metaAlloc;
+        long hl = hizLayout, hpool = hizPool, hs = hizSampler;
+        meta.destroy();
         long[] cb = candBuf.clone(), ca = candAlloc.clone(), gb = gpuCmdBuf.clone(), ga = gpuCmdAlloc.clone(),
                 kb = countBuf.clone(), ka = countAlloc.clone(), rb = countReadBuf.clone(), ra = countReadAlloc.clone();
         MemoryManager.addToFreeable(() -> {
@@ -1256,7 +1260,6 @@ public final class LodRenderer {
             if (hpool != 0) vkDestroyDescriptorPool(device, hpool, null);
             if (hl != 0) vkDestroyDescriptorSetLayout(device, hl, null);
             if (hs != 0) vkDestroySampler(device, hs, null);
-            MemoryManager.freeBuffer(mb, ma);
             for (int i = 0; i < cb.length; i++) {
                 MemoryManager.freeBuffer(cb[i], ca[i]);
                 MemoryManager.freeBuffer(gb[i], ga[i]);
