@@ -72,7 +72,9 @@
     "render.BlockLeavesM",
     "render.CullableM",
     "render.ParticleM",
-    "render.RenderEntityItemM"
+    "render.RenderEntityItemM",
+    "render.GuiIngameForgeM",
+    "render.GuiIngameForgeInvoker"
   ],
   "injectors": {
     "defaultRequire": 1

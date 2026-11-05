@@ -34,6 +34,7 @@ public class VesuMod {
         net.vesu.lod.mc.LodSystem.init();
         // Entity and leaf culling settings follow the client tick.
         net.vesu.render.OcclusionCuller.init();
+        net.vesu.render.HudCache.init();
 
         if (AutoTest.ENABLED) {
             MinecraftForge.EVENT_BUS.register(AutoTest.class);

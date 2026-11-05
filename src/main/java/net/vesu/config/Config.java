@@ -78,6 +78,11 @@ public class Config {
     public boolean entityCulling = true;
     /** Particles outside the view are not drawn, block-break particles outside it not spawned. */
     public boolean particleCulling = true;
+    /**
+     * Times a second the in-game HUD is redrawn into its cached image; 0 draws it every frame.
+     * See {@link net.vesu.render.HudCache}.
+     */
+    public int hudFramerate = 60;
     /** Spawn chance 0..1 per particle name (EnumParticleTypes, e.g. "smoke"); unlisted types always spawn. */
     public java.util.Map<String, Float> particleSpawnChance = new java.util.HashMap<>();
 

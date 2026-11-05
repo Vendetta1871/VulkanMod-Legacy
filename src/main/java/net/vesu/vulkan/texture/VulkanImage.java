@@ -66,12 +66,16 @@ public class VulkanImage {
     }
 
     public VulkanImage(int mipLevels, int width, int height, int formatSize, boolean blur, boolean clamp) {
+        this(mipLevels, width, height, formatSize, blur, clamp, 0);
+    }
+
+    private VulkanImage(int mipLevels, int width, int height, int formatSize, boolean blur, boolean clamp, int extraUsage) {
         this.mipLevels = mipLevels;
         this.width = width;
         this.height = height;
         this.formatSize = formatSize;
 
-        createTextureImage(mipLevels, width, height);
+        createTextureImage(mipLevels, width, height, extraUsage);
         createTextureImageView(mipLevels);
         updateTextureSampler(blur, clamp, mipLevels > 1);
     }
@@ -84,6 +88,14 @@ public class VulkanImage {
         this(1, width, height, 4, false, false);
     }
 
+    /**
+     * A texture that is also drawn into as a color attachment (the cached HUD): the display's
+     * format, nearest filtering, clamped. Its layout is managed by whoever renders into it.
+     */
+    public static VulkanImage renderTarget(int width, int height) {
+        return new VulkanImage(1, width, height, 4, false, true, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    }
+
     public static VulkanImage createWhiteTexture() {
         int i = 0xFFFFFFFF;
         ByteBuffer buffer = MemoryUtil.memAlloc(4);
@@ -94,7 +106,7 @@ public class VulkanImage {
         return image;
     }
 
-    private void createTextureImage(int miplevel, int width, int height) {
+    private void createTextureImage(int miplevel, int width, int height, int extraUsage) {
 
         try(MemoryStack stack = stackPush()) {
 
@@ -106,7 +118,7 @@ public class VulkanImage {
                     VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
                     // TRANSFER_SRC: the mirror readback (copyToBuffer) copies these
                     // images out; validation rejects the copy without the usage bit.
-                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | extraUsage,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                     pTextureImage,
                     pAllocation);

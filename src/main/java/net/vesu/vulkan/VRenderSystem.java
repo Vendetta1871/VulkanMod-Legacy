@@ -719,9 +719,22 @@ public class VRenderSystem {
     // Only the blend setters and resetState write the factors; both drop the cache.
     private static Pipeline.BlendState cachedBlendState;
 
+    // While the HUD is drawn into its cache image (HudCache), alpha accumulates as
+    // (ONE, ONE_MINUS_SRC_ALPHA): the image then holds premultiplied color.
+    private static Pipeline.BlendState cachedHudBlendState;
+
     public static Pipeline.BlendState getBlendState() {
         if (!blendEnabled) {
             return Pipeline.NO_BLEND_STATE;
+        }
+        if (net.vesu.render.HudCache.alphaOver()) {
+            Pipeline.BlendState hud = cachedHudBlendState;
+            if (hud == null || cachedBlendState == null) {
+                hud = new Pipeline.BlendState(blendSrcRgb, blendDstRgb, 1, 771);
+                cachedHudBlendState = hud;
+                cachedBlendState = new Pipeline.BlendState(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
+            }
+            return hud;
         }
         Pipeline.BlendState state = cachedBlendState;
         if (state == null) {

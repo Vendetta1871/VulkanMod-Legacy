@@ -697,6 +697,26 @@ public class Drawer {
      * Switches the frame from the scene target to the display target (B3). Called where
      * vanilla starts the hand and the GUI; a no-op once switched or outside a frame.
      */
+    /** Display-phase draws go to {@code image} (cleared) until {@link #endHudCapture}. */
+    public static void beginHudCapture(net.vesu.vulkan.texture.VulkanImage image) {
+        if (!isActive()) return;
+        net.vesu.render.GuiRenderer.flushPending();
+        try (MemoryStack stack = stackPush()) {
+            FrameTargets.beginHudCapture(commandBuffers.get(currentFrame), image, stack);
+        }
+        invalidateBoundPipeline(commandBuffers.get(currentFrame));
+    }
+
+    /** Back to the display target; {@code image} becomes readable by the fragment stage. */
+    public static void endHudCapture(net.vesu.vulkan.texture.VulkanImage image) {
+        if (!isActive()) return;
+        net.vesu.render.GuiRenderer.flushPending();
+        try (MemoryStack stack = stackPush()) {
+            FrameTargets.endHudCapture(commandBuffers.get(currentFrame), image, stack);
+        }
+        invalidateBoundPipeline(commandBuffers.get(currentFrame));
+    }
+
     public static void enterDisplayPhase() {
         if(!isActive() || FrameTargets.phase() != FrameTargets.Phase.SCENE) return;
         try(MemoryStack stack = stackPush()) {

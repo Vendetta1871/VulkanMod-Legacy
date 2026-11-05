@@ -171,6 +171,13 @@ public abstract class EntityRendererM implements net.vesu.render.IHandInScene {
         FrameProfiler.renderEnd();
     }
 
+    // HUD caching (HudCache): the overlay is drawn into an image at most hudFramerate times a second.
+    @Redirect(method = "updateCameraAndRender",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/GuiIngame;renderGameOverlay(F)V"))
+    private void vesu$cachedHud(net.minecraft.client.gui.GuiIngame gui, float partialTicks) {
+        net.vesu.render.HudCache.renderOverlay(gui, partialTicks);
+    }
+
     @Inject(method = "renderWorld", at = @At("HEAD"))
     private void vesu$worldBegin(float partialTicks, long finishTimeNano, CallbackInfo ci) {
         FrameProfiler.worldBegin();

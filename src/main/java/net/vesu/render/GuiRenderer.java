@@ -198,6 +198,30 @@ public class GuiRenderer {
         return guiPass;
     }
 
+    /** Ends the open glyph run: draws go to another attachment next (the cached HUD). */
+    public static void flushPending() {
+        flushGlyphBatch();
+    }
+
+    /**
+     * One textured quad over the GUI area, {@code width} x {@code height} in GUI units, with
+     * the tracked blend, alpha and color state (the cached HUD image).
+     */
+    public static void drawFullscreen(VulkanImage texture, double width, double height) {
+        flushGlyphBatch();
+        java.nio.ByteBuffer quad = org.lwjgl.system.MemoryUtil.memAlloc(4 * 20);
+        try {
+            float w = (float) width, h = (float) height;
+            float[] v = {0, h, 0, 0, 1,  w, h, 0, 1, 1,  w, 0, 0, 1, 0,  0, 0, 0, 0, 0};
+            for (float f : v) quad.putFloat(f);
+            quad.flip();
+            applyGuiState(guiPipeline, texture);
+            Drawer.getInstance().draw(quad, 7, POSITION_TEX, 4);
+        } finally {
+            org.lwjgl.system.MemoryUtil.memFree(quad);
+        }
+    }
+
     /** The POSITION_TEX_COLOR GUI pipeline, reused for textured world lines (dragon beams). */
     public static Pipeline getTexColorPipeline() {
         return guiTexColorPipeline;

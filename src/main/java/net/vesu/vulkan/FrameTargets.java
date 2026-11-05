@@ -641,6 +641,65 @@ public final class FrameTargets {
         phase = Phase.DISPLAY;
     }
 
+    /**
+     * The cached HUD ({@code HudCache}): suspends the display rendering and renders into
+     * {@code image} with the display's depth, both cleared. Display phase only.
+     */
+    static void beginHudCapture(VkCommandBuffer cmd, net.vesu.vulkan.texture.VulkanImage image, MemoryStack stack) {
+        if (phase != Phase.DISPLAY) return;
+        VkCompat.endRendering(cmd);
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        // The previous frames sampled it; its old contents are cleared anyway.
+        imageBarrier(b.get(0), image.getId(), VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        pipelineBarrier(cmd, b, stack);
+
+        VkRenderingAttachmentInfo.Buffer color = VkRenderingAttachmentInfo.calloc(1, stack);
+        color.get(0).sType$Default()
+                .imageView(image.getTextureImageView())
+                .imageLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                .loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+                .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
+        color.get(0).clearValue().color().float32(0, 0.0f).float32(1, 0.0f).float32(2, 0.0f).float32(3, 0.0f);
+        VkRenderingAttachmentInfo depth = VkRenderingAttachmentInfo.calloc(stack).sType$Default()
+                .imageView(display.depthView())
+                .imageLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+                .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
+        depth.clearValue().depthStencil().set(VRenderSystem.farDepth(), 0);
+        VkRenderingInfo info = VkRenderingInfo.calloc(stack).sType$Default()
+                .layerCount(1)
+                .pColorAttachments(color)
+                .pDepthAttachment(depth);
+        info.renderArea().offset().set(0, 0);
+        info.renderArea().extent().set(display.width(), display.height());
+        VkCompat.beginRendering(cmd, info);
+
+        // Stored upright like the display (viewport flipped like GL).
+        VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+        viewport.x(0.0f).y(display.height()).width(display.width()).height(-display.height()).minDepth(0.0f).maxDepth(1.0f);
+        vkCmdSetViewport(cmd, 0, viewport);
+        VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+        scissor.extent().set(display.width(), display.height());
+        vkCmdSetScissor(cmd, 0, scissor);
+    }
+
+    /** Ends {@link #beginHudCapture}: the image becomes sampleable, the display rendering resumes. */
+    static void endHudCapture(VkCommandBuffer cmd, net.vesu.vulkan.texture.VulkanImage image, MemoryStack stack) {
+        if (phase != Phase.DISPLAY) return;
+        VkCompat.endRendering(cmd);
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        imageBarrier(b.get(0), image.getId(), VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        pipelineBarrier(cmd, b, stack);
+        beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
+    }
+
     /** Copies or linearly blits {@code src} into the display color and readies it as an attachment. */
     private static void blitIntoDisplay(VkCommandBuffer cmd, long src, int srcW, int srcH, int srcFormat,
                                         int srcLayout, long srcStage, long srcAccess, boolean flipY,

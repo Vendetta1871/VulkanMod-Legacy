@@ -136,7 +136,13 @@ public final class VesuOptionPages {
                         vesuSlider("Menu Framerate", 10.0f, 240.0f, 10.0f, v -> Math.round(v) + " fps",
                                 () -> (float) cfg().menuFramerate, v -> cfg().menuFramerate = Math.round(v))
                                 .tooltip("The highest frame rate while the game is paused, on the title menus or minimized. "
-                                        + "It never goes above the game frame rate.")),
+                                        + "It never goes above the game frame rate."),
+                        vesuSlider("HUD Framerate", 0.0f, 240.0f, 10.0f, v -> Math.round(v) == 0 ? "Every Frame" : Math.round(v) + " fps",
+                                () -> (float) cfg().hudFramerate, v -> cfg().hudFramerate = Math.round(v))
+                                .tooltip("How often the hotbar, chat, scoreboard and other HUD elements are redrawn. In between, "
+                                        + "the last picture of them is shown, which saves their cost in every other frame. "
+                                        + "The crosshair and the vignette are drawn every frame.")
+                                .impact(Impact.LOW)),
                 List.of(
                         vanillaToggle(GameSettings.Options.VIEW_BOBBING, () -> gs().viewBobbing)
                                 .tooltip("The view sways while walking."),
