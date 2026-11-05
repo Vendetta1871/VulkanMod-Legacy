@@ -39,10 +39,10 @@ render distance.
 </p>
 <p align="center"><sub><b>Left:</b> ray tracing off. <b>Right:</b> ray tracing on, 32-chunk effect range.</sub></p>
 
-Sunlight comes through the stained glass in its colours, the quartz floor, the water and the iron
-and gold pillars reflect the room, and light bounces into places a lightmap cannot reach.
-Reflections work on water, glass, ice, polished stone and metal blocks; block light from torches
-and glowstone is traced too. Presets cover the range from a
+Glowstone and sea lanterns become real light sources: iron bars cast their grid onto the walls,
+the pool mirrors the lamps and the gold columns, and light bounces into places a lightmap cannot
+reach. Sunlight is traced the same way, and reflections work on water, glass, ice, polished stone
+and metal blocks. Presets cover the range from a
 small 4-chunk shadow pass to a full 32-chunk scene, and every effect has its own distance and
 strength.
 
