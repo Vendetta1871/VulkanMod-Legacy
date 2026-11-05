@@ -39,9 +39,10 @@ render distance.
 </p>
 <p align="center"><sub><b>Left:</b> ray tracing off. <b>Right:</b> ray tracing on, 32-chunk effect range.</sub></p>
 
-The lake stops being a flat blue sheet: trees, banks and the sky reflect in the water, shadows get
-contact detail, and light bounces into places a lightmap cannot reach. Reflections work on water,
-glass and ice; block light from torches and glowstone is traced too. Presets cover the range from a
+Sunlight comes through the stained glass in its colours, the quartz floor, the water and the iron
+and gold pillars reflect the room, and light bounces into places a lightmap cannot reach.
+Reflections work on water, glass, ice, polished stone and metal blocks; block light from torches
+and glowstone is traced too. Presets cover the range from a
 small 4-chunk shadow pass to a full 32-chunk scene, and every effect has its own distance and
 strength.
 
