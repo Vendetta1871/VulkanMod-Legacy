@@ -54,6 +54,10 @@ public final class LodSession {
         int rtAsked = -100000;
         /** Its id in the GPU node table and its block of child ids (0: none). */
         int gpuId, block;
+        /** Eviction passes it over until this frame (it just lost or got its geometry). */
+        int evictGrace;
+        /** Its geometry was evicted: the block watch is off until it is asked for again. */
+        boolean stripped;
 
         Node(long key) {
             this.key = key;
@@ -221,6 +225,7 @@ public final class LodSession {
             renderer.uploadTints(bakery.tintTable);
         }
         applyResults();
+        evictIfLow();
         LodTraversal tr = traversal();
         if (tr != null) {
             int n = tr.takeRequests(renderer.frameSlot(), requestIds);
@@ -388,7 +393,8 @@ public final class LodSession {
         MeshResult r;
         while (budget > 0 && (r = results.peek()) != null) {
             Node n = nodes.get(r.key);
-            if (n == null) {
+            if (n == null || n.stripped) {
+                // Gone, or evicted while a remesh was on its way: it takes geometry once asked again.
                 results.poll();
                 continue;
             }
@@ -396,7 +402,7 @@ public final class LodSession {
             if (r.quads.length > 0) {
                 start = renderer.allocQuads(r.quads.length);
                 if (start < 0) {
-                    evictFor(r.quads.length);
+                    evictGeometry(r.quads.length * 2L);
                     start = renderer.allocQuads(r.quads.length);
                     if (start < 0) {
                         results.poll();
@@ -415,6 +421,7 @@ public final class LodSession {
             n.quadStart = start;
             n.quadCount = r.quads.length;
             n.meshFrame = frame;
+            n.evictGrace = frame + EVICT_GRACE;
             if (n.lvl >= 1 && inRtRing(n)) {
                 int t = r.counts[MeshResult.G_TRANSLUCENT];
                 net.vesu.vulkan.rt.RtLod.offer(n.key, n.x << (5 + n.lvl), n.y << (5 + n.lvl), n.z << (5 + n.lvl), 1 << n.lvl,
@@ -439,6 +446,7 @@ public final class LodSession {
             n = new Node(key);
             nodes.put(key, n);
             n.requestedAt = frame;
+            n.lastSeen = frame;
             LodTraversal tr = traversal();
             if (tr != null) {
                 n.gpuId = tr.allocNode();
@@ -448,7 +456,13 @@ public final class LodSession {
             router.watch(key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
         } else if (!n.ready() && frame - n.requestedAt > 600) {
             n.requestedAt = frame;
-            submit(key);
+            if (n.stripped) {
+                // Watching the blocks again asks for the mesh itself.
+                n.stripped = false;
+                router.watch(key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
+            } else {
+                submit(key);
+            }
         }
         return n;
     }
@@ -467,27 +481,92 @@ public final class LodSession {
         }
         nodes.remove(n.key);
         net.vesu.vulkan.rt.RtLod.release(n.key);
-        router.unwatch(n.key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
+        if (!n.stripped) router.unwatch(n.key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
         if (n.quadStart >= 0) renderer.freeQuads(n.quadStart, n.quadCount);
         if (n.slot >= 0) renderer.freeSlot(n.slot);
         n.quadStart = -1;
         n.slot = -1;
     }
 
-    /** Frees the meshes drawn longest ago until {@code quads} fit (not those of the last frames). */
-    private void evictFor(int quads) {
+    // ---- Eviction (AUDIT 5.12) ----
+
+    private static final int EVICT_PICKS = 256, EVICT_GRACE = 60;
+    private static final long EVICT_MARK = 256L << 20;
+    private final java.util.PriorityQueue<Node> picks =
+            new java.util.PriorityQueue<>(EVICT_PICKS + 1, (a, b) -> Integer.compare(b.lastSeen, a.lastSeen));
+    private int evictedAt = -1000;
+
+    /**
+     * Below the free-space mark (256 MB, a quarter of a smaller arena) the meshes seen
+     * longest ago lose their geometry, up to 256 a pass. The node stays, unready: the
+     * traversal asks for it again once it is visible, and its parent draws meanwhile.
+     */
+    private void evictIfLow() {
+        long cap = renderer.arenaCapacityBytes();
+        if (cap - renderer.arenaUsedBytes() >= Math.min(EVICT_MARK, cap / 4) || frame - evictedAt < 4) return;
+        evictedAt = frame;
+        evictGeometry(Long.MAX_VALUE);
+    }
+
+    /**
+     * Evicts the geometry of up to 256 eligible nodes with the oldest visibility stamps, or
+     * fewer once {@code quads} are freed. Eligible: real geometry, below the top level, not
+     * drawn in the last frames, past its grace, no mesh request in flight.
+     */
+    private void evictGeometry(long quads) {
         syncStamps();
-        evict.clear();
+        picks.clear();
         nodes.forEachValue(n -> {
-            if (n.quadStart >= 0 && n.lastSeen < frame - 2) evict.add(n);
+            if (n.quadStart < 0 || n.quadCount == 0 || n.lvl >= SectionKey.MAX_LEVEL || n.lastSeen >= frame - 2
+                    || n.evictGrace > frame || n.requestedAt > n.meshFrame || frame - n.rtAsked < 600) return;
+            if (picks.size() < EVICT_PICKS) {
+                picks.add(n);
+            } else if (n.lastSeen < picks.peek().lastSeen) {
+                picks.poll();
+                picks.add(n);
+            }
         });
+        evict.clear();
+        evict.addAll(picks);
+        picks.clear();
         evict.sort((a, b) -> Integer.compare(a.lastSeen, b.lastSeen));
         long freed = 0;
+        int stripped = 0;
         for (Node n : evict) {
-            if (freed >= quads * 2L) break;
+            if (freed >= quads) break;
             freed += n.quadCount;
-            dropNode(n);
+            stripGeometry(n);
+            stripped++;
         }
+        evictedNodes += stripped;
+        evictedBytes += freed * 8;
+        if (frame - evictLogged >= 600 && evictedNodes > 0) {
+            Initializer.LOGGER.info(String.format("[lod] eviction: %d meshes, %.1f MB since the last report; arena %d/%d MB",
+                    evictedNodes, evictedBytes / 1048576.0, renderer.arenaUsedBytes() >> 20, renderer.arenaCapacityBytes() >> 20));
+            evictLogged = frame;
+            evictedNodes = 0;
+            evictedBytes = 0;
+        }
+    }
+
+    private int evictLogged = -1000, evictedNodes;
+    private long evictedBytes;
+
+    /** Geometry removal (AUDIT 5.10): the mesh, its slot and its watch go, the node stays unready. */
+    private void stripGeometry(Node n) {
+        net.vesu.vulkan.rt.RtLod.release(n.key);
+        renderer.freeQuads(n.quadStart, n.quadCount);
+        if (n.slot >= 0) renderer.freeSlot(n.slot);
+        n.quadStart = -1;
+        n.quadCount = 0;
+        n.slot = -1;
+        java.util.Arrays.fill(n.counts, 0);
+        n.childMask = -1;
+        n.requestedAt = -1000;
+        n.evictGrace = frame + EVICT_GRACE;
+        n.stripped = true;
+        router.unwatch(n.key, LodWorld.BLOCK | LodWorld.CHILD_EXISTENCE);
+        writeGpu(n);
     }
 
     private void cleanup() {
