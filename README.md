@@ -1,115 +1,108 @@
 # Vesu
 
-A Vulkan renderer for Minecraft **1.12.2**, running on [Cleanroom](https://github.com/CleanroomMC/Cleanroom).
-Vesu (short for Vesuvius) began as an unofficial port of [VulkanMod](https://github.com/xCollateral/VulkanMod)
-(by xCollateral, originally for 1.16.5+) to the 1.12.2 rendering pipeline and has since grown its own
-shader pack runtime, ray tracing, upscaling and distant (LOD) terrain.
+**A Vulkan renderer for Minecraft 1.12.2.**
 
-Instead of Minecraft's OpenGL draw calls being sent to the GPU, Cleanroom's Kirino layer tracks the
-GL state and the mod replays the render passes - terrain, entities, GUI, sky, clouds, weather and more -
-as Vulkan command buffers. The game logic, world and shaders semantics stay vanilla; only the
-presentation layer is Vulkan.
+[![Minecraft 1.12.2](https://img.shields.io/badge/Minecraft-1.12.2-3c8527?style=for-the-badge)](https://www.minecraft.net/)
+[![Cleanroom](https://img.shields.io/badge/Cleanroom-0.7.12--alpha-7b4dff?style=for-the-badge)](https://github.com/CleanroomMC/Cleanroom)
+[![Vulkan 1.3](https://img.shields.io/badge/Vulkan-1.3-ac162c?style=for-the-badge)](https://www.vulkan.org/)
+[![LGPL-3.0](https://img.shields.io/badge/License-LGPL--3.0-blue?style=for-the-badge)](LICENSE)
 
-## Requirements
+![Vesu at sunset with BSL Shaders and distant terrain](docs/images/hero.jpg)
 
-- Minecraft 1.12.2 with [Cleanroom](https://github.com/CleanroomMC/Cleanroom) (LWJGL3 and the Kirino
-  GL-state tracking are provided by Cleanroom; this port was developed against Cleanroom 0.7.12-alpha)
-- A GPU and driver with Vulkan 1.3, or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and
-  `VK_KHR_synchronization2` (developed and tested on Linux/NVIDIA)
+Vesu turns Minecraft 1.12.2's OpenGL draw calls into Vulkan command buffers - terrain, entities,
+block entities, particles, weather, sky, clouds, GUI and the first-person hand. The world, the game
+logic and the look of vanilla stay the same; the way every frame reaches your GPU does not.
 
-## Install
+It began as an unofficial port of [VulkanMod](https://github.com/xCollateral/VulkanMod) to the 1.12.2
+rendering pipeline and has grown into its own renderer: a shader-pack runtime, ray tracing, FSR
+upscaling and frame generation, and distant terrain that pushes the horizon far past the vanilla
+render distance.
 
-1. Install Cleanroom for Minecraft 1.12.2.
-2. Drop `Vesu_1.12.2-<version>.jar` into your `mods/` folder.
-3. Launch the game. If the Vulkan renderer cannot start, the game shows the reason (for example,
-   which Vulkan version or extension the GPU lacks) and can only be quit; it does not continue on
-   OpenGL. `VESU_DISABLE=1` runs the game without Vesu's renderer.
+## Why Vesu
 
-## Configuration
+- **A real Vulkan renderer.** Cleanroom's Kirino layer tracks the GL state; Vesu records its own
+  command buffers, pipelines and descriptors from it instead of replaying GL emulation.
+- **Your shader packs still work.** Iris/OptiFine-style packs, including Distant Horizons programs,
+  run through Vesu's pack runtime. No OptiFine required.
+- **Ray tracing on top.** Shadows, water reflections, glass and ice reflections, block light and
+  indirect bounce light - with presets from *potato* to *nasa*.
+- **A horizon without a wall.** Simplified distant terrain out to 2,048 chunks, kept per world and
+  lit by shader packs or by the ray tracer.
+- **Built for old and new GPUs.** Vulkan 1.3, or Vulkan 1.2 with dynamic rendering and
+  synchronization2. FSR 1/3 and frame generation pick up the slack on weaker hardware.
 
-Options -> Video Settings opens the Vesu settings screen: pages for General, Quality, Render Distance
-(with the LOD settings), Ray Tracing, Shader Packs and Advanced in the left column, and a search field on top
-(Ctrl+F). Hover a row for its description; edits wait for Apply or Done (Undo drops them).
-Vanilla options still go to `options.txt`, Vesu's own to `config/vesu_settings.json`, for example:
+## Ray tracing that changes the picture
 
-| Setting              | Default | Description                                                   |
-|----------------------|---------|---------------------------------------------------------------|
-| `renderScale`        | `1.0`   | World resolution relative to the window, 0.25..2 (above 1 supersamples) |
-| `upscaler`           | `auto`  | Scaling method: `auto`, `blit` (bilinear), `fsr1` or `fsr3`   |
-| `fsrSharpening`      | `0.5`   | Sharpening of FSR 1 and FSR 3, 0..1                           |
-| `fullscreenMode`     | none    | Fullscreen video mode `WIDTHxHEIGHT@HZ`; none keeps the desktop mode |
-| `menuFramerate`      | `60`    | Frame rate limit while paused, on the title menus or minimized |
-| `simulationDistance` | `12`    | Singleplayer: chunks around a player where the world runs, 5..32 |
-| `dynamicLights`      | `auto`  | `off` or `auto`; `rtDynamicLights` (`fast`, `rt`) with ray tracing |
-| `precipitation`      | `fancy` | `fancy` or `off`                                              |
-| `rtPreset`           | `off`   | Ray tracing: `off`, `potato`, `low`, `medium`, `high`, `ultra`, `nasa`, `custom` |
-| `shaderPack`         | none    | Selected pack in `shaderpacks/`, or `builtin:sample_post`, `builtin:vibrant_visuals` |
-| `leafCulling`        | `solid` | Fancy leaves inside canopies: `off`, `hollow`, `aggressive`, `solid` (see Performance) |
-| `entityCulling`      | `true`  | Skip entities and block entities hidden behind blocks; fewer copies of far item stacks |
-| `particleCulling`    | `true`  | Skip particles outside the view and block-break particles out of view |
-| `particleSpawnChance` | none   | Spawn chance per particle type, e.g. `{"smoke": 0.3}`; unlisted types always spawn |
-| `frameGeneration`    | `false` | FSR 3 frame generation: a generated frame between every two rendered ones, while FSR 3 upscales |
-| `lodEnabled`         | `true`  | Distant terrain past the render distance; off: nothing of it runs |
-| `lodDistance`        | `512`   | LOD distance in chunks, 32..2048 in steps of 32               |
-| `lodQuality`         | `64`    | Detail: `128` low, `64` medium, `40` high (screen size in pixels before a node splits) |
-| `lodFog`             | `fog+fade` | `fog+fade`, `fog`, `fade` or `off`                         |
-| `lodSsao`            | `auto`  | Ambient occlusion of LOD pixels: `auto`, `basic`, `better`, `best`, `off` |
-| `lodGenerationDistance` | `0`  | Singleplayer: generate chunks out to this distance in the background (0 = off) |
-| `frameQueueSize`     | `3`     | Frames in flight; read at startup                             |
+<p align="center">
+  <img src="docs/images/rt-off.jpg" width="49%" alt="Ray tracing off"/>
+  <img src="docs/images/rt-on.jpg" width="49%" alt="Ray tracing on"/>
+</p>
+<p align="center"><sub><b>Left:</b> ray tracing off. <b>Right:</b> ray tracing on, 32-chunk effect range.</sub></p>
 
-Settings and caches of versions named VulkanMod (`config/vulkanmod_settings.json`,
-`config/vulkanmod/`) move to the new names on the first launch.
+The lake stops being a flat blue sheet: trees, banks and the sky reflect in the water, shadows get
+contact detail, and light bounces into places a lightmap cannot reach. Reflections work on water,
+glass and ice; block light from torches and glowstone is traced too. Presets cover the range from a
+small 4-chunk shadow pass to a full 32-chunk scene, and every effect has its own distance and
+strength.
 
-Environment variables (the older `VULKANMOD_*` spellings still work):
+## Bring your shader packs
 
-- `VESU_DISABLE=1` - keep the original OpenGL path (useful for bisecting issues).
-- `VESU_VK_API=1.2` - cap the Vulkan version, to test the Vulkan 1.2 path on a newer driver.
-  NRD needs Vulkan 1.3; on 1.2 the RT passes use their own denoiser.
-- `VESU_FRAMEGEN=1` / `0` - force frame generation on or off; `VESU_FRAMEGEN_LOG=1` logs
-  rendered against presented frames, `VESU_FRAMEGEN_DEBUG=1` draws FSR's debug overlays.
-- `VESU_LOD=0` / `1` - force distant terrain off or on; `VESU_LOD_DISTANCE=<chunks>` and
-  `VESU_LOD_GEN=<chunks>` override the LOD and generation distances.
-- `VESU_BATCH=1` - opt-in chunk batching: uploads all visible chunk sections into one arena
-  buffer and draws them with indirect commands.
+<p align="center">
+  <img src="docs/images/shaders-off.jpg" width="49%" alt="Vanilla rendering through Vulkan"/>
+  <img src="docs/images/shaders-on.jpg" width="49%" alt="BSL Shaders through Vesu"/>
+</p>
+<p align="center"><sub><b>Left:</b> vanilla rendering through Vesu. <b>Right:</b> BSL Shaders, unchanged.</sub></p>
 
-## What is rendered through Vulkan
+Vesu runs the pack, not a reimplementation of it. Packs with shadow maps, deferred passes, water,
+volumetrics and Distant Horizons programs are compiled and executed by the renderer itself, with a
+background compiler so the game does not freeze while a pack builds. The selection lives in
+**Options -> Video Settings -> Shader Packs**, alongside a built-in sample pack and Vibrant Visuals.
 
-- Terrain (all chunk layers), with optional indirect chunk batching
-- Distant terrain past the render distance (LOD), also through shader packs and in the RT scene
-- Entities, including item entities, shadows, glowing eyes, hurt tint and the first-person hand
-  (held items, maps, overlays)
-- Block entities (chests, signs, banners, skulls, ...)
-- Particles, rain/snow weather
-- Screen GUI, item icons and 3D GUI icons (with a real depth buffer)
-- Sky: day/night with sunrise/sunset gradient, the End sky cube
-- Fancy and fast clouds
-- Fog, lightmap (torch / sky lighting), enchantment glint
-- World border forcefield and the border warning vignette
-- F3 debug renderers (chunk borders, collision boxes, ...) and the block selection box
+## Vibrant Visuals, built in
 
-## Distant terrain
+<p align="center">
+  <img src="docs/images/vv-off.jpg" width="49%" alt="Vibrant Visuals off"/>
+  <img src="docs/images/vv-on.jpg" width="49%" alt="Vibrant Visuals on"/>
+</p>
+<p align="center"><sub><b>Left:</b> off. <b>Right:</b> the built-in Vibrant Visuals pack.</sub></p>
 
-Past the render distance Vesu draws simplified terrain out to the LOD distance (512 chunks by
-default). It is built from the chunks the client receives and kept per world and dimension (in a `vesu_lod/`
-folder inside the save, or under `vesu_lod/servers/` for multiplayer), so it grows as you explore; `/vesu lod import current` or
-`/vesu lod import world <name>` fills it from a save, and LOD Generation Distance generates the
-missing chunks in the background in singleplayer. Node selection and occlusion culling run on the
-GPU. Shader packs with Distant Horizons programs (`dh_terrain`, `dh_water`) light it themselves;
-other packs draw it through their terrain and water programs.
+Vibrant Visuals brings the Bedrock-style atmosphere and water look to 1.12.2 without a download:
+softer fog, coloured skies, moving water and a more physical lighting model. It is a normal shader
+pack inside the mod, so it can be combined with the rest of the graphics settings - or replaced by
+any pack you prefer.
 
-## Known limitations
+## Distant terrain without the wall
 
-- Name tags and sign text are rendered as of v0.1.5; niche world-space text drawn by the F3 debug
-  renderers (height-map / pathfinding labels) may still stay invisible.
-- This is a work in progress port; some niche GL paths or heavily mixin-modded renderers may still
-  fall through or render incorrectly. Please open an issue with a screenshot and your mod list.
+<p align="center">
+  <img src="docs/images/lod-off.jpg" width="49%" alt="Distant terrain off"/>
+  <img src="docs/images/lod-on.jpg" width="49%" alt="Distant terrain on"/>
+</p>
+<p align="center"><sub><b>Left:</b> render distance 8, no distant terrain. <b>Right:</b> render distance 8 plus LOD terrain.</sub></p>
+
+Vesu keeps building simplified terrain from the chunks the client already receives, stores it per
+world and dimension, and draws it past the vanilla render distance - 512 chunks by default, up to
+2,048. Node selection and occlusion culling run on the GPU, so the far horizon does not turn into a
+CPU bottleneck. Shader packs with Distant Horizons programs light the LOD terrain themselves; other
+packs draw it through their terrain and water programs. Singleplayer can also generate the missing
+chunks in the background.
+
+## The quiet wins
+
+Not every improvement is a screenshot.
+
+- **Leaf, entity and particle culling.** Hidden leaf faces, entities behind blocks and particles
+  outside the view are skipped before they ever reach the GPU.
+- **FSR 1 and FSR 3 upscaling**, with adjustable sharpening, plus optional FSR 3 frame generation.
+- **Dynamic lights** from held and dropped light sources, raster or ray traced.
+- **A searchable settings screen** for every Vesu option, with Apply/Undo and hover descriptions.
+- **Vanilla compatibility.** World logic, saves and shader semantics stay 1.12.2; only the
+  presentation layer is Vulkan.
 
 ## Performance
 
-Average FPS, 1% low and 0.1% low (the mean FPS of the worst 1% / 0.1% of individual frames,
-measured from per-frame times) while flying a fixed spectator path over a fixed-seed world for
-90 seconds. Intel UHD 620 iGPU, 1600x900, render distance 12, mipmaps 4, VSync off, FPS uncapped.
-Two rounds per configuration with cooldowns between runs; the numbers are the round average.
+Average FPS, 1% low and 0.1% low while flying a fixed spectator path over a fixed-seed world for 90
+seconds. Intel UHD 620 iGPU, 1600x900, render distance 12, mipmaps 4, VSync off, FPS uncapped. Two
+rounds per configuration with cooldowns between runs; the numbers are the round average.
 
 | Configuration | Avg FPS | 1% low | 0.1% low |
 |--------------------------------------------|---------|--------|----------|
@@ -119,48 +112,43 @@ Two rounds per configuration with cooldowns between runs; the numbers are the ro
 | Forge 14.23.5.2860 (no mods)               | 131.1   | 51.9 | 33.2 |
 | Forge 14.23.5.2860 + OptiFine HD U G5      | 126.5   | 51.9 | 32.8 |
 
-The base and Vesu runs use the Gradle dev environment (a few percent of extra overhead, so
-their numbers are conservative); the Forge and Cleanroom+Actinium runs use production installs.
-Actinium has the smoothest frame pacing of these (best 1% low) but a lower ceiling than the
-Vulkan path; on a discrete GPU the gap narrows as the workload becomes less GPU-bound. On this
-hardware OptiFine costs a few percent rather than saving any.
+The base and Vesu runs use the Gradle dev environment (a few percent of extra overhead, so their
+numbers are conservative); the Forge and Cleanroom+Actinium runs use production installs. Actinium
+has the smoothest frame pacing of these (best 1% low) but a lower ceiling than the Vulkan path; on a
+discrete GPU the gap narrows as the workload becomes less GPU-bound. On this hardware OptiFine costs
+a few percent rather than saving any.
 
-### Culling
+## Install
 
-Vanilla 1.12.2 spends CPU on work nobody sees; Vesu skips some of it (ideas from Celeritas Leaf
-Culling, Entity Culling, Particle Core and Flerovium):
+1. Install [Cleanroom](https://github.com/CleanroomMC/Cleanroom) for Minecraft 1.12.2.
+2. Drop `Vesu_1.12.2-<version>.jar` into your `mods/` folder.
+3. Launch the game.
 
-- **Leaf culling** (fancy graphics): a leaf face is not built when it looks into the canopy. In the
-  `solid` modes a leaf block covered by leaves or solid blocks on all sides (`aggressive`: the four
-  horizontal ones) is buried: faces toward it are dropped and it is drawn as an opaque block, like
-  fast leaves, while the outside of a tree looks unchanged. The `solid` modes do nothing under shader
-  packs and ray tracing. `hollow` drops every face with two leaf layers behind it, also under packs
-  and ray tracing.
-- **Entity culling**: a background thread traces rays from the camera to the boxes of entities
-  (128 blocks) and block entities with a renderer (64 blocks); what no ray reaches is not drawn.
-  Anything seen stays drawn for a second, and glowing or named entities, other players and global
-  block entity renderers (beacons) are never culled. Off with ray tracing.
-- **Particles**: only particles in the view frustum are tessellated, a block broken out of view
-  spawns no break particles, and particle light is looked up once per block and tick instead of
-  per particle and frame.
+Vesu needs a GPU and driver with Vulkan 1.3, or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and
+`VK_KHR_synchronization2` (developed and tested on Linux/NVIDIA). If the Vulkan renderer cannot
+start, the game shows the reason and exits instead of silently falling back to OpenGL.
+`VESU_DISABLE=1` runs the original OpenGL path for bisecting issues.
 
-## Building
+All the graphics options live in **Options -> Video Settings**: General, Quality, Render Distance
+(with the LOD settings), Ray Tracing, Shader Packs and Advanced, with a search field on top. The
+file behind the screen is `config/vesu_settings.json`.
 
-```
-./gradlew build
-```
+![The Render Distance page of the Vesu settings screen](docs/images/settings.png)
 
-The jar lands in `build/libs/`. Requires the JDK the Gradle toolchain pins (see `build.gradle`).
-The build downloads Cleanroom/Minecraft dev dependencies through Gradle.
+## Compatibility and known limitations
 
-## Development notes
+- Minecraft 1.12.2 with Cleanroom (LWJGL3 and Kilo's GL-state tracking are provided by Cleanroom;
+  this port was developed against Cleanroom 0.7.12-alpha).
+- Name tags and sign text are rendered as of v0.1.5; niche world-space text drawn by the F3 debug
+  renderers (height-map / pathfinding labels) may still stay invisible.
+- This is a work-in-progress port. Some niche GL paths or heavily mixin-modded renderers may still
+  fall through or render incorrectly - please open an issue with a screenshot and your mod list.
 
-The repo ships an autotest harness (`VESU_AUTOTEST=1`) that boots the game headlessly into a
-fixed scene, captures screenshots at deterministic ticks and exits - used to verify every render
-pass against a GL twin (`VESU_DISABLE=1` on the same scene). See `net.vesu.debug.AutoTest`.
+## Credits
 
-## License
+Vesu (short for Vesuvius) is an unofficial 1.12.2/Cleanroom port of
+[VulkanMod](https://github.com/xCollateral/VulkanMod) by **xCollateral**, whose renderer architecture
+and shader pipeline this project follows. 1.12.2 port by **CelestialD**. Licensed under
+[LGPL-3.0](LICENSE), the same as the original.
 
-LGPL-3.0, same as the original [VulkanMod](https://github.com/xCollateral/VulkanMod) by xCollateral,
-whose renderer architecture and shader pipeline this port follows. Original mod: VulkanMod by
-xCollateral; 1.12.2/Cleanroom port by CelestialD.
+*Screenshots are raw in-game captures, resized for the web.*
