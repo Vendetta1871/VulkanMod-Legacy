@@ -44,6 +44,10 @@ Vanilla options still go to `options.txt`, Vesu's own to `config/vesu_settings.j
 | `precipitation`      | `fancy` | `fancy` or `off`                                              |
 | `rtPreset`           | `off`   | Ray tracing: `off`, `potato`, `low`, `medium`, `high`, `ultra`, `nasa`, `custom` |
 | `shaderPack`         | none    | Selected pack in `shaderpacks/`, or `builtin:sample_post`, `builtin:vibrant_visuals` |
+| `leafCulling`        | `solid` | Fancy leaves inside canopies: `off`, `hollow`, `aggressive`, `solid` (see Performance) |
+| `entityCulling`      | `true`  | Skip entities and block entities hidden behind blocks; fewer copies of far item stacks |
+| `particleCulling`    | `true`  | Skip particles outside the view and block-break particles out of view |
+| `particleSpawnChance` | none   | Spawn chance per particle type, e.g. `{"smoke": 0.3}`; unlisted types always spawn |
 | `frameGeneration`    | `false` | FSR 3 frame generation: a generated frame between every two rendered ones, while FSR 3 upscales |
 | `lodEnabled`         | `true`  | Distant terrain past the render distance; off: nothing of it runs |
 | `lodDistance`        | `512`   | LOD distance in chunks, 32..2048 in steps of 32               |
@@ -120,6 +124,25 @@ their numbers are conservative); the Forge and Cleanroom+Actinium runs use produ
 Actinium has the smoothest frame pacing of these (best 1% low) but a lower ceiling than the
 Vulkan path; on a discrete GPU the gap narrows as the workload becomes less GPU-bound. On this
 hardware OptiFine costs a few percent rather than saving any.
+
+### Culling
+
+Vanilla 1.12.2 spends CPU on work nobody sees; Vesu skips some of it (ideas from Celeritas Leaf
+Culling, Entity Culling, Particle Core and Flerovium):
+
+- **Leaf culling** (fancy graphics): a leaf face is not built when it looks into the canopy. In the
+  `solid` modes a leaf block covered by leaves or solid blocks on all sides (`aggressive`: the four
+  horizontal ones) is buried: faces toward it are dropped and it is drawn as an opaque block, like
+  fast leaves, while the outside of a tree looks unchanged. The `solid` modes do nothing under shader
+  packs and ray tracing. `hollow` drops every face with two leaf layers behind it, also under packs
+  and ray tracing.
+- **Entity culling**: a background thread traces rays from the camera to the boxes of entities
+  (128 blocks) and block entities with a renderer (64 blocks); what no ray reaches is not drawn.
+  Anything seen stays drawn for a second, and glowing or named entities, other players and global
+  block entity renderers (beacons) are never culled. Off with ray tracing.
+- **Particles**: only particles in the view frustum are tessellated, a block broken out of view
+  spawns no break particles, and particle light is looked up once per block and tick instead of
+  per particle and frame.
 
 ## Building
 

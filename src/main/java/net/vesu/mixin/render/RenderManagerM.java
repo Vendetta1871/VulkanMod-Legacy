@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Brackets {@code RenderManager.renderEntity} so {@code WorldVertexBufferUploaderM}
@@ -17,6 +18,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * the frame start both reset it, and only model-format draws are captured regardless.
  * During a GUI pass ({@link GuiRenderer#isGuiPass()}) the window stays closed: the
  * inventory doll renders through this same method but belongs to the GUI capture.
+ *
+ * <p>{@code shouldRender} also asks {@link net.vesu.render.OcclusionCuller} whether a camera ray
+ * reaches the entity.</p>
  */
 @Mixin(RenderManager.class)
 public class RenderManagerM {
@@ -45,5 +49,11 @@ public class RenderManagerM {
         if (Initializer.isVulkanActive()) {
             EntityRenderer.setEntityPass(false);
         }
+    }
+
+    @Inject(method = "shouldRender", at = @At("RETURN"), cancellable = true)
+    private void vesu$occlusionCull(Entity entity, net.minecraft.client.renderer.culling.ICamera camera, double x, double y, double z,
+                                    CallbackInfoReturnable<Boolean> cir) {
+        if (cir.getReturnValueZ() && net.vesu.render.OcclusionCuller.culled(entity)) cir.setReturnValue(false);
     }
 }

@@ -32,6 +32,8 @@ public class VesuMod {
         // RT material atlas follows the block atlas across resource reloads.
         MinecraftForge.EVENT_BUS.register(net.vesu.vulkan.rt.RtMaterials.class);
         net.vesu.lod.mc.LodSystem.init();
+        // Entity and leaf culling settings follow the client tick.
+        net.vesu.render.OcclusionCuller.init();
 
         if (AutoTest.ENABLED) {
             MinecraftForge.EVENT_BUS.register(AutoTest.class);

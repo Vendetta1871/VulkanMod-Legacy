@@ -160,6 +160,8 @@ public abstract class RenderGlobalM {
                                                net.minecraft.client.renderer.culling.ICamera camera, float partialTicks,
                                                CallbackInfo ci) {
         FrameProfiler.entitiesBegin();
+        net.vesu.render.ParticleCulling.setCamera(camera);
+        net.vesu.render.OcclusionCuller.setCamera(renderViewEntity, partialTicks);
         // The block-entity (TESR) pass runs inside renderEntities but its dispatcher
         // methods are Cleanroom-added (unmapped), so the entity capture window spans the
         // whole span: everything drawn here is entity or block-entity geometry.

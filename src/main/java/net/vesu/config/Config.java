@@ -65,6 +65,23 @@ public class Config {
     public String precipitation = "fancy";
 
     /**
+     * Fancy leaves: off | hollow (a face with two leaf layers behind it) | aggressive (a leaf
+     * block covered on its four sides is buried) | solid (covered on all six). Faces toward
+     * buried leaves are dropped at chunk build; buried leaves go to the solid layer while no
+     * shader pack or ray tracing runs. See {@link net.vesu.render.LeafCulling}.
+     */
+    public String leafCulling = "solid";
+    /**
+     * Entities and block entities that no ray from the camera reaches skip rendering; far
+     * dropped item stacks draw fewer copies. See {@link net.vesu.render.OcclusionCuller}.
+     */
+    public boolean entityCulling = true;
+    /** Particles outside the view are not drawn, block-break particles outside it not spawned. */
+    public boolean particleCulling = true;
+    /** Spawn chance 0..1 per particle name (EnumParticleTypes, e.g. "smoke"); unlisted types always spawn. */
+    public java.util.Map<String, Float> particleSpawnChance = new java.util.HashMap<>();
+
+    /**
      * Selected shader pack: a folder or zip name in {@code shaderpacks/}, or null for none
      * (docs/shaderpacks). See {@link net.vesu.shader.PackManager}.
      */

@@ -18,6 +18,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * <p>The capture window itself ({@code EntityRenderer.setEntityPass}) is opened by
  * {@code RenderGlobalM} around {@code renderEntities}: the Cleanroom dispatcher methods
  * are added code without SRG mappings and cannot be mixin targets.</p>
+ *
+ * <p>Block entities no camera ray reaches are skipped ({@link net.vesu.render.OcclusionCuller}).</p>
  */
 @Mixin(TileEntityRendererDispatcher.class)
 public class TileEntityRendererDispatcherM {
@@ -30,5 +32,10 @@ public class TileEntityRendererDispatcherM {
             EntityRenderer.setTesrLight(te.getWorld().getCombinedLight(te.getPos(), 0));
             EntityRenderer.setCurrentTile(te);
         }
+    }
+
+    @Inject(method = "render(Lnet/minecraft/tileentity/TileEntity;FI)V", at = @At("HEAD"), cancellable = true)
+    private void vesu$occlusionCull(TileEntity te, float partialTicks, int destroyStage, CallbackInfo ci) {
+        if (net.vesu.render.OcclusionCuller.culled(te)) ci.cancel();
     }
 }

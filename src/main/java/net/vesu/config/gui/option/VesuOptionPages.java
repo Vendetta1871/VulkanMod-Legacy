@@ -357,6 +357,26 @@ public final class VesuOptionPages {
                                 .tooltip("Smoother textures in the distance. Changing it reloads the block models when the screen closes.")
                                 .impact(Impact.LOW)),
                 List.of(
+                        new Option.Cycle<>("Leaf Culling", Storage.VESU, net.vesu.render.LeafCulling.MODES, v -> switch (v) {
+                            case "off" -> "Off";
+                            case "hollow" -> "Hollow";
+                            case "aggressive" -> "Solid Aggressive";
+                            default -> "Solid";
+                        }, () -> cfg().leafCulling == null ? "solid" : cfg().leafCulling, v -> cfg().leafCulling = v)
+                                .tooltip("Fancy leaves hidden inside a canopy are not drawn. Solid keeps the outside of trees as it is "
+                                        + "and draws the buried inside as solid blocks; Solid Aggressive buries more; Hollow drops "
+                                        + "every face with two layers of leaves behind it, the fastest, but trees look thinner. "
+                                        + "The Solid modes do nothing under shader packs and ray tracing. Changing it rebuilds all chunks.")
+                                .impact(Impact.MEDIUM)
+                                .availableWhen(() -> gs().fancyGraphics, "Fast graphics already draw leaves as solid blocks."),
+                        new Option.Toggle("Entity Culling", Storage.VESU, () -> cfg().entityCulling, v -> cfg().entityCulling = v)
+                                .tooltip("Mobs, items and block entities such as chests that are hidden behind blocks are not drawn; "
+                                        + "far stacks of dropped items draw fewer copies. Off while ray tracing is on.")
+                                .impact(Impact.MEDIUM),
+                        new Option.Toggle("Particle Culling", Storage.VESU, () -> cfg().particleCulling, v -> cfg().particleCulling = v)
+                                .tooltip("Particles outside the view are not drawn, and breaking a block out of view spawns no particles.")
+                                .impact(Impact.LOW)),
+                List.of(
                         vanillaToggle(GameSettings.Options.ANAGLYPH, () -> gs().anaglyph)
                                 .tooltip("Red and cyan 3D for anaglyph glasses."))));
     }

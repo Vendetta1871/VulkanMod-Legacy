@@ -8,6 +8,7 @@ import net.vesu.render.VBO;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
@@ -16,6 +17,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * geometry until it is rebuilt, and a layer that a rebuild left empty (the cutout layer
  * once its only torch is broken) is never uploaded again. The RT scene drops both, with
  * their light sources.
+ *
+ * <p>The chunk build also asks {@link net.vesu.render.LeafCulling} which layer a leaf block
+ * goes to: buried leaves are moved to the SOLID layer.</p>
  */
 @Mixin(RenderChunk.class)
 public abstract class RenderChunkM {
@@ -61,5 +65,31 @@ public abstract class RenderChunkM {
                 if (vbo != null) vbo.unplace();
             }
         }
+    }
+
+    /** The block the chunk build is at, per worker thread: {@code canRenderInLayer} gets no position. */
+    private static final ThreadLocal<Object[]> VESU$BLOCK = ThreadLocal.withInitial(() -> new Object[2]);
+
+    @Redirect(method = "rebuildChunk", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/ChunkCache;getBlockState(Lnet/minecraft/util/math/BlockPos;)Lnet/minecraft/block/state/IBlockState;"))
+    private net.minecraft.block.state.IBlockState vesu$blockAt(net.minecraft.world.ChunkCache cache, BlockPos pos) {
+        net.minecraft.block.state.IBlockState state = cache.getBlockState(pos);
+        if (net.vesu.render.LeafCulling.isLeaves(state.getBlock())) {
+            Object[] at = VESU$BLOCK.get();
+            at[0] = cache;
+            at[1] = pos;
+        }
+        return state;
+    }
+
+    @Redirect(method = "rebuildChunk", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/block/Block;canRenderInLayer(Lnet/minecraft/block/state/IBlockState;Lnet/minecraft/util/BlockRenderLayer;)Z"))
+    private boolean vesu$leafLayer(net.minecraft.block.Block block, net.minecraft.block.state.IBlockState state, BlockRenderLayer layer) {
+        if (net.vesu.render.LeafCulling.isLeaves(block)) {
+            Object[] at = VESU$BLOCK.get();
+            Boolean solid = net.vesu.render.LeafCulling.renderInLayer((net.minecraft.world.IBlockAccess) at[0], (BlockPos) at[1], layer);
+            if (solid != null) return solid;
+        }
+        return block.canRenderInLayer(state, layer);
     }
 }

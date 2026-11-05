@@ -68,7 +68,11 @@
     "render.SDLHooksM",
     "render.WeatherM",
     "render.NetHandlerPlayClientM",
-    "render.ChunkProviderClientM"
+    "render.ChunkProviderClientM",
+    "render.BlockLeavesM",
+    "render.CullableM",
+    "render.ParticleM",
+    "render.RenderEntityItemM"
   ],
   "injectors": {
     "defaultRequire": 1
