@@ -9,12 +9,12 @@
 
 [github-badge]: https://img.shields.io/badge/GitHub-Source-181717?style=for-the-badge&logo=github&logoColor=white
 [github]: https://github.com/Vendetta1871/vulkanmod-legacy
-[discord-badge]: docs/badges/discord.svg
+[discord-badge]: https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/badges/discord.svg
 [discord]: https://discord.gg/gvmeswCQFP
 [modrinth-badge]: https://img.shields.io/badge/Modrinth-Soon-555555?style=for-the-badge&logo=modrinth&logoColor=white
-[curseforge-badge]: docs/badges/curseforge.svg
+[curseforge-badge]: https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/badges/curseforge.svg
 
-![Vesu at sunset with BSL Shaders and distant terrain](docs/images/hero.jpg)
+![Vesu at sunset with BSL Shaders and distant terrain](https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/hero.jpg)
 
 Vesu turns Minecraft 1.12.2's OpenGL draw calls into Vulkan command buffers - terrain, entities,
 block entities, particles, weather, sky, clouds, GUI and the first-person hand. The world, the game
@@ -41,8 +41,8 @@ render distance.
 ## Ray tracing that changes the picture
 
 <p align="center">
-  <img src="docs/images/rt-off.jpg" width="49%" alt="Ray tracing off"/>
-  <img src="docs/images/rt-on.jpg" width="49%" alt="Ray tracing on"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/rt-off.jpg" width="49%" alt="Ray tracing off"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/rt-on.jpg" width="49%" alt="Ray tracing on"/>
 </p>
 <p align="center"><sub><b>Left:</b> ray tracing off. <b>Right:</b> ray tracing on, 32-chunk effect range.</sub></p>
 
@@ -56,8 +56,8 @@ strength.
 ## Bring your shader packs
 
 <p align="center">
-  <img src="docs/images/shaders-off.jpg" width="49%" alt="Vanilla rendering through Vulkan"/>
-  <img src="docs/images/shaders-on.jpg" width="49%" alt="BSL Shaders through Vesu"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/shaders-off.jpg" width="49%" alt="Vanilla rendering through Vulkan"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/shaders-on.jpg" width="49%" alt="BSL Shaders through Vesu"/>
 </p>
 <p align="center"><sub><b>Left:</b> vanilla rendering through Vesu. <b>Right:</b> BSL Shaders, unchanged.</sub></p>
 
@@ -69,8 +69,8 @@ background compiler so the game does not freeze while a pack builds. The selecti
 ## Vibrant Visuals, built in
 
 <p align="center">
-  <img src="docs/images/vv-off.jpg" width="49%" alt="Vibrant Visuals off"/>
-  <img src="docs/images/vv-on.jpg" width="49%" alt="Vibrant Visuals on"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/vv-off.jpg" width="49%" alt="Vibrant Visuals off"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/vv-on.jpg" width="49%" alt="Vibrant Visuals on"/>
 </p>
 <p align="center"><sub><b>Left:</b> off. <b>Right:</b> the built-in Vibrant Visuals pack.</sub></p>
 
@@ -82,8 +82,8 @@ any pack you prefer.
 ## Distant terrain without the wall
 
 <p align="center">
-  <img src="docs/images/lod-off.jpg" width="49%" alt="Distant terrain off"/>
-  <img src="docs/images/lod-on.jpg" width="49%" alt="Distant terrain on"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/lod-off.jpg" width="49%" alt="Distant terrain off"/>
+  <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/lod-on.jpg" width="49%" alt="Distant terrain on"/>
 </p>
 <p align="center"><sub><b>Left:</b> render distance 8, no distant terrain. <b>Right:</b> render distance 8 plus LOD terrain.</sub></p>
 
@@ -141,7 +141,7 @@ All the graphics options live in **Options -> Video Settings**: General, Quality
 (with the LOD settings), Ray Tracing, Shader Packs and Advanced, with a search field on top. The
 file behind the screen is `config/vesu_settings.json`.
 
-![The Render Distance page of the Vesu settings screen](docs/images/settings.png)
+![The Render Distance page of the Vesu settings screen](https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/settings.png)
 
 ## Compatibility and known limitations
 
@@ -157,6 +157,6 @@ file behind the screen is `config/vesu_settings.json`.
 Vesu (short for Vesuvius) is an unofficial 1.12.2/Cleanroom port of
 [VulkanMod](https://github.com/xCollateral/VulkanMod) by **xCollateral**, whose renderer architecture
 and shader pipeline this project follows. 1.12.2 port by **CelestialD**. Licensed under
-[LGPL-3.0](LICENSE), the same as the original.
+[LGPL-3.0](https://github.com/Vendetta1871/vulkanmod-legacy/blob/master/LICENSE), the same as the original.
 
 *Screenshots are raw in-game captures, resized for the web.*
