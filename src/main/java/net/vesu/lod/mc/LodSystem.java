@@ -103,10 +103,18 @@ public final class LodSystem {
         int threads = Initializer.CONFIG.lodThreads > 0 ? Initializer.CONFIG.lodThreads : WorkerPool.defaultThreads();
         WorkerPool.start(threads);
         try {
-            session = new LodSession(directory(world), world.provider.getDimension(), world.provider.hasSkyLight());
+            File dir = directory(world);
+            boolean purged = purgeIdExtenderStore(dir);
+            session = new LodSession(dir, world.provider.getDimension(), world.provider.hasSkyLight());
             sessionWorld = world;
             world.addEventListener(new LodWorldListener());
             downloadAtlas();
+            if (purged) {
+                // Rebuild what the dropped store held from the save's region files.
+                File save = Minecraft.getMinecraft().isIntegratedServerRunning()
+                        ? net.minecraftforge.common.DimensionManager.getCurrentSaveRootDirectory() : null;
+                if (save != null) session.startImport(save);
+            }
             // VESU_LOD_IMPORT=<save name>: import that save on start (autotests, benchmarks).
             String imp = net.vesu.Env.get("VESU_LOD_IMPORT");
             if (imp != null && !imp.isEmpty()) importWorld(imp);
@@ -114,6 +122,38 @@ public final class LodSystem {
             Initializer.LOGGER.error("[lod] cannot start", t);
             session = null;
         }
+    }
+
+    /** Marks a store written with the id-extender aware chunk reader ({@link RawChunk}). */
+    private static final String ID_EXTENDER_MARKER = "ids-extended";
+
+    /**
+     * With an id extender (RoughlyEnoughIDs / JustEnoughIDs, mod id {@code jeid}) loaded, a store
+     * written before {@link RawChunk} read chunks state by state holds palette indices in place
+     * of blocks and a single biome. It is dropped once, before the session opens it; true when
+     * there was data to drop. Stores without the extender were read correctly and stay.
+     */
+    private static boolean purgeIdExtenderStore(File dir) {
+        if (!net.minecraftforge.fml.common.Loader.isModLoaded("jeid")) return false;
+        File marker = new File(dir, ID_EXTENDER_MARKER);
+        if (marker.isFile()) return false;
+        File data = new File(dir, "data.mdb");
+        boolean had = data.isFile();
+        if (had) {
+            Initializer.LOGGER.warn("[lod] {}: written before the id-extender fix, rebuilding", dir);
+            data.delete();
+            new File(dir, "lock.mdb").delete();
+            if (data.exists()) {
+                Initializer.LOGGER.error("[lod] {}: stale store could not be removed", dir);
+                return false;
+            }
+        }
+        try {
+            if (dir.isDirectory() || dir.mkdirs()) marker.createNewFile();
+        } catch (java.io.IOException e) {
+            Initializer.LOGGER.warn("[lod] {}: marker not written ({})", dir, e.toString());
+        }
+        return had;
     }
 
     @SubscribeEvent

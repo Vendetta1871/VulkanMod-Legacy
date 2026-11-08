@@ -25,6 +25,9 @@ public final class StateMapper {
     /** Storage id -> LOD id + 1 (0 = not looked up yet). Racy writes are idempotent. */
     private final int[] states = new int[1 << 16];
     private final int[] biomes = new int[256];
+    /** Ids past the arrays (id extenders: more than 4096 blocks or 256 biomes). */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Integer> wideStates = new java.util.concurrent.ConcurrentHashMap<>(),
+            wideBiomes = new java.util.concurrent.ConcurrentHashMap<>();
 
     public StateMapper(LodRegistry registry) {
         this.registry = registry;
@@ -82,29 +85,35 @@ public final class StateMapper {
 
     @SuppressWarnings("deprecation")
     public int lodState(int storageId) {
-        int c = states[storageId];
+        if (storageId < 0) return 0;
+        boolean wide = storageId >= states.length;
+        int c = wide ? wideStates.getOrDefault(storageId, 0) : states[storageId];
         if (c != 0) return c - 1;
         IBlockState s = Block.BLOCK_STATE_IDS.getByValue(storageId);
         if (s == null) {
             Block b = Block.getBlockById(storageId >> 4);
+            if (b == null) return 0;
             try {
                 s = b.getStateFromMeta(storageId & 15);
             } catch (RuntimeException e) {
                 s = b.getDefaultState();
             }
         }
-        int id = isAir(s) ? 0 : registry.stateId(key(s));
-        states[storageId] = id + 1;
+        int id = s == null || isAir(s) ? 0 : registry.stateId(key(s));
+        if (wide) wideStates.put(storageId, id + 1);
+        else states[storageId] = id + 1;
         return id;
     }
 
     public int lodBiome(int biomeId) {
-        int c = biomes[biomeId & 255];
+        boolean wide = biomeId < 0 || biomeId >= biomes.length;
+        int c = wide ? wideBiomes.getOrDefault(biomeId, 0) : biomes[biomeId];
         if (c != 0) return c - 1;
-        Biome b = Biome.getBiome(biomeId & 255);
+        Biome b = biomeId < 0 ? null : Biome.getBiome(biomeId);
         ResourceLocation name = b == null ? null : Biome.REGISTRY.getNameForObject(b);
         int id = registry.biomeId(name == null ? "minecraft:plains" : name.toString());
-        biomes[biomeId & 255] = id + 1;
+        if (wide) wideBiomes.put(biomeId, id + 1);
+        else biomes[biomeId] = id + 1;
         return id;
     }
 

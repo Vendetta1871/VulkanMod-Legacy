@@ -33,7 +33,8 @@ import java.util.zip.InflaterInputStream;
 final class SaveImporter implements WorkerPool.Service {
     private final LodSession session;
     private final File regionDir;
-    private final short[] remap = new short[4096];
+    /** Save block id -> runtime block id (0 = unknown, becomes air). Grows past 4096 for id extenders. */
+    private int[] remap = new int[4096];
     private final ConcurrentLinkedQueue<File> regions = new ConcurrentLinkedQueue<>();
     /** Single columns the generation producer found on disk (AUDIT 5.7), {@code x << 32 | z}. */
     private final ConcurrentLinkedQueue<Long> singles = new ConcurrentLinkedQueue<>();
@@ -62,7 +63,7 @@ final class SaveImporter implements WorkerPool.Service {
     }
 
     private void buildRemap(File levelDat) {
-        for (int i = 0; i < 4096; i++) remap[i] = (short) i;
+        for (int i = 0; i < remap.length; i++) remap[i] = i;
         if (!levelDat.isFile()) return;
         try {
             NBTTagCompound root = CompressedStreamTools.readCompressed(new java.io.FileInputStream(levelDat));
@@ -70,24 +71,38 @@ final class SaveImporter implements WorkerPool.Service {
             NBTTagCompound blocks = fml.getCompoundTag("Registries").getCompoundTag("minecraft:blocks");
             NBTTagList ids = blocks.getTagList("ids", 10);
             if (ids.isEmpty()) return;
-            Arrays.fill(remap, (short) 0);
+            int max = 4095;
+            for (int i = 0; i < ids.tagCount(); i++) max = Math.max(max, ids.getCompoundTagAt(i).getInteger("V"));
+            remap = new int[max + 1];
             Set<String> missing = new HashSet<>();
             for (int i = 0; i < ids.tagCount(); i++) {
                 NBTTagCompound e = ids.getCompoundTagAt(i);
                 String name = e.getString("K");
                 int saveId = e.getInteger("V");
-                if (saveId < 0 || saveId >= 4096) continue;
+                if (saveId < 0 || saveId >= remap.length) continue;
                 Block b = Block.REGISTRY.getObject(new ResourceLocation(name));
                 if (b == null || !Block.REGISTRY.getNameForObject(b).toString().equals(name)) {
                     if (missing.add(name)) Initializer.LOGGER.warn("[lod] import: unknown block {} becomes air", name);
                     continue;
                 }
-                remap[saveId] = (short) Block.getIdFromBlock(b);
+                remap[saveId] = Block.getIdFromBlock(b);
             }
         } catch (IOException | RuntimeException e) {
             Initializer.LOGGER.warn("[lod] import: level.dat ids unreadable ({}); vanilla ids assumed", e.toString());
-            for (int i = 0; i < 4096; i++) remap[i] = (short) i;
+            remap = new int[4096];
+            for (int i = 0; i < 4096; i++) remap[i] = i;
         }
+    }
+
+    /** A save state id ({@code saveBlockId << 4 | meta}) as a runtime state id; unknown blocks are air. */
+    private int runtimeState(int saveState) {
+        int block = saveState >>> 4;
+        int runtime = block < remap.length ? remap[block] : 0;
+        return runtime == 0 ? 0 : runtime << 4 | (saveState & 15);
+    }
+
+    private static int nibble(byte[] a, int i) {
+        return (a[i >> 1] >> ((i & 1) << 2)) & 15;
     }
 
     /** Reads one column from its region file on a worker; ingest marks it done for the generator. */
@@ -201,8 +216,18 @@ final class SaveImporter implements WorkerPool.Service {
     private boolean convert(NBTTagCompound level, LodGenerator doneBy) {
         if (!level.getBoolean("TerrainPopulated")) return false;
         int cx = level.getInteger("xPos"), cz = level.getInteger("zPos");
-        byte[] biomes = level.getByteArray("Biomes");
-        if (biomes.length != 256) biomes = null;
+        // Vanilla stores a byte per column, id extenders (RoughlyEnoughIDs) an int.
+        int[] biomes = null;
+        if (level.hasKey("Biomes", 11)) {
+            int[] b = level.getIntArray("Biomes");
+            if (b.length == 256) biomes = b;
+        } else if (level.hasKey("Biomes", 7)) {
+            byte[] b = level.getByteArray("Biomes");
+            if (b.length == 256) {
+                biomes = new int[256];
+                for (int i = 0; i < 256; i++) biomes[i] = b[i] & 255;
+            }
+        }
         RawChunk c = RawChunk.forImport(cx, cz, session.hasSky(), biomes);
         NBTTagList sections = level.getTagList("Sections", 10);
         for (int i = 0; i < sections.tagCount(); i++) {
@@ -212,14 +237,27 @@ final class SaveImporter implements WorkerPool.Service {
             byte[] blocks = s.getByteArray("Blocks");
             if (blocks.length != 4096) continue;
             byte[] add = s.hasKey("Add", 7) ? s.getByteArray("Add") : null;
-            short[] ids = new short[4096];
+            if (add != null && add.length != 2048) add = null;
+            byte[] meta = s.getByteArray("Data");
+            if (meta.length != 2048) meta = null;
+            // RoughlyEnoughIDs: Blocks and Data together hold an index into the section's
+            // Palette of save state ids (Add, when present, its next four bits).
+            int[] palette = s.hasKey("Palette", 11) ? s.getIntArray("Palette") : null;
+            int[] states = new int[4096];
             for (int k = 0; k < 4096; k++) {
-                int id = blocks[k] & 255;
-                if (add != null && add.length == 2048) id |= ((add[k >> 1] >> ((k & 1) << 2)) & 15) << 8;
-                ids[k] = remap[id];
+                int saveState;
+                if (palette != null) {
+                    int index = (blocks[k] & 255) << 4 | (meta == null ? 0 : nibble(meta, k))
+                            | (add == null ? 0 : nibble(add, k) << 12);
+                    saveState = index < palette.length ? palette[index] : 0;
+                } else {
+                    int id = (blocks[k] & 255) | (add == null ? 0 : nibble(add, k) << 8);
+                    saveState = id << 4 | (meta == null ? 0 : nibble(meta, k));
+                }
+                states[k] = runtimeState(saveState);
             }
-            byte[] meta = s.getByteArray("Data"), bl = s.getByteArray("BlockLight"), sl = s.getByteArray("SkyLight");
-            c.setImported(y, ids, meta.length == 2048 ? meta : null, bl.length == 2048 ? bl : null, sl.length == 2048 ? sl : null);
+            byte[] bl = s.getByteArray("BlockLight"), sl = s.getByteArray("SkyLight");
+            c.setImported(y, states, bl.length == 2048 ? bl : null, sl.length == 2048 ? sl : null);
         }
         chunks.incrementAndGet();
         c.doneBy = doneBy;
