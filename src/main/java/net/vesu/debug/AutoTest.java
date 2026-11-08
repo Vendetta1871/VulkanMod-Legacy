@@ -101,6 +101,11 @@ public class AutoTest {
      * variants are chosen by the real conditions.
      */
     private static final boolean PACK_SCENES = Env.get("VESU_AUTOTEST_PACKSCENES") != null;
+    /**
+     * Toast test: with {@code VESU_AUTOTEST_TOAST=<advancement id>} the advancement is granted
+     * once the world runs and the toast is captured while it slides in and stays.
+     */
+    private static final boolean TOAST_MODE = Env.get("VESU_AUTOTEST_TOAST") != null;
     /** With {@code VESU_AUTOTEST_POOL=1} a stone basin of water appears below the camera. */
     private static final boolean POOL = Env.get("VESU_AUTOTEST_POOL") != null;
 
@@ -1200,6 +1205,24 @@ public class AutoTest {
                         mc.shutdown();
                     }
                     return;
+                }
+
+                if (TOAST_MODE) {
+                    // Mod framebuffer repro: an advancement toast (Advancement Plaques draws
+                    // its icon through an FBO of its own).
+                    int t = ++ticks;
+                    if (t == 20) {
+                        serverCommand(mc, "advancement grant @p only " + Env.getOrDefault("VESU_AUTOTEST_TOAST",
+                                "minecraft:story/root"));
+                    } else if (t == 40 || t == 60 || t == 90) {
+                        capture(mc, "toast" + t);
+                    } else if (t == 120 && Env.get("VESU_AUTOTEST_STAY") == null) {
+                        Initializer.LOGGER.info("[autotest] done, shutting down");
+                        mc.shutdown();
+                    }
+                    if (t <= 120) {
+                        return;
+                    }
                 }
 
                 if (PACK_SCENES) {

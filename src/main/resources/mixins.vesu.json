@@ -75,6 +75,7 @@
     "render.RenderEntityItemM",
     "render.GuiIngameForgeM",
     "render.GuiIngameForgeInvoker",
+    "render.GuiIngameInvoker",
     "render.ForgeBlockModelRendererM"
   ],
   "injectors": {

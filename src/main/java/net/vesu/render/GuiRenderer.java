@@ -3,6 +3,7 @@ package net.vesu.render;
 import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.minecraft.client.renderer.vertex.VertexFormatElement;
 import net.vesu.Initializer;
 import net.vesu.vulkan.Drawer;
 import net.vesu.vulkan.Pipeline;
@@ -158,6 +159,9 @@ public class GuiRenderer {
             savedCull = VRenderSystem.cull;
             savedColorMask = VRenderSystem.colorMask;
         }
+        if (!value) {
+            OffscreenTargets.end(); // a mod left its framebuffer bound
+        }
         guiPass = value;
         if (value) {
             itemDepthReady = false;
@@ -196,6 +200,17 @@ public class GuiRenderer {
 
     public static boolean isGuiPass() {
         return guiPass;
+    }
+
+    /**
+     * A mod framebuffer target was entered or left ({@code OffscreenTargets}). Entering
+     * cleared the shared depth over the target, so its 3D icons need no further clear;
+     * leaving hands back a display depth that the next icon must clear again. The
+     * projection changes with the target, so the cached one is re-read.
+     */
+    public static void onOffscreenChanged(boolean entered) {
+        itemDepthReady = entered;
+        projVersion = -1;
     }
 
     /** Ends the open glyph run: draws go to another attachment next (the cached HUD). */
@@ -302,9 +317,17 @@ public class GuiRenderer {
         if (vertexCount <= 0 || (drawMode != 7 && drawMode != 6 && drawMode != 5)) {
             return false;
         }
+        ByteBuffer repacked = null;
         if (format != POSITION_TEX && format != POSITION_COLOR && format != POSITION_TEX_COLOR && format != POSITION
                 && format != DefaultVertexFormats.ITEM && format != DefaultVertexFormats.OLDMODEL_POSITION_TEX_NORMAL) {
-            return false;
+            // A mod's own VertexFormat (BetterHUD builds position, color, tex) is repacked into
+            // the vanilla GUI format with the same elements; anything else stays on the GL path.
+            VertexFormat target = repackTarget(format);
+            if (target == null) {
+                return false;
+            }
+            repacked = repack(buffer.getByteBuffer(), format, target, vertexCount);
+            format = target;
         }
         // Only after the cheap rejections, so a draw we would not replay never opens a frame.
         if (!ensureRenderPass()) {
@@ -312,7 +335,7 @@ public class GuiRenderer {
         }
 
         try {
-            draw(buffer, drawMode, vertexCount, format);
+            draw(buffer, repacked, drawMode, vertexCount, format);
             return true;
         } catch (Throwable t) {
             if (errorLogs++ < 3) {
@@ -323,7 +346,8 @@ public class GuiRenderer {
         }
     }
 
-    private static void draw(BufferBuilder buffer, int drawMode, int vertexCount, VertexFormat format) {
+    /** {@code repacked}, when not null, replaces the buffer's bytes (already in {@code format}). */
+    private static void draw(BufferBuilder buffer, ByteBuffer repacked, int drawMode, int vertexCount, VertexFormat format) {
         boolean textured = format != POSITION_COLOR && format != POSITION;
 
         VulkanImage texture = null;
@@ -332,11 +356,15 @@ public class GuiRenderer {
             if (texture == null) {
                 return;
             }
+            // A mod framebuffer's image is stored upright, GL samples it bottom-up.
+            if (OffscreenTargets.isTargetImage(texture) && format.hasUvOffset(0)) {
+                repacked = flipV(repacked != null ? repacked : buffer.getByteBuffer(), format, vertexCount);
+            }
         }
 
         // Glyph batching (M11/N18): consecutive icon quads that share texture, colour
         // and matrix accumulate into one draw.
-        if (format == POSITION_TEX && drawMode == 7) {
+        if (format == POSITION_TEX && drawMode == 7 && repacked == null) {
             if (vertexCount <= GLYPH_BATCH_MAX) {
                 long version = VRenderSystem.getMatrixVersion();
                 if (glyphBatchVerts > 0 && (glyphWorld || !glyphStateMatches(texture, version)
@@ -402,7 +430,7 @@ public class GuiRenderer {
             VRenderSystem.depthFunc(glint ? GL11.GL_EQUAL : GL11.GL_LEQUAL);
         }
 
-        ByteBuffer data = buffer.getByteBuffer();
+        ByteBuffer data = repacked != null ? repacked : buffer.getByteBuffer();
         if (format == POSITION) {
             drawer.draw(widenPosition(data, vertexCount), drawMode, POSITION_COLOR, vertexCount);
         } else {
@@ -416,6 +444,81 @@ public class GuiRenderer {
             loggedFirst = true;
             Initializer.LOGGER.info("[gui] first GUI draw: {} verts, mode {}, format {}", vertexCount, drawMode, format);
         }
+    }
+
+    private static ByteBuffer repackScratch;
+    private static ByteBuffer flipScratch;
+
+    /** A copy of the vertices with v replaced by 1 - v (texture coordinate set 0). */
+    private static ByteBuffer flipV(ByteBuffer data, VertexFormat format, int vertexCount) {
+        int stride = format.getSize();
+        int size = vertexCount * stride;
+        if (flipScratch == null || flipScratch.capacity() < size) {
+            if (flipScratch != null) MemoryUtil.memFree(flipScratch);
+            flipScratch = MemoryUtil.memAlloc(Math.max(size, 4096));
+        }
+        ByteBuffer out = flipScratch;
+        out.clear();
+        for (int i = 0; i < size; i++) {
+            out.put(i, data.get(i));
+        }
+        int vOffset = format.getUvOffsetById(0) + 4;
+        for (int v = 0; v < vertexCount; v++) {
+            int at = v * stride + vOffset;
+            out.putFloat(at, 1.0f - out.getFloat(at));
+        }
+        out.position(0).limit(size);
+        return out;
+    }
+
+    /**
+     * The vanilla GUI format holding the same elements as {@code format}, or null. Only
+     * float3 position, ubyte4 color and float2 texture (index 0) count, in any order and
+     * with nothing else; the result keeps the elements the source has.
+     */
+    private static VertexFormat repackTarget(VertexFormat format) {
+        if (format.equals(POSITION_TEX_COLOR)) return POSITION_TEX_COLOR;
+        if (format.equals(POSITION_TEX)) return POSITION_TEX;
+        if (format.equals(POSITION_COLOR)) return POSITION_COLOR;
+        if (format.equals(POSITION)) return POSITION;
+        boolean pos = false, color = false, tex = false;
+        for (VertexFormatElement e : format.getElements()) {
+            if (e.equals(DefaultVertexFormats.POSITION_3F)) pos = true;
+            else if (e.equals(DefaultVertexFormats.COLOR_4UB)) color = true;
+            else if (e.equals(DefaultVertexFormats.TEX_2F)) tex = true;
+            else return null;
+        }
+        if (!pos || format.getElementCount() != (1 + (color ? 1 : 0) + (tex ? 1 : 0))) return null;
+        return tex ? (color ? POSITION_TEX_COLOR : POSITION_TEX) : (color ? POSITION_COLOR : POSITION);
+    }
+
+    /** Copies each vertex's elements from the {@code src} layout into the {@code dst} layout. */
+    private static ByteBuffer repack(ByteBuffer data, VertexFormat src, VertexFormat dst, int vertexCount) {
+        int size = vertexCount * dst.getSize();
+        if (repackScratch == null || repackScratch.capacity() < size) {
+            if (repackScratch != null) MemoryUtil.memFree(repackScratch);
+            repackScratch = MemoryUtil.memAlloc(Math.max(size, 4096));
+        }
+        int srcStride = src.getSize(), dstStride = dst.getSize();
+        int[] srcOff = new int[dst.getElementCount()];
+        int[] len = new int[dst.getElementCount()];
+        for (int i = 0; i < dst.getElementCount(); i++) {
+            VertexFormatElement e = dst.getElement(i);
+            srcOff[i] = src.getOffset(src.getElements().indexOf(e));
+            len[i] = e.getSize();
+        }
+        ByteBuffer out = repackScratch;
+        out.clear();
+        for (int v = 0; v < vertexCount; v++) {
+            int base = v * srcStride;
+            for (int i = 0; i < srcOff.length; i++) {
+                for (int b = 0; b < len[i]; b++) {
+                    out.put(data.get(base + srcOff[i] + b));
+                }
+            }
+        }
+        out.position(0).limit(vertexCount * dstStride);
+        return out;
     }
 
     /**
@@ -638,6 +741,7 @@ public class GuiRenderer {
      */
     public static void flushPendingDraws() {
         flushGlyphBatch();
+        OffscreenTargets.end(); // the frame closes on the display target
     }
 
     /**
@@ -851,6 +955,10 @@ public class GuiRenderer {
         if (texId == 0) {
             return null;
         }
+        VulkanImage offscreen = OffscreenTargets.sampled(texId);
+        if (offscreen != null) {
+            return offscreen;
+        }
         // Item icons bind the block atlas: use the terrain's live mirror instead of a
         // 16 MB snapshot (which would also freeze animated tiles).
         if (texId == TextureBridge.getAtlasGlId() && TextureBridge.getAtlasImage() != null) {
@@ -874,6 +982,7 @@ public class GuiRenderer {
 
     /** Forgets the Vulkan image mirrored from a GL texture that is being deleted. */
     public static void onTextureDeleted(int texId) {
+        OffscreenTargets.forget(texId);
         VulkanImage image = textureCache.remove(texId);
         if (image != null) {
             image.free();

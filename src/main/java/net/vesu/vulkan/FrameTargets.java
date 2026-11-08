@@ -700,6 +700,70 @@ public final class FrameTargets {
         beginRendering(cmd, display, VK_ATTACHMENT_LOAD_OP_LOAD, null, VK_ATTACHMENT_LOAD_OP_LOAD, stack);
     }
 
+    /**
+     * A mod's GL framebuffer ({@code OffscreenTargets}): suspends the display rendering and
+     * renders into {@code image} over its {@code width} x {@code height} corner, with the
+     * display's depth cleared there. The color is cleared to {@code clearColor} when it is
+     * non-null; otherwise the contents of the previous bind are loaded. Display phase only.
+     */
+    static boolean beginOffscreen(VkCommandBuffer cmd, net.vesu.vulkan.texture.VulkanImage image,
+                                  int width, int height, float[] clearColor, MemoryStack stack) {
+        if (phase != Phase.DISPLAY || width <= 0 || height <= 0
+                || width > display.width() || height > display.height()) {
+            return false;
+        }
+        VkCompat.endRendering(cmd);
+        VkImageMemoryBarrier2.Buffer b = VkImageMemoryBarrier2.calloc(1, stack);
+        // Earlier draws sampled it (endOffscreen left it SHADER_READ_ONLY); a cleared image
+        // discards the old contents.
+        imageBarrier(b.get(0), image.getId(), VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                clearColor != null ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        pipelineBarrier(cmd, b, stack);
+
+        VkRenderingAttachmentInfo.Buffer color = VkRenderingAttachmentInfo.calloc(1, stack);
+        color.get(0).sType$Default()
+                .imageView(image.getTextureImageView())
+                .imageLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                .loadOp(clearColor != null ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD)
+                .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
+        if (clearColor != null) {
+            color.get(0).clearValue().color().float32(0, clearColor[0]).float32(1, clearColor[1])
+                    .float32(2, clearColor[2]).float32(3, clearColor[3]);
+        }
+        VkRenderingAttachmentInfo depth = VkRenderingAttachmentInfo.calloc(stack).sType$Default()
+                .imageView(display.depthView())
+                .imageLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+                .storeOp(VK_ATTACHMENT_STORE_OP_STORE);
+        depth.clearValue().depthStencil().set(VRenderSystem.farDepth(), 0);
+        VkRenderingInfo info = VkRenderingInfo.calloc(stack).sType$Default()
+                .layerCount(1)
+                .pColorAttachments(color)
+                .pDepthAttachment(depth);
+        info.renderArea().offset().set(0, 0);
+        info.renderArea().extent().set(width, height);
+        VkCompat.beginRendering(cmd, info);
+
+        // Stored upright like the display (viewport flipped like GL); the sampling side
+        // flips V back to GL's bottom-up rows.
+        VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+        viewport.x(0.0f).y(height).width(width).height(-height).minDepth(0.0f).maxDepth(1.0f);
+        vkCmdSetViewport(cmd, 0, viewport);
+        VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+        scissor.extent().set(width, height);
+        vkCmdSetScissor(cmd, 0, scissor);
+        return true;
+    }
+
+    /** Ends {@link #beginOffscreen}: the image becomes sampleable, the display rendering resumes. */
+    static void endOffscreen(VkCommandBuffer cmd, net.vesu.vulkan.texture.VulkanImage image, MemoryStack stack) {
+        endHudCapture(cmd, image, stack);
+    }
+
     /** Copies or linearly blits {@code src} into the display color and readies it as an attachment. */
     private static void blitIntoDisplay(VkCommandBuffer cmd, long src, int srcW, int srcH, int srcFormat,
                                         int srcLayout, long srcStage, long srcAccess, boolean flipY,

@@ -741,6 +741,33 @@ public class Drawer {
         invalidateBoundPipeline(commandBuffers.get(currentFrame));
     }
 
+    /**
+     * Display-phase draws go to a mod framebuffer's {@code image} until {@link #endOffscreen}
+     * ({@code OffscreenTargets}); false when the target cannot be entered right now.
+     */
+    public static boolean beginOffscreen(net.vesu.vulkan.texture.VulkanImage image, int width, int height, float[] clearColor) {
+        if (!isActive()) return false;
+        net.vesu.render.GuiRenderer.flushPending();
+        boolean entered;
+        try (MemoryStack stack = stackPush()) {
+            entered = FrameTargets.beginOffscreen(commandBuffers.get(currentFrame), image, width, height, clearColor, stack);
+        }
+        if (entered) {
+            invalidateBoundPipeline(commandBuffers.get(currentFrame));
+        }
+        return entered;
+    }
+
+    /** Back to the display target; {@code image} becomes readable by the fragment stage. */
+    public static void endOffscreen(net.vesu.vulkan.texture.VulkanImage image) {
+        if (!isActive()) return;
+        net.vesu.render.GuiRenderer.flushPending();
+        try (MemoryStack stack = stackPush()) {
+            FrameTargets.endOffscreen(commandBuffers.get(currentFrame), image, stack);
+        }
+        invalidateBoundPipeline(commandBuffers.get(currentFrame));
+    }
+
     public static void enterDisplayPhase() {
         if(!isActive() || FrameTargets.phase() != FrameTargets.Phase.SCENE) return;
         try(MemoryStack stack = stackPush()) {

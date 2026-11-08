@@ -9,6 +9,7 @@ import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.vesu.Initializer;
 import net.vesu.mixin.render.GuiIngameForgeInvoker;
+import net.vesu.mixin.render.GuiIngameInvoker;
 import net.vesu.vulkan.Drawer;
 import net.vesu.vulkan.FrameTargets;
 import net.vesu.vulkan.Vulkan;
@@ -92,6 +93,7 @@ public final class HudCache {
         if (update) {
             // Draw on the rate's grid so the HUD keeps its frame rate when frames come unevenly.
             lastUpdate = valid && now - lastUpdate < 2_000_000_000L / rate ? lastUpdate + 1_000_000_000L / rate : now;
+            OffscreenTargets.end();
             Drawer.beginHudCapture(image);
             capturing = true;
             try {
@@ -109,7 +111,7 @@ public final class HudCache {
         if (res == null) res = new ScaledResolution(mc);
         if (GuiIngameForge.renderVignette && Minecraft.isFancyGraphicsEnabled() && mc.getRenderViewEntity() != null) {
             GlStateManager.enableBlend();
-            invoker.vesu$renderVignette(mc.getRenderViewEntity().getBrightness(), res);
+            ((GuiIngameInvoker) forge).vesu$renderVignette(mc.getRenderViewEntity().getBrightness(), res);
         }
         GlStateManager.enableBlend();
         GlStateManager.blendFunc(GlStateManager.SourceFactor.ONE, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA);
