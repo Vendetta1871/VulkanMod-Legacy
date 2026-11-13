@@ -262,7 +262,7 @@ public class EntityRenderer {
 
     /** True while any pass whose draws this class replays is running. */
     public static boolean isActive() {
-        return isEntityPass() || handPass || particlePass || rainPass;
+        return isEntityPass() || handPass || particlePass || rainPass || damagePass;
     }
 
     /** The ITEM-format pipeline, shared with the GUI pass for item icons. */
@@ -398,8 +398,10 @@ public class EntityRenderer {
         if (format == BLOCK_FORMAT) {
             // Held blocks (the enderman's) go through the terrain shader: the BLOCK
             // vertices carry their own lightmap UVs, so the CPU lightmap multiply is
-            // skipped for this pipeline in applyDrawState.
-            return isEntityPass() ? blockPipeline : null;
+            // skipped for this pipeline in applyDrawState. The block-breaking crack
+            // overlay (RenderGlobal.drawBlockDamageTexture) is a BLOCK batch drawn after
+            // the entity pass, so its window enables the same pipeline.
+            return isEntityPass() || damagePass ? blockPipeline : null;
         }
         return null;
     }
@@ -629,7 +631,7 @@ public class EntityRenderer {
             }
             // Only what rays can reach: the RT scene ends at the largest effect distance.
             if ((pipeline == entityPipeline || pipeline == itemPipeline || pipeline == blockPipeline)
-                    && inRtRange(data, net.vesu.vulkan.rt.RtScene.distanceChunks() * 16.0f + 8.0f)) {
+                    && !damagePass && inRtRange(data, net.vesu.vulkan.rt.RtScene.distanceChunks() * 16.0f + 8.0f)) {
                 // Raw tint (before the lightmap multiply) and the entity's light, for RT shading.
                 int light = packed >= 0 ? packed : packedLight();
                 net.vesu.vulkan.rt.RtEntities.add(data, vertexCount, format.getSize(), VRenderSystem.getModelViewMatrix4f(),
@@ -671,8 +673,15 @@ public class EntityRenderer {
                     light % 65536, light / 65536, net.vesu.shader.PackIds.entityId(currentEntity),
                     net.vesu.shader.PackIds.blockEntityId(currentTile));
         }
+        // The crack overlay lies exactly on the block's faces; vanilla lifts it with
+        // glPolygonOffset(-3, -3), which GlStateManager does not mirror into Vulkan.
+        if (damagePass) {
+            VRenderSystem.polygonOffset(-3.0f, -3.0f);
+            VRenderSystem.enablePolygonOffset();
+        }
         if (pipeline == gpuParticlePipeline) drawer.drawInstancedQuads(data, format, vertexCount);
         else drawer.draw(data, 7, format, vertexCount);
+        if (damagePass) VRenderSystem.disablePolygonOffset();
         Drawer.clearDrawBlock();
         Drawer.shadowOnly = false;
 

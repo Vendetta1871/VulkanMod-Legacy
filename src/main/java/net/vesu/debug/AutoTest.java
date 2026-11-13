@@ -206,6 +206,10 @@ public class AutoTest {
     /** A flat world and commands run once before the first scene, for the 26.2 comparison. */
     private static final boolean FLAT_WORLD = Env.get("VESU_AUTOTEST_FLAT") != null;
     private static final String SCENE_COMMANDS = Env.get("VESU_AUTOTEST_COMMANDS");
+    /** {@code VESU_AUTOTEST_BREAK=<0-9>}: the block under the crosshair shows that destroy stage (crack overlay test). */
+    private static final String BREAK_STAGE = Env.get("VESU_AUTOTEST_BREAK");
+    /** {@code VESU_AUTOTEST_BADTEX=1}: load a non-image resource as a texture; it must fall back to the missing texture, not crash. */
+    private static final boolean BAD_TEXTURE = Env.get("VESU_AUTOTEST_BADTEX") != null;
     /** Drives the pack option screen with real clicks: a slider, then Done. */
     private static final boolean PACK_GUI = Env.get("VESU_AUTOTEST_PACKGUI") != null;
     /** {@code VESU_AUTOTEST_OPTIONS=<page>}: the Vesu settings screen on that page (0-based), captured as vm_autotest_options. */
@@ -2724,6 +2728,12 @@ public class AutoTest {
         String[] s = scenes.get(sceneIndex);
         mc.player.capabilities.isFlying = true;
         if (sceneTick == 0) {
+            if (sceneIndex == 0 && BAD_TEXTURE) {
+                net.minecraft.util.ResourceLocation bad = new net.minecraft.util.ResourceLocation("minecraft", "lang/en_us.lang");
+                boolean loaded = mc.getTextureManager().loadTexture(bad, new net.minecraft.client.renderer.texture.SimpleTexture(bad));
+                mc.getTextureManager().bindTexture(net.minecraft.client.renderer.texture.TextureManager.RESOURCE_LOCATION_EMPTY);
+                Initializer.LOGGER.info("[autotest] BADTEX loaded={} (expected false, no crash)", loaded);
+            }
             if (sceneIndex == 0 && SCENE_COMMANDS != null) {
                 for (String c : SCENE_COMMANDS.split(";")) serverCommand(mc, c.trim());
             }
@@ -2737,6 +2747,11 @@ public class AutoTest {
             }
         }
         sceneTick++;
+        if (BREAK_STAGE != null && mc.objectMouseOver != null
+                && mc.objectMouseOver.typeOfHit == net.minecraft.util.math.RayTraceResult.Type.BLOCK) {
+            // A fake breaker id; re-sent every tick so the entry never times out.
+            mc.renderGlobal.sendBlockBreakProgress(-4242, mc.objectMouseOver.getBlockPos(), Integer.parseInt(BREAK_STAGE.trim()));
+        }
         if (REBUILDS > 0 && sceneTick > SCENE_SETTLE && rebuildIndex < REBUILDS) {
             if (rebuildStart == 0) {
                 mc.renderGlobal.loadRenderers();
