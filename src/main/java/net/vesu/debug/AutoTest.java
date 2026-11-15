@@ -221,6 +221,8 @@ public class AutoTest {
     private static final int REBUILDS = envInt("VESU_AUTOTEST_REBUILD", 0);
     /** {@code VESU_AUTOTEST_MOVE="<blocks per tick> [<yaw degrees per tick>]"}: the camera moves while a scene is measured. */
     private static final String SCENE_MOVE = Env.get("VESU_AUTOTEST_MOVE");
+    /** {@code VESU_AUTOTEST_SCENEBURST=<frames>}: captures that many consecutive frames of each scene's measured span. */
+    private static final int SCENE_BURST = envInt("VESU_AUTOTEST_SCENEBURST", 0);
     private static int rebuildIndex, rebuildIdle;
     private static long rebuildStart;
     private static boolean rebuildBusy;
@@ -2772,6 +2774,10 @@ public class AutoTest {
             }
             sceneTick = SCENE_SETTLE;
             return;
+        }
+        if (SCENE_BURST > 0 && sceneTick == SCENE_SETTLE + 1) {
+            // Every presented frame of the measured span (flicker / temporal stability checks).
+            net.vesu.vulkan.Drawer.requestBurst(new File(mc.gameDir, "vm_burst_" + scenes.get(sceneIndex)[0]), SCENE_BURST);
         }
         if (SCENE_MOVE != null && sceneTick > SCENE_SETTLE) {
             // Camera motion while measuring: blocks per tick forward, degrees per tick of yaw.
