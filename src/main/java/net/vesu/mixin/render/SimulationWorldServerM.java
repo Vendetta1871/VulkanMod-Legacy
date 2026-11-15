@@ -44,4 +44,18 @@ public abstract class SimulationWorldServerM {
     private boolean vesu$scheduledTicks(WorldServer world, BlockPos from, BlockPos to) {
         return world.isAreaLoaded(from, to) && SimulationDistance.ticksBlock(world, from);
     }
+
+    /**
+     * A frozen tick (loaded but beyond the distance) waits {@value #VESU$FROZEN_DELAY} ticks
+     * before it is looked at again. Vanilla's delay of 0 suits only unloaded chunks, where the
+     * entry is dropped; for a frozen one it re-sorts every entry of every frozen chunk (spawn
+     * chunks, chunks kept by mods) on every tick.
+     */
+    @Redirect(method = "tickUpdates", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/WorldServer;scheduleUpdate(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/Block;I)V"))
+    private void vesu$rescheduleFrozen(WorldServer world, BlockPos pos, net.minecraft.block.Block block, int delay) {
+        world.scheduleUpdate(pos, block, delay == 0 && world.isBlockLoaded(pos) ? VESU$FROZEN_DELAY : delay);
+    }
+
+    private static final int VESU$FROZEN_DELAY = 100;
 }
