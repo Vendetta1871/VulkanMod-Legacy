@@ -59,7 +59,9 @@ layout(location = 1) rayPayloadEXT vec4 shadow;
 
 const float PI = 3.14159265;
 const int MAX_CANDIDATES = 8;
-const float RESERVOIR_M_CAP = 20.0;
+// RTXDI's Ray Reconstruction preset (rtx.di.maxHistoryLength 4, spatialSamples 2): short histories
+// keep the reused samples close to independent, as RR needs.
+const float RESERVOIR_M_CAP = 4.0;
 const float SUN_ANGULAR_RADIUS = 0.0046;
 // Emission of light sources' surfaces (scene units per unit albedo), as sharc_update.rgen.
 const float EMISSION = 10.0;
@@ -299,7 +301,7 @@ vec3 blockLight(Surface s, vec3 v, vec3 pos, ivec2 p, ivec2 prevPixel, bool reus
         // so neighbouring pixels do not inherit one shared sample.
         ivec2 t = prevPixel + ivec2(int(pcg() % 3u) - 1, int(pcg() % 3u) - 1);
         mergeReservoir(r, all(greaterThanEqual(t, ivec2(0))) && all(lessThan(t, size)) ? t : prevPixel, pos, n);
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < 2; k++) {
             float ang = 6.2831853 * rand();
             ivec2 q = prevPixel + ivec2(vec2(cos(ang), sin(ang)) * (2.0 + 10.0 * rand()));
             if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, size))) mergeReservoir(r, q, pos, n);
@@ -529,7 +531,9 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
         vec3 fv = fresnel(s.f0, nv);
         float ws = luminance(fv), wd = luminance(s.diffuse * (1.0 - fv));
         float pSpec = ws + wd > 0.0 ? clamp(ws / (ws + wd), 0.0, 1.0) : 0.0;
-        if (pSpec > 0.0 && pSpec < 1.0) pSpec = clamp(pSpec, 0.1, 0.9);
+        // RTX Remix's Ray Reconstruction preset: lobe probabilities at least 0.05
+        // (rtx.minOpaqueDiffuse/SpecularLobeSamplingProbability).
+        if (pSpec > 0.0 && pSpec < 1.0) pSpec = clamp(pSpec, 0.05, 0.95);
         vec3 t1, t2;
         basis(n, t1, t2);
         vec3 l, weight;
