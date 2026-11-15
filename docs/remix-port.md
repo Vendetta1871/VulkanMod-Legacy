@@ -23,9 +23,9 @@ renderer (native Linux, our RR2 runtime), not run the Remix runtime under Wine.
 | RR guide preparation | pass/ray_reconstruction/prepare_ray_reconstruction | pathtrace.rgen storeGuides | roughness demodulation of specular albedo, black albedo cleared; no specular hit distance (RR2 port has no input for it) |
 | RTXDI (direct light ReSTIR), RR preset | rtx_rtxdi_rayquery, RtxOptions::updatePathTracerPreset | pathtrace.rgen blockLight (own ReSTIR) | to port: initial 3, spatial 2, permutation every frame |
 | ReSTIR GI | rtx_restir_gi_rayquery | none | to port |
-| Integrator (bounces, roulette, lobe probabilities) | rtx_pathtracer_integrate_* | pathtrace.rgen (1 bounce + SHaRC) | to port |
+| Integrator (bounces, roulette, lobe probabilities) | rtx_pathtracer_integrate_* | pathtrace.rgen hitRadiance | bounce hits: SHaRC, else sun + block light NEE and a second bounce (High preset: 2 bounces); lightmap only as last resort. Roulette/lobe probabilities not yet |
 | NEE cache | rtx_nee_cache | none | to port |
 | Radiance cache | NRC (rtx.conf) / SHaRC | SHaRC | NRC needs tensor-core training; align SHaRC settings |
-| Materials (blocks, LabPBR, thin opaque leaves/plants) | mod block/, texture/, asset/ | RtMaterials | to compare |
-| Block lights (shapes, power) | mod light/ | RtLights | to compare |
+| Materials (blocks, LabPBR, thin opaque leaves/plants) | mod texture/BlockTextureManager, LabPBRConverter | RtMaterials, surfaceOf | default roughness 180/255, LabPBR read as Remix ((1-s)^2 perceptual, F0 0.04, metal G>=230); mod baseline _s maps bundled under 1.12 names. Still missing: normal maps (_n), subsurface (_sss), the RTX Remix Materials pack (needs 1.21->1.12 texture renames; 1.14 retexture mismatch) |
+| Block lights (shapes, power) | mod light/BlockLightDefaults, LightManager | RtLights, lights.glsl | torch matches (radiance 1575, r 0.08 -> 31.7 per unit colour); other shapes not compared |
 | View distance fade | rtx.viewDistance.* | rt_pt_resolve sky fade | to compare |
