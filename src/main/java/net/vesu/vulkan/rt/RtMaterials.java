@@ -13,77 +13,24 @@ import org.lwjgl.system.MemoryUtil;
 
 import java.awt.image.BufferedImage;
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
  * Material atlas for the RT passes: the block atlas layout with LabPBR specular data per
  * texel (R: perceptual smoothness, G: F0 reflectance, 230..255 = metal, B: porosity/SSS,
- * A: emission 0..254, 255 = none). A resource pack's {@code <texture>_s.png} wins; otherwise the built-in
- * defaults below give whole sprites a constant material (metal blocks, polished stone,
- * glass, ice...). Rebuilt after every atlas stitch.
+ * A: emission 0..254, 255 = none): a resource pack's {@code <texture>_s.png}, which the mod's own
+ * assets provide for some blocks (RTX Remix for Minecraft's baseline maps under 1.12 names),
+ * otherwise Remix's default material. Rebuilt after every atlas stitch.
  */
 public final class RtMaterials {
 
-    /** LabPBR metal ids (G channel): iron, gold. */
-    private static final int IRON = 230, GOLD = 231;
-
-    /** Built-in materials: sprite name (without "blocks/") -> {smoothness, F0}. Prefix match on '*'. */
-    private static final Map<String, int[]> DEFAULTS = new HashMap<>();
-    private static final Map<String, int[]> PREFIXES = new HashMap<>();
-
-    static {
-        def("iron_block", 205, IRON);
-        def("gold_block", 215, GOLD);
-        def("iron_bars", 170, IRON);
-        def("iron_trapdoor", 175, IRON);
-        def("door_iron*", 175, IRON);
-        def("anvil*", 120, IRON);
-        def("cauldron*", 130, IRON);
-        def("hopper*", 130, IRON);
-        def("rail*", 150, IRON);
-        def("diamond_block", 225, 44);
-        def("emerald_block", 210, 40);
-        def("lapis_block", 120, 12);
-        def("redstone_block", 130, 12);
-        def("coal_block", 100, 10);
-        def("quartz_block*", 175, 12);
-        def("quartz_ore", 120, 10);
-        def("obsidian", 205, 11);
-        def("glass*", 240, 10);
-        def("ice", 235, 5);
-        def("ice_packed", 220, 5);
-        def("glazed_terracotta*", 175, 11);
-        def("concrete_*", 110, 10);
-        def("prismarine*", 120, 10);
-        def("sea_lantern", 160, 10);
-        def("purpur*", 95, 10);
-        def("slime", 200, 8);
-        def("end_bricks", 70, 10);
-        def("stone_slab_top", 70, 10);
-        def("stonebrick", 40, 10);
-        // Blocks that glow as a whole (LabPBR emission in alpha, 254 = full): their surfaces
-        // stay lit in the RT composite however many emitters surround them (a lava sea).
-        emissive("lava_still", 60, 10);
-        emissive("lava_flow", 60, 10);
-        emissive("glowstone", 30, 10);
-        emissive("magma", 50, 10);
-        emissive("sea_lantern", 160, 10);
-        emissive("redstone_lamp_on", 60, 10);
-        emissive("fire_layer_*", 0, 0);
-    }
-
-    private static void emissive(String name, int smoothness, int f0) {
-        def(name, smoothness, f0);
-        int[] v = name.endsWith("*") ? PREFIXES.get(name.substring(0, name.length() - 1)) : DEFAULTS.get(name);
-        v[2] = 254;
-    }
-
-    private static void def(String name, int smoothness, int f0) {
-        int[] v = {smoothness, f0, 0};
-        if (name.endsWith("*")) PREFIXES.put(name.substring(0, name.length() - 1), v);
-        else DEFAULTS.put(name, v);
-    }
+    /**
+     * The material of a sprite without a {@code _s} map, as RTX Remix for Minecraft builds its
+     * atlas (BlockTextureManager: roughness 180/255, not metallic, no emission), in LabPBR terms:
+     * smoothness s with (1 - s)^2 = 180/255 (pathtrace.rgen reads the roughness Remix's way),
+     * F0 0 (dielectric 0.04), alpha 255 (no emission).
+     */
+    private static final byte DEFAULT_SMOOTHNESS = (byte) Math.round(255.0 * (1.0 - Math.sqrt(180.0 / 255.0)));
 
     private static boolean dirty = true;
     private static VulkanImage image;
@@ -258,23 +205,10 @@ public final class RtMaterials {
     }
 
     private static boolean fromDefaults(String iconName, ByteBuffer out, int stride, int x0, int y0, int sw, int sh) {
-        String path = new ResourceLocation(iconName).getPath();
-        if (!path.startsWith("blocks/")) return false;
-        String key = path.substring("blocks/".length());
-        int[] v = DEFAULTS.get(key);
-        if (v == null) {
-            for (Map.Entry<String, int[]> e : PREFIXES.entrySet()) {
-                if (key.startsWith(e.getKey())) {
-                    v = e.getValue();
-                    break;
-                }
-            }
-        }
-        if (v == null) return false;
         for (int y = 0; y < sh; y++) {
             for (int x = 0; x < sw; x++) {
                 int o = ((y0 + y) * stride + x0 + x) * 4;
-                out.put(o, (byte) v[0]).put(o + 1, (byte) v[1]).put(o + 3, (byte) v[2]);
+                out.put(o, DEFAULT_SMOOTHNESS).put(o + 1, (byte) 0).put(o + 2, (byte) 0).put(o + 3, (byte) 255);
             }
         }
         return true;

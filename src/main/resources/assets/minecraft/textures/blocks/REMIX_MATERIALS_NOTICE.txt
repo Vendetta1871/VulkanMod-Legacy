@@ -1,0 +1,4 @@
+The *_s.png, *_n.png and *_sss.png maps in this directory are the built-in baseline material maps
+of NVIDIA's RTX Remix for Minecraft (https://github.com/NVIDIAGameWorks/rtx-remix-minecraft,
+src/main/resources/assets/minecraft/textures/block), renamed to Minecraft 1.12 texture names.
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. Licensed under the Apache License, Version 2.0.

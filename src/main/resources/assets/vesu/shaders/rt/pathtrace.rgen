@@ -151,14 +151,17 @@ struct Surface {
     float alpha;    // GGX alpha = rough^2
 };
 
-// LabPBR: red = perceptual smoothness, green = F0 (230+ = metal, reflecting its albedo).
+// LabPBR read as RTX Remix for Minecraft reads it (LabPBRConverter): roughness (1 - smoothness)^2
+// taken as Remix's perceptual roughness; green 230+ = metal (F0 = albedo), every other surface a
+// dielectric of F0 0.04.
 Surface surfaceOf(vec3 albedo, vec4 material, vec3 n) {
     Surface s;
     s.n = n;
     bool metal = material.g >= 229.5 / 255.0;
-    s.f0 = metal ? albedo : vec3(max(material.g, 0.04));
+    s.f0 = metal ? albedo : vec3(0.04);
     s.diffuse = metal ? vec3(0.0) : albedo;
-    s.rough = clamp(1.0 - material.r, 0.03, 1.0);
+    float ls = 1.0 - material.r;
+    s.rough = clamp(ls * ls, 0.03, 1.0);
     s.alpha = s.rough * s.rough;
     return s;
 }
@@ -333,20 +336,6 @@ vec3 blockLight(Surface s, vec3 v, vec3 pos, ivec2 p, ivec2 prevPixel, bool reus
     return vis * lightColor(r.light) * (r.target * W) * (evalBrdf(s, v, dir) / nl);
 }
 
-bool emitterSurface(vec3 pos, vec3 n) {
-    if (pc.cam.w <= 0.0) return false;
-    vec3 q = pos + pc.cam.xyz;
-    int slot = findCell(ivec3(floor(q / float(CELL))));
-    if (slot < 0) return false;
-    int packed = cells[slot].w;
-    int start = packed & 0xFFFFFF;
-    int count = (packed >> 24) & 0xFF;
-    ivec3 block = ivec3(floor(q - n * 0.05));
-    for (int i = 0; i < count; i++) {
-        if (ivec3(floor(lights[lightIndex[start + i] * 2].xyz)) == block) return true;
-    }
-    return false;
-}
 
 // A direction within the sun or moon disc.
 vec3 sunSample() {
@@ -500,17 +489,13 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
     vec3 albedo = pow(payload.albedo, vec3(2.2));
     vec4 material = payload.material;
     float skyLight = payload.skyLight, blockLevel = payload.blockLight;
-    vec3 albedoSrgb = payload.albedo;
     Surface s = surfaceOf(albedo, material, n);
     float nv = max(dot(n, v), 1e-4);
     g = Guide(n, s.rough, s.diffuse, envBrdf(s.f0, s.rough, nv));
 
     vec3 radiance = vec3(0.0);
-    // Emission: LabPBR emission, or the bright texels of a listed light's own block.
+    // Emission: LabPBR emission (alpha), Remix's emissive intensity.
     float emission = emissionOf(material);
-    if (emission <= 0.0 && blockLevel > 0.8 && emitterSurface(hitPos, n)) {
-        emission = smoothstep(0.7, 0.95, max(albedoSrgb.r, max(albedoSrgb.g, albedoSrgb.b)));
-    }
     radiance += albedo * (EMISSION * emission);
 
     // Sun / moon (sealed spaces see none).
