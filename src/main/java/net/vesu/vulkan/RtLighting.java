@@ -45,13 +45,17 @@ final class RtLighting {
         float rain = rainStrength(), thunder = thunderStrength();
         float[] t = transmittance(h);
         float[] out = new float[3];
+        // Remix's distant light (dxvk-remix distant_light.slangh): the sun disc's radiance is
+        // radiance / sin^2(half angle) over a cone of solid angle ~ pi sin^2, so its irradiance at
+        // normal incidence is pi times the radiance the mod sets.
+        final float disc = (float) Math.PI;
         if (day) {
             float weather = lerp(1.0f, lerp(RAIN_SUN, THUNDER_SUN, thunder) / SUN_LUMINANCE, rain);
-            for (int i = 0; i < 3; i++) out[i] = SUN_LUMINANCE * t[i] * weather * SCENE_SCALE;
+            for (int i = 0; i < 3; i++) out[i] = disc * SUN_LUMINANCE * t[i] * weather * SCENE_SCALE;
         } else {
             float weather = lerp(1.0f, lerp(RAIN_MOON, THUNDER_MOON, thunder) / MOON_LUMINANCE, rain);
             float[] tint = {0.85f, 0.9f, 1.0f};
-            for (int i = 0; i < 3; i++) out[i] = MOON_LUMINANCE * tint[i] * t[i] * weather * SCENE_SCALE;
+            for (int i = 0; i < 3; i++) out[i] = disc * MOON_LUMINANCE * tint[i] * t[i] * weather * SCENE_SCALE;
         }
         return out;
     }
