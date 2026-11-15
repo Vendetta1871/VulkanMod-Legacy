@@ -4,7 +4,7 @@ package net.vesu.lod.mesh;
  * Model metadata word (AUDIT 5.14). Per-face byte at {@code 8 * face} ({@code 0xFF} = no
  * face): bit 0 occludes neighbours, bit 1 covers the whole face, bit 2 can be occluded,
  * bit 3 self-lit. Global byte at bit 48: 1 biome-tinted, 2 translucent, 4 double-sided,
- * 8 contains fluid, 16 is fluid, 32 culls its own kind, 64 fully opaque. Light emission
+ * 8 contains fluid (a fluid, or a block standing in water), 16 is fluid, 32 culls its own kind, 64 fully opaque. Light emission
  * at bits 55..58.
  */
 public final class ModelMeta {

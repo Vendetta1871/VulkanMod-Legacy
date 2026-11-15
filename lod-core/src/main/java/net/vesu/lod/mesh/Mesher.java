@@ -182,6 +182,10 @@ public final class Mesher {
                         if (nfb != ModelMeta.NO_FACE && (nfb & ModelMeta.F_OCCLUDES) != 0
                                 && (fb & ModelMeta.F_OCCLUDABLE) != 0) continue;
                         if (nm == m && ModelMeta.has(mm, ModelMeta.CULLS_OWN)) continue;
+                        // Water against a block standing in water (seaweed, coral): no face, as in
+                        // vanilla; drawn, every plant column sits in a shell of water faces.
+                        if (ModelMeta.has(mm, ModelMeta.IS_FLUID) && ModelMeta.has(mm, ModelMeta.TRANSLUCENT)
+                                && ModelMeta.has(nmeta, ModelMeta.HAS_FLUID) && !ModelMeta.has(nmeta, ModelMeta.IS_FLUID)) continue;
                     }
                     long own = data[i];
                     int light;

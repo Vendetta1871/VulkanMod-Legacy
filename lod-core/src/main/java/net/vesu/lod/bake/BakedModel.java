@@ -35,6 +35,16 @@ public final class BakedModel {
      */
     public BakedModel(long[][] images, boolean translucentLayer, boolean forceSolid, boolean fluid, boolean opaqueCube,
                       int emission, int tintKind, int tint, boolean shaded, int customId) {
+        this(images, translucentLayer, forceSolid, fluid, false, opaqueCube, emission, tintKind, tint, shaded, customId);
+    }
+
+    /**
+     * @param holdsWater a non-fluid block standing in water (water material: seaweed, coral):
+     *                   the water around it draws no face against it, as the vanilla fluid
+     *                   renderer culls water against any water-material neighbour
+     */
+    public BakedModel(long[][] images, boolean translucentLayer, boolean forceSolid, boolean fluid, boolean holdsWater,
+                      boolean opaqueCube, int emission, int tintKind, int tint, boolean shaded, int customId) {
         this.images = images;
         int[] faces = new int[6];
         boolean anyTint = false, translucent = false, discard = false;
@@ -122,6 +132,7 @@ public final class BakedModel {
         for (int f = 0; f < 6; f++) if (faces[f] != ModelMeta.NO_FACE && (faces[f] & ModelMeta.F_SELF_LIT) == 0) allFacesDeep = false;
         if (allFacesDeep && !fluid && (globals & ModelMeta.TRANSLUCENT) == 0 && coveringFaces < 6) globals |= ModelMeta.DOUBLE_SIDED;
         if (fluid) globals |= ModelMeta.IS_FLUID | ModelMeta.HAS_FLUID | ModelMeta.CULLS_OWN;
+        else if (holdsWater) globals |= ModelMeta.HAS_FLUID;
         if (coveringFaces == 6) globals |= ModelMeta.CULLS_OWN;
         boolean allOccluding = true;
         for (int f = 0; f < 6; f++) if (faces[f] == ModelMeta.NO_FACE || (faces[f] & ModelMeta.F_OCCLUDES) == 0) allOccluding = false;

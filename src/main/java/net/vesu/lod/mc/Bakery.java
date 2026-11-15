@@ -218,7 +218,8 @@ public final class Bakery {
                 tintKind = 2;
             }
         }
-        BakedModel baked = new BakedModel(images, translucentLayer && !leaves, leaves, fluid, state.isOpaqueCube(),
+        boolean holdsWater = !fluid && state.getMaterial() == Material.WATER;
+        BakedModel baked = new BakedModel(images, translucentLayer && !leaves, leaves, fluid, holdsWater, state.isOpaqueCube(),
                 state.getLightValue(), tintKind, tint, shaded, 0);
         baked.record[15] = dhMaterial(state);
         // Not part of the dedup key: look-alike states share the first one's block tag, which
