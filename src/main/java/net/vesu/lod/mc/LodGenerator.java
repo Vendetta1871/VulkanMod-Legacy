@@ -38,6 +38,7 @@ final class LodGenerator {
     private int ring, ringStep, centerX = Integer.MIN_VALUE, centerZ;
     private int generated, read;
     private long backoffUntil;
+    private int requeueTick;
 
     LodGenerator(LodSession session, LodStorage storage) {
         this.session = session;
@@ -86,6 +87,11 @@ final class LodGenerator {
     void tick(MinecraftServer server) {
         int radius = Initializer.CONFIG.lodGenerationDistance;
         if (radius <= 0) return;
+        if (++requeueTick >= 20) {
+            requeueTick = 0;
+            WorldServer w = server.getWorld(session.dimension);
+            if (w != null) requeueUnloads(w);
+        }
         long now = System.nanoTime();
         if (now < backoffUntil) return;
         // Throttle by the server tick: past 40 ms per tick, pause for a second.
@@ -165,6 +171,26 @@ final class LodGenerator {
         Chunk c = provider.getLoadedChunk(cx, cz);
         if (c == null) return;
         if (!world.getPlayerChunkMap().contains(cx, cz)) provider.queueUnload(c);
+    }
+
+    /**
+     * Queues for unload every chunk outside the player chunk map that is not queued yet.
+     * Generation loads chunks there (the column, its population neighbours, and whatever the
+     * decorators of other mods reach into), and any later {@code getLoadedChunk} on one clears
+     * its unload flag: the server then keeps it loaded, ticking and saving for good. Chunks
+     * held by a Forge ticket stay, and spawn chunks are refused by {@code queueUnload} itself.
+     */
+    private static void requeueUnloads(WorldServer world) {
+        ChunkProviderServer provider = world.getChunkProvider();
+        java.util.Set<net.minecraft.util.math.ChunkPos> held = world.getPersistentChunks().keySet();
+        // getLoadedChunks, not getLoadedChunk: the latter would clear the flag itself.
+        java.util.List<Chunk> stray = new java.util.ArrayList<>();
+        for (Chunk c : provider.getLoadedChunks()) {
+            if (c.unloadQueued || world.getPlayerChunkMap().contains(c.x, c.z)) continue;
+            if (!held.isEmpty() && held.contains(new net.minecraft.util.math.ChunkPos(c.x, c.z))) continue;
+            stray.add(c);
+        }
+        for (Chunk c : stray) provider.queueUnload(c);
     }
 
     /** Position {@code i} on the square ring of radius {@code r} (8r positions). */
