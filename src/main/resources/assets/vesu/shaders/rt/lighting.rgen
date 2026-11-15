@@ -249,6 +249,7 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
         // Blocked: when the nearest blocker glows itself (the lava next to the chosen lava
         // block, a lava shelf above it), it lights this point as brightly.
         payload.t = -1.0;
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, 0.0, dir, tMax, 0);
         if (payload.t >= 0.0 && emissionOf(payload.material) > 0.5) vis = vec3(1.0);
     }
@@ -275,6 +276,7 @@ vec3 indirect(vec3 pos, vec3 n, float skyLight) {
     vec3 dir = normalize(t1 * (cos(phi) * sr) + t2 * (sin(phi) * sr) + n * sqrt(1.0 - r2));
     if (any(isnan(dir)) || any(isnan(pos))) return vec3(0.0);
     payload.t = -1.0;
+    payload.cone = 0.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, pos + n * 0.02, 0.0, dir, 128.0, 0);
     // Irradiance estimate (pi * radiance): the sky's, or the hit's albedo times a rough
     // estimate of its own irradiance from its lightmap.
@@ -366,6 +368,7 @@ void main() {
     payload.t = -1.0;
     vec3 dir = view / dist;
     float slack = 0.05 + 0.01 * dist;
+    payload.cone = 0.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
     bool hit = payload.t >= 0.0;
     if (hit && !any(isnan(payload.normal))) {
@@ -396,6 +399,7 @@ void main() {
         if (shadow.a <= 0.0 && pc.restir.y > 0.0) {
             // Occluded: the distance to the occluder sizes SIGMA's penumbra.
             payload.t = -1.0;
+            payload.cone = 0.0;
             traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, so, 0.0, sunDir, 512.0, 0);
             occluder = payload.t >= 0.0 ? payload.t : 0.05;
         } else if (max(sunFactor.r, max(sunFactor.g, sunFactor.b)) < 0.999) {

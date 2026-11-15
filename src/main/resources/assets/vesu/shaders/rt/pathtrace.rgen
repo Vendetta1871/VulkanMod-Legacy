@@ -75,6 +75,11 @@ void store3(int i, uint px, vec3 v) {
     uint o = plane(i) + px * 3u;
     rr[o] = v.x; rr[o + 1u] = v.y; rr[o + 2u] = v.z;
 }
+// Plane 7 (rt_pt_resolve.comp, not an RR input): what RR's colour was divided by.
+void storeRemod(uint px, vec3 m) {
+    uint o = floatBitsToUint(rr[7]) + px * 3u;
+    rr[o] = m.x; rr[o + 1u] = m.y; rr[o + 2u] = m.z;
+}
 void storeGuides(uint px, float depth, vec2 mv, vec3 n, float rough, vec3 dalb, vec3 salb) {
     rr[plane(1) + px] = depth;
     uint o = plane(2) + px * 2u;
@@ -302,6 +307,7 @@ vec3 blockLight(Surface s, vec3 v, vec3 pos, ivec2 p, ivec2 prevPixel, bool reus
     if (tMax > 0.05 && max(vis.r, max(vis.g, vis.b)) <= 0.0) {
         // Blocked by a glowing block (lava next to lava): it lights this point as brightly.
         payload.t = -1.0;
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, 0.0, dir, tMax, 0);
         if (payload.t >= 0.0 && emissionOf(payload.material) > 0.5) vis = vec3(1.0);
     }
@@ -408,6 +414,10 @@ struct Guide {
 vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bool reuse, float horizontal,
                  out Guide g) {
     vec3 n = payload.normal;
+    // Thin plants (cross sprites, the only faces off the block axes) are lit like the ground they
+    // grow on: a vertical blade would see no noon sun, and the crossing quad would shade it.
+    bool thin = max(abs(n.x), max(abs(n.y), abs(n.z))) < 0.95;
+    if (thin) n = vec3(0.0, 1.0, 0.0);
     vec3 v = -dir;
     vec3 albedo = pow(payload.albedo, vec3(2.2));
     vec4 material = payload.material;
@@ -429,7 +439,8 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
     if (pc.light.w > 0.0 && skyLight > 0.01) {
         vec3 l = sunSample();
         if (dot(n, l) > 0.0) {
-            vec3 vis = traceShadow(hitPos + n * (0.02 + 0.002 * dist), l, 512.0, 0x0Fu);
+            // Plants: the shadow ray leaves their own tuft first.
+            vec3 vis = traceShadow(thin ? hitPos + l * 0.5 : hitPos + n * (0.02 + 0.002 * dist), l, 512.0, 0x0Fu);
             radiance += pc.ddgiFlags.yzw * vis * evalBrdf(s, v, l);
         }
     }
@@ -469,6 +480,7 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
             vec3 origin = hitPos + n * 0.02;
             payload.t = -1.0;
             payload.backface = 0.0;
+            payload.cone = 0.0;
             traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, origin, 0.0, l, 256.0, 0);
             vec3 li;
             if (payload.t < 0.0) {
@@ -504,6 +516,8 @@ void main() {
     float dist = sky ? 1e5 : length(view);
     vec3 dir = view / max(length(view), 1e-6);
     float band = bandNoise(pixel);
+    // Angle between neighbouring pixels' rays: the texture level of the primary hits.
+    float pixelCone = length(normalize(unproject(p + ivec2(0, 1), 0.5, vec2(size)) - eye) - normalize(unproject(p, 0.5, vec2(size)) - eye));
 
     // The nearest translucent surface (water, stained glass, ice) in front of the opaque one;
     // the raster translucent layer leaves exactly these pixels to this pass (TerrainRenderer).
@@ -515,6 +529,7 @@ void main() {
         payload.t = -1.0;
         payload.backface = 0.0;
         float tEnd = sky ? 4096.0 : dist + 0.05 + 0.01 * dist;
+        payload.cone = pixelCone;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, tEnd, 0);
         if (payload.t >= 0.0 && !any(isnan(payload.normal))) {
             vec3 at = eye + dir * payload.t;
@@ -592,6 +607,7 @@ void main() {
         vec3 ro = at + n0 * 0.02;
         payload.t = -1.0;
         payload.backface = 0.0;
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, ro, 0.0, r, 512.0, 0);
         vec3 lr = payload.t < 0.0 ? skyAlong(r) : hitRadiance(ro, r, true);
         front += F * lr;
@@ -636,6 +652,7 @@ void main() {
             && !any(isnan(rayOrigin)) && !any(isinf(rayOrigin))) {
         payload.t = -1.0;
         payload.backface = 0.0;
+        payload.cone = refracted ? 0.0 : pixelCone;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, rayOrigin, rayStart, rayDir, rayEnd, 0);
         hit = payload.t >= 0.0 && !any(isnan(payload.normal));
     }
@@ -670,8 +687,12 @@ void main() {
             return;
         }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
-        store3(0, px, radiance);
-        storeGuides(px, viewDepth, mv, g.n, g.rough, g.diffuse, g.specular);
+        // Demodulated: RR denoises the lighting only and the texture comes back at full detail
+        // afterwards, however noisy the lighting under it.
+        vec3 m = max(g.diffuse + g.specular, vec3(0.03));
+        store3(0, px, radiance / m);
+        storeGuides(px, viewDepth, mv, g.n, g.rough, g.diffuse / m, g.specular / m);
+        storeRemod(px, m);
         return;
     }
 
@@ -709,6 +730,7 @@ void main() {
     radiance = front + through * radiance;
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
     store3(0, px, radiance);
+    storeRemod(px, vec3(1.0));
     imageStore(giCur, p, vec4(0.0, 0.0, 0.0, length(visible)));
     imageStore(normals, p, vec4(frontGuide.n * 0.5 + 0.5, frontGuide.rough));
     // RR's guides describe the visible surface; the diffuse albedo is what shows through it, so

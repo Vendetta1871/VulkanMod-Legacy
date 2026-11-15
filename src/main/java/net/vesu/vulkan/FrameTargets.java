@@ -59,6 +59,7 @@ public final class FrameTargets {
     private static String upscaler = "auto";
     private static boolean blitOnly;
     private static boolean temporal;
+    private static final boolean RR_JITTER = "1".equals(net.vesu.Env.get("VESU_RR_JITTER"));
 
     /**
      * Debug knob for the shader-pack coordinate convention (docs/shaderpacks, D4):
@@ -536,11 +537,15 @@ public final class FrameTargets {
         }
         // A pack replaces the temporal upscaler: FSR 3 reads the scene in Vulkan row order.
         boolean rtPack = pack != null && net.vesu.vulkan.rt.RtScene.enabled();
-        temporal = (pack == null || rtPack) && wantTemporal();
+        // Ray Reconstruction is the temporal pass of the path-traced scene: it resolves the jitter
+        // into a stable image at render size, which FSR 1 then scales. FSR 3 on top would
+        // re-accumulate that resolved image against the same jitter and smear it.
+        boolean rr = net.vesu.vulkan.rt.RtScene.enabled() && RtLightingPass.pathTracingWanted();
+        temporal = !rr && (pack == null || rtPack) && wantTemporal();
         updateLodBias();
-        // Ray Reconstruction resolves sub-pixel detail from the jitter like a temporal upscaler.
-        net.vesu.render.CameraHistory.setJitterEnabled(temporal
-                || (net.vesu.vulkan.rt.RtScene.enabled() && RtLightingPass.pathTracingWanted()));
+        // RR gets the colour without the surface texture, which is multiplied back afterwards at the
+        // pixel centre: without jitter that texture lines up with RR's output (VESU_RR_JITTER=1 jitters).
+        net.vesu.render.CameraHistory.setJitterEnabled(temporal || (rr && RR_JITTER));
         MotionVectorPass.setEnabled(temporal || (pack != null && pack.needsMotion()));
 
         // Contents of the previous frame are discarded (UNDEFINED). The source stages

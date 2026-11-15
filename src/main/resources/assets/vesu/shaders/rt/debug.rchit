@@ -44,7 +44,14 @@ void main() {
 
     vec2 uv = a.uv * w.x + b.uv * w.y + c.uv * w.z;
     vec4 tint = unpackUnorm4x8(a.color) * w.x + unpackUnorm4x8(b.color) * w.y + unpackUnorm4x8(c.color) * w.z;
-    vec3 albedo = textureLod(blockAtlas, uv, 0.0).rgb * tint.rgb;
+    // Mip level of the footprint (primary rays): 16 texels per block, widened on grazing faces.
+    float lod = 0.0;
+    if (payload.cone > 0.0) {
+        vec3 gn = normalize(cross(b.pos - a.pos, c.pos - a.pos));
+        float slope = max(abs(dot(gn, gl_WorldRayDirectionEXT)), 0.3);
+        lod = max(log2(payload.cone * gl_HitTEXT * 16.0 / slope), 0.0);
+    }
+    vec3 albedo = textureLod(blockAtlas, uv, lod).rgb * tint.rgb;
 
     // Degenerate (zero-area) triangles have no normal: face the ray instead. A NaN normal
     // would turn into NaN secondary rays, which software traversal can spin on.

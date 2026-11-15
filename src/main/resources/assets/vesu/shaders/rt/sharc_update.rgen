@@ -123,6 +123,7 @@ void main() {
     float slack = 0.05 + 0.01 * dist;
     payload.t = -1.0;
     payload.backface = 0.0;
+    payload.cone = 0.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
     if (payload.t < 0.0 || any(isnan(payload.normal))) return;
     vec3 origin = eye;
@@ -163,6 +164,7 @@ void main() {
         if (any(isnan(dir)) || any(isnan(origin))) break;
         payload.t = -1.0;
         payload.backface = 0.0;
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, origin, 0.0, dir, 128.0, 0);
         if (payload.t < 0.0) {
             // The sky, scaled by vanilla's sky light as the lighting pass does (rays leaving

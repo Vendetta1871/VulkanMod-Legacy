@@ -51,7 +51,7 @@ final class PostProcess {
      */
     private static final float EV_MAX_NIGHT = 6.5f, KEY_NIGHT = 0.05f;
     /** Local tonemapping: shadows 1.4, highlights 2.5. */
-    private static final float LOCAL_SHADOWS = 1.4f, LOCAL_HIGHLIGHTS = 2.5f, LOCAL_STRENGTH = 1.0f;
+    private static final float LOCAL_SHADOWS = 1.4f, LOCAL_HIGHLIGHTS = 2.5f, LOCAL_STRENGTH = 0.0f;
 
     private static final StorageImage[] levels = new StorageImage[LEVELS];
     private static final StorageImage exposure = new StorageImage(VK_FORMAT_R32G32_SFLOAT,

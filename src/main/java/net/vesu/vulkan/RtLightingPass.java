@@ -45,7 +45,19 @@ final class RtLightingPass {
     private static final long START = System.nanoTime();
     private static final boolean PT_ALLOWED = !"0".equals(Env.get("VESU_PT"));
     /** VESU_DEBUG_VIEW=ptraw: the path tracer's noisy radiance, without Ray Reconstruction's output. */
-    private static final boolean PT_RAW = "ptraw".equalsIgnoreCase(Env.get("VESU_DEBUG_VIEW"));
+    private static final int PT_PLANE = ptPlane(Env.get("VESU_DEBUG_VIEW"));
+
+    /** 1 + the RR input plane a debug view shows (ptraw: colour, ptnrm: normals, ptalb/ptspec: albedos), 0 = none. */
+    private static int ptPlane(String view) {
+        if (view == null) return 0;
+        switch (view.toLowerCase()) {
+            case "ptraw": return 1;
+            case "ptnrm": return 4;
+            case "ptalb": return 6;
+            case "ptspec": return 7;
+            default: return 0;
+        }
+    }
 
     /** NRD's common inputs of this frame: motion vectors, normals + roughness, view z ({image, format, layout}). */
     static long[][] nrdCommonInputs() {
@@ -366,7 +378,7 @@ final class RtLightingPass {
         writeResolveSet(set, scene);
         ByteBuffer p = compositeConstants(stack, gi, false, false);
         p.putFloat(92, Rr2Denoiser.outputWidth());
-        p.putFloat(84, PT_RAW ? 1.0f : 0.0f);
+        p.putFloat(84, PT_PLANE);
         resolve.bind(cmd);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolve.layout(), 0, stack.longs(set), null);
         p.putFloat(88, 0.0f);

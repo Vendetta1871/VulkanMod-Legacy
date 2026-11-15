@@ -150,6 +150,7 @@ void main() {
     float slack = 0.05 + 0.01 * dist;
     bool translucent = pc.cam.w > 0.5;
     if (translucent) {
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, dist + slack, 0);
         if (payload.t < 0.0) return;
     } else {
@@ -157,6 +158,7 @@ void main() {
         if (pc.flags.x > 0.5 && imageLoad(gbufferNormals, p).a > 0.5) return;
         // The opaque surface of the depth sample; only smooth materials reflect visibly.
         // Entities too: dropped blocks carry their atlas material (an iron block on the ground).
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, eye, max(dist - slack, 0.0), dir, dist + slack, 0);
         if (payload.t < 0.0 || payload.material.r < 0.5) return;
     }
@@ -198,6 +200,7 @@ void main() {
     vec3 origin = hitPos + n0 * (0.02 + 0.001 * dist);
     payload.t = -1.0;
     // Reflections see entities too (players, mobs: one color per model face).
+    payload.cone = 0.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, origin, 0.0, r, 512.0, 0);
     // Reflected radiance (scene units), gamma-encoded like the scene color it blends into.
     vec3 reflectedLin = payload.t < 0.0 ? skyAlong(r)
@@ -252,6 +255,7 @@ void main() {
         vec3 down = refract(dir, n, 1.0 / 1.33);
         if (any(isnan(down)) || dot(down, down) < 0.5) down = dir;
         payload.t = -1.0;
+        payload.cone = 0.0;
         traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, hitPos - n0 * 0.02, 0.0, down, 48.0, 0);
         float thickness = payload.t < 0.0 ? 48.0 : payload.t;
         vec2 shift = n.xz * (40.0 / (1.0 + 0.15 * dist)) * min(thickness, 2.0);

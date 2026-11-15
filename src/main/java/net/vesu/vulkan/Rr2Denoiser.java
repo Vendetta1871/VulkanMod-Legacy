@@ -37,6 +37,8 @@ final class Rr2Denoiser {
 
     /** Channels per pixel of the seven input planes, in rr2vk's order. */
     static final int[] LD = {3, 1, 2, 3, 1, 3, 3};
+    /** Plane 7 (not an RR input): the albedo the colour was divided by, multiplied back after RR. */
+    static final int PLANES = 8, LD_REMOD = 3;
     /** Header: plane offsets (floats) 0-6, width 8, height 9, padded output width 10; jitter 12-13, wave time 14, camera xz modulo 1024 15-16 (floats). */
     static final int HEADER = 256;
 
@@ -49,7 +51,7 @@ final class Rr2Denoiser {
     private static long handle;
     private static int width, height, outW, outH;
     private static RtBuffer inputs;
-    private static final long[] planes = new long[7];
+    private static final long[] planes = new long[PLANES];
     private static long outputBuffer, outputOffset, outputAddress;
     private static boolean fresh = true;
 
@@ -136,9 +138,9 @@ final class Rr2Denoiser {
         width = w;
         height = h;
         long size = HEADER;
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < PLANES; i++) {
             planes[i] = size;
-            size = (size + (long) w * h * LD[i] * 4 + 255) & ~255L;
+            size = (size + (long) w * h * (i < 7 ? LD[i] : LD_REMOD) * 4 + 255) & ~255L;
         }
         inputs = RtBuffer.create(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
         fresh = true;
@@ -157,7 +159,7 @@ final class Rr2Denoiser {
     /** Writes this frame's header into the input buffer (before the passes that fill the planes). */
     static void writeHeader(VkCommandBuffer cmd, float jx, float jy, float time, float camX, float camZ, MemoryStack stack) {
         ByteBuffer hdr = stack.calloc(80);
-        for (int i = 0; i < 7; i++) hdr.putInt(i * 4, (int) (planes[i] / 4));
+        for (int i = 0; i < PLANES; i++) hdr.putInt(i * 4, (int) (planes[i] / 4));
         hdr.putInt(32, width).putInt(36, height).putInt(40, outW);
         hdr.putFloat(48, jx).putFloat(52, jy).putFloat(56, time).putFloat(60, camX).putFloat(64, camZ);
         vkCmdUpdateBuffer(cmd, inputs.buffer, 0, hdr);

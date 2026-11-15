@@ -89,8 +89,7 @@ void main() {
 
     // Saturation 0.8 before the curve: vanilla textures times biome tints are far more
     // saturated in linear light than the PBR materials the reference look was tuned with.
-    float l = luminance(lin);
-    lin = max(mix(vec3(l), lin, 0.8), vec3(0.0));
+    lin = max(lin, vec3(0.0));
 
     float e = ex.x;
     vec3 mapped = aces(lin * (e * pc.params.x * gain));
