@@ -24,11 +24,11 @@ void main() {
         if (max(max(tint.r, tint.g), tint.b) - min(min(tint.r, tint.g), tint.b) > 0.08) {
             ignoreIntersectionEXT;
         }
-        // Light through colored glass takes its hue (normalized: glass colors light more than
-        // it dims it), saturated a little so a single pane reads clearly.
-        vec3 color = tex.rgb;   // the vertex color is shading only here
-        color /= max(max(color.r, color.g), max(color.b, 1e-3));
-        color = pow(color, vec3(1.5));
+        // Light through colored glass is multiplied by its transmittance - the texture color,
+        // lifted a little (^0.8) so a single pane still reads - never renormalized: a pane
+        // that passes 30% of the red light leaves it at 30%, dim and red, and a stack of panes
+        // goes dark and deep (docs/rt-production-look.md, section 2.3).
+        vec3 color = pow(tex.rgb, vec3(0.8));   // the vertex color is shading only here
         shadow.rgb *= mix(vec3(1.0), color, min(tex.a * 2.0, 1.0));
         ignoreIntersectionEXT;
     }

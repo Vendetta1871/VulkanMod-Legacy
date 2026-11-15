@@ -20,14 +20,14 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK12.vkGetBufferDeviceAddress;
 
 /** A VMA buffer with its device address; optionally persistently mapped (host visible). */
-final class RtBuffer {
+public final class RtBuffer {
 
-    final long buffer;
+    public final long buffer;
     final long allocation;
-    final long size;
+    public final long size;
     final long address;
     /** Mapped memory for host-visible buffers, else null. */
-    final ByteBuffer mapped;
+    public final ByteBuffer mapped;
 
     private RtBuffer(long buffer, long allocation, long size, long address, ByteBuffer mapped) {
         this.buffer = buffer;
@@ -37,7 +37,7 @@ final class RtBuffer {
         this.mapped = mapped;
     }
 
-    static RtBuffer create(long size, int usage, boolean hostVisible) {
+    public static RtBuffer create(long size, int usage, boolean hostVisible) {
         try (MemoryStack stack = stackPush()) {
             VkBufferCreateInfo info = VkBufferCreateInfo.calloc(stack).sType$Default()
                     .size(size)
@@ -64,6 +64,8 @@ final class RtBuffer {
         }
     }
 
+    public long deviceAddress() { return address; }
+
     static long addressOf(long buffer) {
         try (MemoryStack stack = stackPush()) {
             return vkGetBufferDeviceAddress(Vulkan.getDevice(),
@@ -74,7 +76,7 @@ final class RtBuffer {
     /** Buffers created and not yet destroyed (leak check under VESU_RT_LOG). */
     static int live;
 
-    void destroyNow() {
+    public void destroyNow() {
         live--;
         vmaDestroyBuffer(Vulkan.getAllocator(), buffer, allocation);
     }
@@ -93,7 +95,7 @@ final class RtBuffer {
     static int delayFrames() { return delay(); }
 
     /** Queues {@code release} to run once no in-flight frame can use the object. */
-    static void defer(Runnable release) {
+    public static void defer(Runnable release) {
         pending.add(new Object[]{frame + delay(), release});
     }
 

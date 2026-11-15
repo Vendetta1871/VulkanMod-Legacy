@@ -12,6 +12,8 @@ layout(binding = 1) uniform UniformBufferObject {
     // Horizontal band where vanilla terrain dissolves into the LODs; start >= end: off.
     float LodEdgeStart;
     float LodEdgeEnd;
+    // Translucent layer only: range of the path-traced water and glass (pathtrace.rgen); 0: off.
+    float PtTranslucentRange;
 };
 
 layout(binding = 2) uniform sampler2D Sampler0;
@@ -29,6 +31,11 @@ void main() {
     if (LodEdgeEnd > LodEdgeStart) {
         // Screen-space noise shared with lod.fsh, which keeps exactly the pixels dropped here.
         float t = smoothstep(LodEdgeStart, LodEdgeEnd, length(horizontal));
+        if (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) < t) discard;
+    }
+    if (PtTranslucentRange > 0.0) {
+        // pathtrace.rgen draws these pixels: same dither over the range's last 24 blocks.
+        float t = smoothstep(0.0, 1.0, (PtTranslucentRange - max(abs(horizontal.x), abs(horizontal.y))) / 24.0);
         if (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) < t) discard;
     }
     vec4 color = vertexColor * ColorModulator * texture(Sampler0, texCoord0);

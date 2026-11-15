@@ -362,6 +362,8 @@ public class TerrainRenderer {
             // F2: no-op when the particle pass already took the copy this frame.
             net.vesu.vulkan.Drawer.snapshotOpaque();
             net.vesu.vulkan.Drawer.enterTranslucent();
+            // The lighting ran on entering the layer: path-traced water and glass replace the raster ones.
+            VRenderSystem.ptTranslucentRange = VRenderSystem.pathTracedRange();
         }
         currentLayer = layer;
         logStats();
@@ -430,6 +432,7 @@ public class TerrainRenderer {
         // so falling snow/rain lands on top of the water instead of under it. This runs for
         // every frame (renderChunkLayer is always invoked for the translucent layer).
         if (layer == BlockRenderLayer.TRANSLUCENT) {
+            VRenderSystem.ptTranslucentRange = 0.0f;
             EntityRenderer.flushWeather();
         }
     }

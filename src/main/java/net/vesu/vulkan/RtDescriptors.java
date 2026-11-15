@@ -20,7 +20,13 @@ import static org.lwjgl.vulkan.VK10.*;
  * 9-15 storage images of the lighting pass (history read/write, aux, normals, GI read/write, aux2),
  * 16 material atlas (LabPBR specular, see RtMaterials), 17-18 ReSTIR reservoirs (read, write),
  * 19-21 NRD inputs (block light, indirect light, view z), 22 primary-hit albedo,
- * 23 dynamic lights (RtLights.updateDynamic).
+ * 23 dynamic lights (RtLights.updateDynamic),
+ * 24-28 DDGI (RtDdgi): irradiance atlas, distance atlas, probes, probe rays, volume constants,
+ * 29-32 reflection history (RtReflectionPass): color read/write, distance read/write,
+ * 33-34 SIGMA inputs of the lighting pass (sun shadow penumbra, translucency),
+ * 35-36 reflections for NRD (RtReflectionPass): radiance + hit distance, blend weights,
+ * 37-39 radiance cache (RtSharc): voxel keys, voxels, this frame's sums,
+ * 40 Ray Reconstruction's input planes (Rr2Denoiser, written by pathtrace.rgen).
  * Bindings a pass does not use stay unwritten.
  */
 final class RtDescriptors {
@@ -68,6 +74,23 @@ final class RtDescriptors {
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, raygen},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
         };
         bindingCount = bindings.length;
@@ -165,6 +188,28 @@ final class RtDescriptors {
                         .range(net.vesu.vulkan.rt.RtLights.dynamicBytes());
                 writes.get(n++).sType$Default().dstSet(set).dstBinding(23)
                         .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).pBufferInfo(dyn);
+                // DDGI (bindings 24-28): always bound for the lighting pass, sized by RtDdgi.begin.
+                n = image(writes, n, set, 24, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.linearClampSampler(),
+                        RtDdgi.irradianceView(), VK_IMAGE_LAYOUT_GENERAL, stack);
+                n = image(writes, n, set, 25, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.linearClampSampler(),
+                        RtDdgi.distanceView(), VK_IMAGE_LAYOUT_GENERAL, stack);
+                long[][] ddgi = {{RtDdgi.probeBuffer(), 0, RtDdgi.probeBytes()}, {RtDdgi.rayBuffer(), 0, RtDdgi.rayBytes()},
+                        {RtDdgi.volumeBuffer(), RtDdgi.volumeOffset(), RtDdgi.volumeBytes()}};
+                for (int i = 0; i < 3; i++) {
+                    VkDescriptorBufferInfo.Buffer info = VkDescriptorBufferInfo.calloc(1, stack);
+                    info.get(0).buffer(ddgi[i][0]).offset(ddgi[i][1]).range(ddgi[i][2]);
+                    writes.get(n++).sType$Default().dstSet(set).dstBinding(26 + i)
+                            .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).pBufferInfo(info);
+                }
+                // Radiance cache (bindings 37-39): always bound for the lighting pass (RtSharc.begin).
+                long[][] sharc = {{RtSharc.keyBuffer(), RtSharc.keyBytes()}, {RtSharc.voxelBuffer(), RtSharc.voxelBytes()},
+                        {RtSharc.accumBuffer(), RtSharc.accumBytes()}};
+                for (int i = 0; i < 3; i++) {
+                    VkDescriptorBufferInfo.Buffer info = VkDescriptorBufferInfo.calloc(1, stack);
+                    info.get(0).buffer(sharc[i][0]).offset(0).range(sharc[i][1]);
+                    writes.get(n++).sType$Default().dstSet(set).dstBinding(37 + i)
+                            .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).pBufferInfo(info);
+                }
                 for (int i = 0; i < lightingViews.length; i++) {
                     // Views 0-6 go to bindings 9-15, the rest from 17 (16 is the material atlas).
                     n = image(writes, n, set, i < 7 ? 9 + i : 10 + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0L, lightingViews[i],
@@ -176,6 +221,31 @@ final class RtDescriptors {
             vkUpdateDescriptorSets(Vulkan.getDevice(), writes, null);
         }
         return set;
+    }
+
+    /** Writes a storage buffer range at {@code binding} of {@code set}. */
+    static void writeStorageBuffer(long set, int binding, long buffer, long offset, long range) {
+        try (MemoryStack stack = stackPush()) {
+            VkDescriptorBufferInfo.Buffer info = VkDescriptorBufferInfo.calloc(1, stack);
+            info.get(0).buffer(buffer).offset(offset).range(range);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(1, stack);
+            writes.get(0).sType$Default().dstSet(set).dstBinding(binding)
+                    .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).pBufferInfo(info);
+            vkUpdateDescriptorSets(Vulkan.getDevice(), writes, null);
+        }
+    }
+
+    /** Writes storage images (GENERAL layout) at consecutive bindings from {@code first} of {@code set}. */
+    static void writeStorageImages(long set, int first, long... views) {
+        try (MemoryStack stack = stackPush()) {
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(views.length, stack);
+            int n = 0;
+            for (int i = 0; i < views.length; i++) {
+                n = image(writes, n, set, first + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0L, views[i], VK_IMAGE_LAYOUT_GENERAL, stack);
+            }
+            writes.limit(n);
+            vkUpdateDescriptorSets(Vulkan.getDevice(), writes, null);
+        }
     }
 
     private static int image(VkWriteDescriptorSet.Buffer writes, int n, long set, int binding, int type,

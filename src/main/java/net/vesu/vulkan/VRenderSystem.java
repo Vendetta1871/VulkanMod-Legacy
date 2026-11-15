@@ -108,6 +108,15 @@ public class VRenderSystem {
     /** Horizontal band where vanilla terrain dissolves into the LODs (start >= end: none). */
     public static float lodEdgeStart, lodEdgeEnd;
     /**
+     * Horizontal range (blocks) within which pathtrace.rgen draws the translucent layer (water,
+     * stained glass, ice): the raster terrain shaders drop those fragments, dithered over the
+     * last 24 blocks like the path tracer. 0: off. Set only while the translucent layer draws.
+     */
+    public static float ptTranslucentRange;
+    public static float getPtTranslucentRange() { return ptTranslucentRange; }
+    /** The path-traced range of the frame being recorded (RtLightingPass), 0 without path tracing. */
+    public static float pathTracedRange() { return RtLightingPass.pathTracedRange(); }
+    /**
      * Forward depth (a pack) with distant terrain through the pack's terrain programs: the
      * scene's perspective reaches {@link #lodFarPlane} as with reverse-Z.
      */
@@ -117,6 +126,15 @@ public class VRenderSystem {
     public static float getLodEdgeStart() { return lodEdgeStart; }
 
     public static float getLodEdgeEnd() { return lodEdgeEnd; }
+
+    /**
+     * Vanilla's terrain fog for a render distance (blocks): linear and radial from 0.75 of it to
+     * all of it, stretched like {@link #scaledFog}; {start, end}.
+     */
+    public static float[] terrainFog(float far) {
+        float k = fogScale != 1.0f && reverseZ ? fogScale : 1.0f;
+        return new float[]{0.75f * far * k, far * k};
+    }
 
     private static float scaledFog(float v) {
         if (fogScale == 1.0f || !reverseZ) return v;

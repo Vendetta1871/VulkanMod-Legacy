@@ -43,6 +43,14 @@ public final class DeviceFeatures {
     /** acceleration_structure + ray_tracing_pipeline + deferred_host_operations, all enabled. */
     public boolean rayTracingPipeline;
     public boolean rayQuery;
+    /**
+     * VK_NV_cuda_kernel_launch (a beta extension): CUDA kernels recorded into Vulkan command
+     * buffers, the only route to the tensor cores of NVIDIA GPUs without cooperative matrices.
+     * Rr2Denoiser runs its network through it. VESU_RR=0 leaves it disabled.
+     */
+    public boolean cudaKernelLaunch;
+    static final String CUDA_KERNEL_LAUNCH = "VK_NV_cuda_kernel_launch";
+    private static final int CUDA_KERNEL_LAUNCH_FEATURES = 1000307003;
 
     // Ray tracing properties, valid when rayTracingPipeline is set
     public int shaderGroupHandleSize, shaderGroupBaseAlignment, shaderGroupHandleAlignment;
@@ -118,6 +126,11 @@ public final class DeviceFeatures {
         if (m4Ext) { supM4.pNext(chain); chain = supM4.address(); }
         if (irExt) { supIr.pNext(chain); chain = supIr.address(); }
         if (sscExt) { supSsc.pNext(chain); chain = supSsc.address(); }
+        // VkPhysicalDeviceCudaKernelLaunchFeaturesNV {sType, pNext, cudaKernelLaunchFeatures}: not in LWJGL.
+        boolean cudaExt = rtExts && available.contains(CUDA_KERNEL_LAUNCH) && !"0".equals(net.vesu.Env.get("VESU_RR"));
+        java.nio.ByteBuffer supCuda = stack.calloc(24);
+        supCuda.putInt(0, CUDA_KERNEL_LAUNCH_FEATURES);
+        if (cudaExt) { supCuda.putLong(8, chain); chain = org.lwjgl.system.MemoryUtil.memAddress(supCuda); }
         sup.pNext(chain);
 
         if (apiVersion >= VK_API_VERSION_1_1) {
@@ -260,6 +273,14 @@ public final class DeviceFeatures {
             }
 
             queryRayTracingProperties(physicalDevice, stack);
+
+            cudaKernelLaunch = cudaExt && supCuda.getInt(16) != 0;
+            if (cudaKernelLaunch) {
+                java.nio.ByteBuffer enCuda = stack.calloc(24);
+                enCuda.putInt(0, CUDA_KERNEL_LAUNCH_FEATURES).putLong(8, chain).putInt(16, 1);
+                chain = org.lwjgl.system.MemoryUtil.memAddress(enCuda);
+                extensions.add(CUDA_KERNEL_LAUNCH);
+            }
         }
 
         en.pNext(chain);

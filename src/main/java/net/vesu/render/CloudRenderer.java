@@ -94,6 +94,10 @@ public class CloudRenderer {
         if (!world.provider.isSurfaceWorld()) {
             return false;
         }
+        // The RT composite traces the clouds as lit boxes (rt_composite.comp): none rastered.
+        if (net.vesu.vulkan.FrameTargets.rtShadesScene()) {
+            return true;
+        }
         // A modded cloud renderer draws its own GL geometry; like the sky renderer it
         // cannot be replayed generically, so the GL path stays.
         if (world.provider.getCloudRenderer() != null) {

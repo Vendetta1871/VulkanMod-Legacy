@@ -1,0 +1,29 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_scalar_block_layout : require
+// DDGI, before the probe rays: a slot whose world grid coordinate changed (the grid scrolled
+// with the camera) or a global reset starts over - no offset, active, its texels replaced
+// instead of blended on this frame (grid.w = 1).
+
+#define DDGI_SET 0
+#define DDGI_PROBE_BINDING 1
+#define DDGI_PROBE_ACCESS
+#define DDGI_VOLUME_BINDING 2
+#include "ddgi.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    int probe = int(gl_GlobalInvocationID.x);
+    if (probe >= ddgiProbeCount()) return;
+    int cascade = ddgiCascadeOf(probe);
+    ivec3 grid = ddgiGridOf(ddgiSlotOf(probe), cascade);
+    DdgiProbe p = ddgiProbes.probes[probe];
+    if (ddgi.params.y > 0.0 || p.grid.xyz != grid) {
+        p.offset = vec4(0.0, 0.0, 0.0, DDGI_ACTIVE);
+        p.grid = ivec4(grid, 1);
+    } else {
+        p.grid.w = 0;
+    }
+    ddgiProbes.probes[probe] = p;
+}

@@ -131,17 +131,36 @@ public final class RtLod {
         });
     }
 
-    /** Instances ready for the TLAS. */
+    /** Instances ready for the TLAS (see {@link #inScene}). */
     static int readyCount() {
+        double cx = net.vesu.render.CameraHistory.camX(), cz = net.vesu.render.CameraHistory.camZ();
         int n = 0;
-        for (Entry e : entries.values()) if (e.blas != 0L) n++;
+        for (Entry e : entries.values()) if (inScene(e, cx, cz)) n++;
         return n;
+    }
+
+    /**
+     * Whether a built node goes into the TLAS: not when it reaches more than two chunks into
+     * the vanilla render distance. The real chunks are there, and the node's coarse voxels,
+     * meshed from the terrain as it was (before blocks were dug out or placed), would stand in
+     * the scene as invisible walls next to the player. That happened with nodes kept
+     * KEEP_FRAMES after the LOD renderer stopped drawing them, when the player flew to where
+     * they had been distant terrain a moment before.
+     */
+    private static boolean inScene(Entry e, double cx, double cz) {
+        if (e.blas == 0L) return false;
+        double inner = net.minecraft.client.Minecraft.getMinecraft().gameSettings.renderDistanceChunks * 16.0 - 32.0;
+        if (inner <= 0.0) return true;
+        double size = 32.0 * e.scale;
+        double dx = Math.max(Math.max(e.ox - cx, cx - (e.ox + size)), 0.0);
+        double dz = Math.max(Math.max(e.oz - cz, cz - (e.oz + size)), 0.0);
+        return Math.max(dx, dz) >= inner;
     }
 
     /** Writes the ready instances from instance {@code n} on; returns the next index. */
     static int writeInstances(ByteBuffer m, ByteBuffer data, int n, int instanceBytes, double cx, double cy, double cz) {
         for (Entry e : entries.values()) {
-            if (e.blas == 0L) continue;
+            if (!inScene(e, cx, cz)) continue;
             int o = n * instanceBytes;
             m.putFloat(o, 1f).putFloat(o + 4, 0f).putFloat(o + 8, 0f).putFloat(o + 12, (float) (e.ox - cx));
             m.putFloat(o + 16, 0f).putFloat(o + 20, 1f).putFloat(o + 24, 0f).putFloat(o + 28, (float) (e.oy - cy));

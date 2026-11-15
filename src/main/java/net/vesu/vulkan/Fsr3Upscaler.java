@@ -149,7 +149,7 @@ final class Fsr3Upscaler {
         header(d, 0, DISPATCH_DESC_TYPE_UPSCALE, NULL);
         d.putLong(DU_CMD, cmd.address());
         resource(d, DU_COLOR, scene.colorImage(), scene.width(), scene.height(),
-                FORMAT_R8G8B8A8_UNORM, USAGE_RENDERTARGET, STATE_COMPUTE_READ);
+                sceneSurfaceFormat(), USAGE_RENDERTARGET, STATE_COMPUTE_READ);
         resource(d, DU_DEPTH, scene.depthImage(), scene.width(), scene.height(),
                 FORMAT_R32_FLOAT, USAGE_DEPTHTARGET, STATE_COMPUTE_READ);
         resource(d, DU_MV, mv.image, mv.width, mv.height,
@@ -229,7 +229,7 @@ final class Fsr3Upscaler {
         resource(r, DR_OPAQUE, opaque.image, opaque.width, opaque.height,
                 FORMAT_R8G8B8A8_UNORM, USAGE_READ_ONLY, STATE_COMPUTE_READ);
         resource(r, DR_COLOR, scene.colorImage(), scene.width(), scene.height(),
-                FORMAT_R8G8B8A8_UNORM, USAGE_RENDERTARGET, STATE_COMPUTE_READ);
+                sceneSurfaceFormat(), USAGE_RENDERTARGET, STATE_COMPUTE_READ);
         resource(r, DR_OUT, reactive.image, reactive.width, reactive.height,
                 FORMAT_R32_FLOAT, USAGE_UAV, STATE_UNORDERED_ACCESS);
         r.putInt(DR_RENDER_SIZE, scene.width());
@@ -271,5 +271,10 @@ final class Fsr3Upscaler {
         if (reactiveDesc != null) { memFree(reactiveDesc); reactiveDesc = null; }
         reactive.destroy();
         contextGeneration = -1;
+    }
+
+    /** ffx-api surface format of the scene color (FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT = 4). */
+    private static int sceneSurfaceFormat() {
+        return FrameTargets.sceneFormat() == FrameTargets.HDR_SCENE_FORMAT ? 4 : FORMAT_R8G8B8A8_UNORM;
     }
 }

@@ -1,0 +1,70 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_scalar_block_layout : require
+// DDGI probe relocation and classification (after Majercik et al. 2021) from this frame's
+// fixed rays, which start at the probe's grid point. A probe whose grid point is inside a
+// block (mostly backfaces) moves out through the nearest backface; one too close to a
+// surface moves away from it; otherwise it stays on its grid point. The offset is computed
+// afresh every frame from the geometry alone, unlike the paper's (and RTXGI's) incremental
+// update: an accumulated offset depends on the probe's history - a probe between iron bars
+// and a wall settled on either side depending on where the camera had come from, and the
+// lighting with it. Offsets beyond 0.45 spacings are refused; such a probe, if its grid point
+// is inside geometry, goes inactive. So does a probe with no surface within its cell.
+// Inactive probes are not blended or sampled; their fixed rays keep being traced so they
+// wake when geometry appears.
+
+#define DDGI_SET 0
+#define DDGI_PROBE_BINDING 1
+#define DDGI_PROBE_ACCESS
+#define DDGI_VOLUME_BINDING 2
+#include "ddgi.glsl"
+
+layout(set = 0, binding = 0, scalar) readonly buffer DdgiRays { uvec2 rayData[]; };
+
+layout(local_size_x = 64) in;
+
+const float BACKFACE_FRACTION = 0.25;
+
+void main() {
+    int probe = int(gl_GlobalInvocationID.x);
+    if (probe >= ddgiProbeCount()) return;
+    DdgiProbe pr = ddgiProbes.probes[probe];
+    float spacing = ddgi.cascades[ddgiCascadeOf(probe)].origin.w;
+    float minFrontface = ddgi.params.z * spacing;
+    int fixedRays = ddgi.rays.y;
+
+    int backfaces = 0;
+    float nearestBack = 1e27, nearestFront = 1e27;
+    vec3 nearestBackDir = vec3(0.0), nearestFrontDir = vec3(0.0);
+    bool surfaceInCell = false;
+    for (int r = 0; r < fixedRays; r++) {
+        float d = unpackHalf2x16(rayData[probe * ddgi.rays.z + r].y).y;
+        vec3 dir = ddgiFibonacci(r, fixedRays);
+        if (d < 0.0) {
+            backfaces++;
+            d *= -5.0;   // stored scaled by -0.2
+            if (d < nearestBack) { nearestBack = d; nearestBackDir = dir; }
+            continue;
+        }
+        if (d < nearestFront) { nearestFront = d; nearestFrontDir = dir; }
+        // Distance along the ray to the faces of the cell around the probe (one spacing per axis).
+        vec3 toFace = spacing / max(abs(dir), vec3(1e-6));
+        if (d <= min(toFace.x, min(toFace.y, toFace.z))) surfaceInCell = true;
+    }
+    bool inside = float(backfaces) > BACKFACE_FRACTION * float(fixedRays);
+
+    vec3 offset = vec3(0.0);
+    bool placed = true;
+    if (inside) {
+        offset = nearestBackDir * (nearestBack + 0.5 * minFrontface);
+    } else if (nearestFront < minFrontface) {
+        offset = -nearestFrontDir * (minFrontface - nearestFront);
+    }
+    if (length(offset) >= 0.45 * spacing) {
+        offset = vec3(0.0);
+        placed = !inside;
+    }
+
+    pr.offset = vec4(offset, !placed || !surfaceInCell ? DDGI_INACTIVE : DDGI_ACTIVE);
+    ddgiProbes.probes[probe] = pr;
+}

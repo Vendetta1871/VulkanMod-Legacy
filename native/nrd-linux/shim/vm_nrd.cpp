@@ -1,6 +1,7 @@
 // Vesu <-> NRD bridge: a C API over NRD's NRI integration layer, recording into the
-// renderer's own VkCommandBuffer. Two RELAX_DIFFUSE integrations: block light and indirect
-// light. Separate integrations, not two denoisers in one: NRD sizes its descriptor pools by
+// renderer's own VkCommandBuffer. Two RELAX_DIFFUSE integrations (block light, indirect
+// light), a SIGMA_SHADOW_TRANSLUCENCY one (the sun's shadow, colored by stained glass) and a
+// RELAX_SPECULAR one (glossy reflections, recorded separately: vmnrd_denoise_specular). Separate integrations, not two denoisers in one: NRD sizes its descriptor pools by
 // unique pass names, so a second identical denoiser per frame would overflow them.
 // Struct layouts are mirrored by net.vesu.vulkan.NrdDenoiser.
 
@@ -50,14 +51,19 @@ struct VmNrdFrame {
     float denoisingRange;
     uint32_t flags; // bit 0: the indirect light is checkerboarded (BLACK), packed to the left half
     VmNrdImage mv, normalRoughness, viewZ, blockIn, blockOut, giIn, giOut;
+    VmNrdImage penumbra, translucency, shadowOut;
+    float lightDirection[3]; // towards the sun (world = camera-relative world axes)
+    uint32_t shadowOn;
 };
 static_assert(offsetof(VmNrdFrame, viewToClip) == 8, "layout");
 static_assert(offsetof(VmNrdFrame, jitter) == 264, "layout");
 static_assert(offsetof(VmNrdFrame, frameIndex) == 288, "layout");
 static_assert(offsetof(VmNrdFrame, mv) == 304, "layout");
-static_assert(sizeof(VmNrdFrame) == 416, "layout");
+static_assert(offsetof(VmNrdFrame, penumbra) == 416, "layout");
+static_assert(offsetof(VmNrdFrame, lightDirection) == 464, "layout");
+static_assert(sizeof(VmNrdFrame) == 480, "layout");
 
-static nrd::Integration* g_nrd[2] = {nullptr, nullptr};
+static nrd::Integration* g_nrd[4] = {nullptr, nullptr, nullptr, nullptr};
 static uint16_t g_width, g_height;
 static const nrd::Identifier DENOISER = 1;
 
@@ -104,10 +110,9 @@ VM_EXPORT int vmnrd_create(const VmNrdCreate* d) {
     device.queueFamilyNum = 1;
     device.minorVersion = (uint8_t)d->minorVersion;
 
-    const nrd::DenoiserDesc denoisers[] = {{DENOISER, nrd::Denoiser::RELAX_DIFFUSE}};
-    nrd::InstanceCreationDesc instance = {};
-    instance.denoisers = denoisers;
-    instance.denoisersNum = 1;
+    const nrd::DenoiserDesc diffuse[] = {{DENOISER, nrd::Denoiser::RELAX_DIFFUSE}};
+    const nrd::DenoiserDesc shadow[] = {{DENOISER, nrd::Denoiser::SIGMA_SHADOW_TRANSLUCENCY}};
+    const nrd::DenoiserDesc specular[] = {{DENOISER, nrd::Denoiser::RELAX_SPECULAR}};
 
     nrd::IntegrationCreationDesc desc = {};
     std::strncpy(desc.name, "Vesu", sizeof(desc.name) - 1);
@@ -116,7 +121,11 @@ VM_EXPORT int vmnrd_create(const VmNrdCreate* d) {
     desc.queuedFrameNum = (uint8_t)d->queuedFrames;
     desc.autoWaitForIdle = true;
 
-    for (nrd::Integration*& integration : g_nrd) {
+    for (int i = 0; i < 4; i++) {
+        nrd::InstanceCreationDesc instance = {};
+        instance.denoisers = i < 2 ? diffuse : i == 2 ? shadow : specular;
+        instance.denoisersNum = 1;
+        nrd::Integration*& integration = g_nrd[i];
         integration = new nrd::Integration();
         nrd::Result r = integration->RecreateVK(desc, instance, device);
         if (r != nrd::Result::SUCCESS) {
@@ -141,10 +150,7 @@ static void denoise(nrd::Integration* integration, const VmNrdFrame* f, const Vm
 }
 
 // Records both denoisers into the frame's command buffer. Returns 0 on success.
-VM_EXPORT int vmnrd_denoise(const VmNrdFrame* f) {
-    if (!g_nrd[0] || !g_nrd[1]) return 1;
-
-    nrd::CommonSettings common = {};
+static void commonSettings(const VmNrdFrame* f, nrd::CommonSettings& common) {
     std::memcpy(common.viewToClipMatrix, f->viewToClip, sizeof(common.viewToClipMatrix));
     std::memcpy(common.viewToClipMatrixPrev, f->viewToClipPrev, sizeof(common.viewToClipMatrixPrev));
     std::memcpy(common.worldToViewMatrix, f->worldToView, sizeof(common.worldToViewMatrix));
@@ -162,6 +168,13 @@ VM_EXPORT int vmnrd_denoise(const VmNrdFrame* f) {
     common.accumulationMode = f->reset ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
     common.denoisingRange = f->denoisingRange;
     common.isMotionVectorInWorldSpace = false;
+}
+
+VM_EXPORT int vmnrd_denoise(const VmNrdFrame* f) {
+    if (!g_nrd[0] || !g_nrd[1] || !g_nrd[2]) return 1;
+
+    nrd::CommonSettings common = {};
+    commonSettings(f, common);
     nrd::RelaxSettings relax[2] = {};
     // Indirect light may trace half the pixels per frame (lighting.rgen).
     if (f->flags & 1u) relax[1].checkerboardMode = nrd::CheckerboardMode::BLACK;
@@ -177,5 +190,49 @@ VM_EXPORT int vmnrd_denoise(const VmNrdFrame* f) {
 
     denoise(g_nrd[0], f, f->blockIn, f->blockOut, cmd);
     denoise(g_nrd[1], f, f->giIn, f->giOut, cmd);
+
+    if (f->shadowOn) {
+        nrd::SigmaSettings sigma = {};
+        sigma.lightDirection[0] = f->lightDirection[0];
+        sigma.lightDirection[1] = f->lightDirection[1];
+        sigma.lightDirection[2] = f->lightDirection[2];
+        g_nrd[2]->NewFrame();
+        if (g_nrd[2]->SetCommonSettings(common) != nrd::Result::SUCCESS) return 3;
+        g_nrd[2]->SetDenoiserSettings(DENOISER, &sigma);
+        nrd::ResourceSnapshot snapshot;
+        snapshot.restoreInitialState = true;
+        snapshot.SetResource(nrd::ResourceType::IN_MV, resource(f->mv));
+        snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS, resource(f->normalRoughness));
+        snapshot.SetResource(nrd::ResourceType::IN_VIEWZ, resource(f->viewZ));
+        snapshot.SetResource(nrd::ResourceType::IN_PENUMBRA, resource(f->penumbra));
+        snapshot.SetResource(nrd::ResourceType::IN_TRANSLUCENCY, resource(f->translucency));
+        snapshot.SetResource(nrd::ResourceType::OUT_SHADOW_TRANSLUCENCY, resource(f->shadowOut));
+        g_nrd[2]->DenoiseVK(&DENOISER, 1, cmd, snapshot);
+    }
+    return 0;
+}
+
+// Records the specular denoiser: blockIn / blockOut of the frame carry the reflections'
+// radiance and hit distance (IN/OUT_SPEC_RADIANCE_HITDIST). Returns 0 on success.
+VM_EXPORT int vmnrd_denoise_specular(const VmNrdFrame* f) {
+    if (!g_nrd[3]) return 1;
+    nrd::CommonSettings common = {};
+    commonSettings(f, common);
+    nrd::RelaxSettings relax = {};
+    g_nrd[3]->NewFrame();
+    if (g_nrd[3]->SetCommonSettings(common) != nrd::Result::SUCCESS) return 2;
+    g_nrd[3]->SetDenoiserSettings(DENOISER, &relax);
+
+    nri::CommandBufferVKDesc cmd = {};
+    cmd.vkCommandBuffer = (VKHandle)f->commandBuffer;
+    cmd.queueType = nri::QueueType::GRAPHICS;
+    nrd::ResourceSnapshot snapshot;
+    snapshot.restoreInitialState = true;
+    snapshot.SetResource(nrd::ResourceType::IN_MV, resource(f->mv));
+    snapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS, resource(f->normalRoughness));
+    snapshot.SetResource(nrd::ResourceType::IN_VIEWZ, resource(f->viewZ));
+    snapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, resource(f->blockIn));
+    snapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, resource(f->blockOut));
+    g_nrd[3]->DenoiseVK(&DENOISER, 1, cmd, snapshot);
     return 0;
 }

@@ -1,0 +1,713 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// Path-traced lighting for Ray Reconstruction (RtLightingPass with Rr2Denoiser), after NVIDIA's
+// RTX Remix for Minecraft: per scene pixel one noisy estimate of the full radiance leaving the
+// surface towards the camera, which the RR2 network denoises and anti-aliases. Primary surface:
+// reconstructed from the depth buffer and refined by a short primary ray (exact normal and
+// material). Shading: Lambert diffuse plus GGX specular (LabPBR smoothness and F0, metals tint
+// their reflections), evaluated for
+//  - the sun or moon: a direction within its 0.53 degree disc, a shadow ray (colored by stained
+//    glass), the atmosphere's direct irradiance;
+//  - one block light picked by ReSTIR DI (candidates from the light grid, temporal and spatial
+//    reuse, see lighting.rgen), a shadow ray to a point of the small emitter;
+//  - one bounce sampled from the BRDF (cosine-weighted diffuse or GGX visible normals): the sky
+//    on a miss, else the hit's radiance from the radiance cache (sharc.glsl), or a direct
+//    estimate (sun shadow ray, lightmap ambient) on mirror-like paths and where it has nothing;
+//  - emission of light sources' surfaces.
+// Water, stained glass and ice in front of the opaque surface: a Fresnel-weighted mirror
+// reflection (with the sun's glint) plus the transmitted light - straight through glass and ice,
+// tinted by them; refracted at water's waving surface, absorbed and in-scattered along the path
+// to the bed. The raster translucent layer skips these pixels (terrain_batch.fsh).
+// Besides the radiance it writes RR's guide planes: linear view distance, motion vectors,
+// world normals, roughness, diffuse and specular albedo. Pixels it does not shade (sky, past
+// the range, surfaces outside the acceleration structure) get a marker in the radiance plane
+// that rt_pt_resolve.comp replaces with the sky or the vanilla-lit color.
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 12, rgba8) uniform writeonly image2D normals;      // xyz: n * 0.5 + 0.5, a: roughness
+layout(set = 0, binding = 13, rgba16f) uniform readonly image2D giPrev;      // a: distance (reservoir validation)
+layout(set = 0, binding = 14, rgba16f) uniform writeonly image2D giCur;
+layout(set = 0, binding = 17, rgba32f) uniform readonly image2D reservoirPrev;
+layout(set = 0, binding = 18, rgba32f) uniform writeonly image2D reservoirCur;
+// Rr2Denoiser's input buffer: header (uint plane offsets in floats 0-6, jitter 12-13, wave time 14,
+// camera xz modulo 1024 15-16), planes.
+layout(set = 0, binding = 40, scalar) buffer RrInputs { float rr[]; };
+
+// The lighting pass's constants (RtLightingPass), shared with sharc_update.rgen.
+layout(push_constant) uniform Constants {
+    mat4 invViewProj;   // jittered: the depth was rendered with it
+    mat4 prevViewProj;  // camera-relative position -> previous clip space (unjittered)
+    vec4 light;         // xyz: towards the sun/moon, w: 1 when it can light
+    vec4 params;        // x: range (blocks), y: frame, z: history valid, w: grid mask
+    vec4 cam;           // xyz: camera - light origin, w: light count
+    vec4 camDelta;      // xyz: previous camera - camera, w: sky source radiance (atmosphere.glsl)
+    vec4 sky;           // rgb: mean upper sky radiance, w: indirect light range (blocks, 0: off)
+    vec4 restir;        // x: previous reservoirs valid, y: -1 at night (pc.light is the moon), z: dynamic light count, w: block light strength
+    vec4 viewRowZ;      // camera-relative position -> view-space z
+    vec4 ddgiFlags;     // x: indirect light strength, yzw: direct sun/moon irradiance
+} pc;
+
+#include "atmosphere.glsl"
+#include "lights.glsl"
+#include "sharc.glsl"
+
+layout(location = 0) rayPayloadEXT Payload payload;
+layout(location = 1) rayPayloadEXT vec4 shadow;
+
+const float PI = 3.14159265;
+const int MAX_CANDIDATES = 8;
+const float RESERVOIR_M_CAP = 20.0;
+const float SUN_ANGULAR_RADIUS = 0.0046;
+// Emission of light sources' surfaces (scene units per unit albedo), as sharc_update.rgen.
+const float EMISSION = 10.0;
+// Firefly clamp of the bounce's contribution (scene units; open-sky white is about 1-2).
+const float INDIRECT_CLAMP = 24.0;
+// Markers in the radiance plane for rt_pt_resolve.comp.
+const float MARK_SKY = -2.0, MARK_VANILLA = -1.0;
+
+uint plane(int i) { return floatBitsToUint(rr[i]); }
+vec2 jitter() { return vec2(rr[12], rr[13]); }
+
+void store3(int i, uint px, vec3 v) {
+    uint o = plane(i) + px * 3u;
+    rr[o] = v.x; rr[o + 1u] = v.y; rr[o + 2u] = v.z;
+}
+void storeGuides(uint px, float depth, vec2 mv, vec3 n, float rough, vec3 dalb, vec3 salb) {
+    rr[plane(1) + px] = depth;
+    uint o = plane(2) + px * 2u;
+    rr[o] = mv.x; rr[o + 1u] = mv.y;
+    store3(3, px, n);
+    rr[plane(4) + px] = rough;
+    store3(5, px, dalb);
+    store3(6, px, salb);
+}
+
+float emissionOf(vec4 material) {
+    return material.a < 254.5 / 255.0 ? material.a * (255.0 / 254.0) : 0.0;
+}
+float brightness(float l) { return l / (4.0 - 3.0 * l); }
+float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+uint rngState;
+uint pcg() {
+    rngState = rngState * 747796405u + 2891336453u;
+    uint w = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float rand() { return float(pcg() >> 8) * (1.0 / 16777216.0); }
+
+vec3 unproject(ivec2 p, float depth, vec2 size) {
+    vec2 uv = (vec2(p) + 0.5) / size;
+    vec4 h = pc.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    return h.xyz / h.w;
+}
+
+vec3 tangent(ivec2 p, ivec2 axis, float d, vec3 pos, ivec2 size) {
+    ivec2 a = p + axis;
+    ivec2 b = p - axis;
+    bool hasA = all(lessThan(a, size));
+    bool hasB = all(greaterThanEqual(b, ivec2(0)));
+    float da = hasA ? texelFetch(sceneDepth, a, 0).r : 2.0;
+    float db = hasB ? texelFetch(sceneDepth, b, 0).r : 2.0;
+    return abs(da - d) < abs(db - d)
+            ? unproject(a, da, vec2(size)) - pos
+            : pos - unproject(b, db, vec2(size));
+}
+
+vec3 traceShadow(vec3 origin, vec3 dir, float tMax, uint mask) {
+    shadow = vec4(1.0, 1.0, 1.0, 0.0);
+    traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                mask, SHADOW_HIT_GROUP, 0, 1, origin, 0.0, dir, tMax, 1);
+    return shadow.rgb * shadow.a;
+}
+
+// --- surface and BRDF ------------------------------------------------------------------------
+
+struct Surface {
+    vec3 n;
+    vec3 diffuse;   // diffuse albedo (0 for metals)
+    vec3 f0;        // specular reflectance at normal incidence
+    float rough;    // perceptual (linear) roughness
+    float alpha;    // GGX alpha = rough^2
+};
+
+// LabPBR: red = perceptual smoothness, green = F0 (230+ = metal, reflecting its albedo).
+Surface surfaceOf(vec3 albedo, vec4 material, vec3 n) {
+    Surface s;
+    s.n = n;
+    bool metal = material.g >= 229.5 / 255.0;
+    s.f0 = metal ? albedo : vec3(max(material.g, 0.04));
+    s.diffuse = metal ? vec3(0.0) : albedo;
+    s.rough = clamp(1.0 - material.r, 0.03, 1.0);
+    s.alpha = s.rough * s.rough;
+    return s;
+}
+
+vec3 fresnel(vec3 f0, float c) {
+    float x = 1.0 - clamp(c, 0.0, 1.0);
+    float x2 = x * x;
+    return f0 + (1.0 - f0) * (x2 * x2 * x);
+}
+float ggxD(float nh, float a2) {
+    float d = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+float smithG1(float nx, float a2) {
+    return 2.0 * nx / (nx + sqrt(a2 + (1.0 - a2) * nx * nx));
+}
+
+// BRDF times the cosine towards l.
+vec3 evalBrdf(Surface s, vec3 v, vec3 l) {
+    float nl = dot(s.n, l), nv = max(dot(s.n, v), 1e-4);
+    if (nl <= 0.0) return vec3(0.0);
+    vec3 h = normalize(v + l);
+    float nh = max(dot(s.n, h), 0.0), vh = max(dot(v, h), 0.0);
+    float a2 = s.alpha * s.alpha;
+    vec3 f = fresnel(s.f0, vh);
+    vec3 spec = f * (ggxD(nh, a2) * smithG1(nv, a2) * smithG1(nl, a2) / (4.0 * nv * nl));
+    vec3 diff = s.diffuse / PI * (1.0 - f);
+    return (diff + spec) * nl;
+}
+
+// Pre-integrated specular reflectance (Karis' analytic fit): RR's specular albedo guide.
+vec3 envBrdf(vec3 f0, float rough, float nv) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return clamp(f0 * ab.x + ab.y, 0.0, 1.0);
+}
+
+void basis(vec3 n, out vec3 t1, out vec3 t2) {
+    t1 = normalize(abs(n.y) < 0.9 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    t2 = cross(n, t1);
+}
+
+// GGX visible-normal sample (Heitz 2018) in the frame (t1, t2, n).
+vec3 sampleVndf(vec3 vLocal, float alpha, float u1, float u2) {
+    vec3 vh = normalize(vec3(alpha * vLocal.x, alpha * vLocal.y, vLocal.z));
+    float lensq = vh.x * vh.x + vh.y * vh.y;
+    vec3 T1 = lensq > 0.0 ? vec3(-vh.y, vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+    vec3 T2 = cross(vh, T1);
+    float r = sqrt(u1), phi = 2.0 * PI * u2;
+    float t1 = r * cos(phi), t2 = r * sin(phi);
+    float s = 0.5 * (1.0 + vh.z);
+    t2 = (1.0 - s) * sqrt(1.0 - t1 * t1) + s * t2;
+    vec3 nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * vh;
+    return normalize(vec3(alpha * nh.x, alpha * nh.y, max(0.0, nh.z)));
+}
+
+// --- ReSTIR DI over the block lights (as lighting.rgen) -------------------------------------
+
+struct Reservoir {
+    int light;
+    float wsum;
+    float M;
+    float target;
+};
+
+float targetOf(int li, vec3 pos, vec3 n) {
+    if (li < 0 || (li < DYNAMIC ? li >= int(pc.cam.w) : li - DYNAMIC >= int(pc.restir.z))) return 0.0;
+    vec3 toLight;
+    float dist;
+    return lightTarget(lightAt(li), pos, n, toLight, dist);
+}
+
+void addCandidate(inout Reservoir r, int li, float target, float weight, float m) {
+    r.wsum += weight;
+    r.M += m;
+    if (weight > 0.0 && rand() * r.wsum < weight) {
+        r.light = li;
+        r.target = target;
+    }
+}
+
+float encodeNormal(vec3 n) {
+    uvec3 q = uvec3(clamp(n * 0.5 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+    return float(q.x | q.y << 8 | q.z << 16);
+}
+vec3 decodeNormal(float f) {
+    uint v = uint(f);
+    return vec3(uvec3(v, v >> 8, v >> 16) & 0xFFu) / 255.0 * 2.0 - 1.0;
+}
+
+void mergeReservoir(inout Reservoir r, ivec2 q, vec3 pos, vec3 n) {
+    vec4 pr = imageLoad(reservoirPrev, q);
+    int li = floatBitsToInt(pr.x);
+    float m = min(pr.z, RESERVOIR_M_CAP);
+    if (li < 0 || m <= 0.0 || !(pr.y > 0.0)) return;
+    if (dot(decodeNormal(pr.w), n) < 0.9) return;
+    float expected = length(pos - pc.camDelta.xyz);
+    if (abs(imageLoad(giPrev, q).a - expected) > 0.1 * expected + 0.1) return;
+    float t = targetOf(li, pos, n);
+    addCandidate(r, li, t, t * pr.y * m, m);
+}
+
+// Reflected radiance of one ReSTIR-picked block light: its irradiance estimate (shadow ray to a
+// random point of the small emitter, colored through glass) times the BRDF towards it.
+vec3 blockLight(Surface s, vec3 v, vec3 pos, ivec2 p, ivec2 prevPixel, bool reuse) {
+    vec3 n = s.n;
+    Reservoir r = Reservoir(-1, 0.0, 0.0, 0.0);
+    if (pc.cam.w > 0.0) {
+        int slot = findCell(ivec3(floor((pos + pc.cam.xyz) / float(CELL))));
+        if (slot >= 0) {
+            int packed = cells[slot].w;
+            int start = packed & 0xFFFFFF;
+            int count = (packed >> 24) & 0xFF;
+            int candidates = min(count, MAX_CANDIDATES);
+            for (int k = 0; k < candidates; k++) {
+                int i = count <= MAX_CANDIDATES ? k : int(rand() * float(count));
+                int li = lightIndex[start + min(i, count - 1)];
+                float t = targetOf(li, pos, n);
+                addCandidate(r, li, t, t * float(count) / float(candidates), 1.0 / float(candidates));
+            }
+            if (candidates > 0) r.M = 1.0;
+        }
+    }
+    for (int i = 0; i < int(pc.restir.z); i++) {
+        float t = targetOf(DYNAMIC + i, pos, n);
+        addCandidate(r, DYNAMIC + i, t, t, 0.0);
+        r.M = 1.0;
+    }
+    if (reuse) {
+        ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+        mergeReservoir(r, prevPixel, pos, n);
+        for (int k = 0; k < 3; k++) {
+            float ang = 6.2831853 * rand();
+            ivec2 q = prevPixel + ivec2(vec2(cos(ang), sin(ang)) * (2.0 + 10.0 * rand()));
+            if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, size))) mergeReservoir(r, q, pos, n);
+        }
+    }
+    float W = r.light >= 0 && r.target > 0.0 && r.M > 0.0 ? r.wsum / (r.M * r.target) : 0.0;
+    if (W <= 0.0) {
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), W, r.M, encodeNormal(n)));
+        return vec3(0.0);
+    }
+    vec3 center = lightAt(r.light).xyz - pc.cam.xyz;
+    // A random point of the flame (RTX Remix's torch sphere, radius 0.08): soft shadow edges
+    // that RR resolves.
+    float u = rand() * 2.0 - 1.0, phi = 6.2831853 * rand(), rr0 = 0.08 * pow(rand(), 1.0 / 3.0);
+    vec3 target = center + vec3(sqrt(1.0 - u * u) * vec2(cos(phi), sin(phi)), u) * rr0;
+    vec3 origin = pos + n * 0.02;
+    vec3 dir = target - origin;
+    float len = length(dir);
+    dir /= max(len, 1e-4);
+    bool dynamic = r.light >= DYNAMIC;
+    float tMax = dynamic ? len - 0.35 : blockEntry(origin, dir, center) - 0.01;
+    vec3 vis = tMax > 0.05 ? traceShadow(origin, dir, tMax, dynamic ? 0x0Bu : 0x0Fu) : vec3(1.0);
+    if (tMax > 0.05 && max(vis.r, max(vis.g, vis.b)) <= 0.0) {
+        // Blocked by a glowing block (lava next to lava): it lights this point as brightly.
+        payload.t = -1.0;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, 0.0, dir, tMax, 0);
+        if (payload.t >= 0.0 && emissionOf(payload.material) > 0.5) vis = vec3(1.0);
+    }
+    bool occluded = max(vis.r, max(vis.g, vis.b)) <= 0.0;
+    imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), occluded ? 0.0 : W, r.M, encodeNormal(n)));
+    // r.target is the irradiance (it carries the cosine): the BRDF without its cosine.
+    float nl = max(dot(n, dir), 1e-3);
+    return vis * lightColor(r.light) * (r.target * W) * (evalBrdf(s, v, dir) / nl);
+}
+
+bool emitterSurface(vec3 pos, vec3 n) {
+    if (pc.cam.w <= 0.0) return false;
+    vec3 q = pos + pc.cam.xyz;
+    int slot = findCell(ivec3(floor(q / float(CELL))));
+    if (slot < 0) return false;
+    int packed = cells[slot].w;
+    int start = packed & 0xFFFFFF;
+    int count = (packed >> 24) & 0xFF;
+    ivec3 block = ivec3(floor(q - n * 0.05));
+    for (int i = 0; i < count; i++) {
+        if (ivec3(floor(lights[lightIndex[start + i] * 2].xyz)) == block) return true;
+    }
+    return false;
+}
+
+// A direction within the sun or moon disc.
+vec3 sunSample() {
+    float r = sqrt(rand()) * SUN_ANGULAR_RADIUS, a = 6.2831853 * rand();
+    vec3 l = pc.light.xyz;
+    vec3 t1 = normalize(abs(l.y) < 0.99 ? cross(l, vec3(0.0, 1.0, 0.0)) : cross(l, vec3(1.0, 0.0, 0.0)));
+    return normalize(l + (t1 * cos(a) + cross(l, t1) * sin(a)) * r);
+}
+
+// Radiance a bounce ray brings back from its hit (payload): emission, plus the cached
+// radiance, or for sharp reflections and unknown voxels a direct estimate.
+vec3 hitRadiance(vec3 origin, vec3 dir, bool sharp) {
+    vec3 hn = payload.normal;
+    if (dot(hn, dir) > 0.0) hn = -hn;
+    if (payload.backface > 0.5) return vec3(0.0);
+    vec3 at = origin + dir * payload.t;
+    vec3 albedo = pow(payload.albedo, vec3(2.2));
+    float emission = emissionOf(payload.material);
+    vec4 cached = sharp ? vec4(0.0) : sharcQuery(at, hn);
+    if (cached.w > 0.0) return cached.rgb;
+    float hitSky = payload.skyLight, hitBlock = payload.blockLight;
+    vec3 e = vec3(PI * luminance(pc.sky.rgb) * brightness(hitSky));
+    float ndl = dot(hn, pc.light.xyz);
+    if (pc.light.w > 0.0 && ndl > 0.0 && hitSky > 0.01) {
+        e += traceShadow(at + hn * 0.02, pc.light.xyz, 512.0, 0x0Fu) * pc.ddgiFlags.yzw * ndl;
+    }
+    // Block light from the lightmap, warm like the torches the grid holds.
+    e += vec3(1.0, 0.62, 0.35) * (2.0 * brightness(hitBlock) * hitBlock);
+    return albedo / PI * e + albedo * (EMISSION * emission);
+}
+
+// --- translucent surfaces (water, stained glass, ice) ------------------------------------------
+
+// Slope of a few travelling sine waves at world position xz (as reflections.rgen).
+vec2 waveSlope(vec2 xz, float t) {
+    vec2 s = vec2(0.0);
+    const vec3 waves[4] = vec3[](vec3(0.8, 0.6, 1.3), vec3(-0.5, 0.9, 1.9), vec3(0.95, -0.3, 2.9), vec3(-0.2, -1.0, 4.1));
+    for (int i = 0; i < 4; i++) {
+        vec2 d = normalize(waves[i].xy);
+        float k = waves[i].z;
+        float a = 0.035 / k;
+        s += d * (a * k * cos(dot(d, xz) * k + t * (1.2 + 0.4 * float(i))));
+    }
+    return s;
+}
+
+// Dielectric Fresnel reflectance (unpolarized) for cosine ci on the incident side, eta = n1 / n2.
+float fresnelDielectric(float ci, float eta) {
+    float st2 = eta * eta * max(0.0, 1.0 - ci * ci);
+    if (st2 >= 1.0) return 1.0;   // total internal reflection
+    float ct = sqrt(1.0 - st2);
+    float rs = (eta * ci - ct) / (eta * ci + ct);
+    float rp = (ci - eta * ct) / (ci + eta * ct);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
+// The same stable screen-space dither as the terrain shaders' (terrain_batch.fsh): which pixels
+// of the fade band path-trace their translucent surface and which keep the raster one.
+float bandNoise(vec2 fragCoord) {
+    return fract(52.9829189 * fract(dot(fragCoord, vec2(0.06711056, 0.00583715))));
+}
+
+// Sky radiance along d (no sun disc: the sun comes in through the glint's NEE).
+vec3 skyAlong(vec3 d) {
+    return atmosphere(d, pc.light.xyz * (pc.restir.y < 0.0 ? -1.0 : 1.0), pc.camDelta.w, pc.sky.rgb);
+}
+
+// --- shading of an opaque surface --------------------------------------------------------------
+
+struct Guide {
+    vec3 n;
+    float rough;
+    vec3 diffuse;
+    vec3 specular;
+};
+
+// Radiance leaving the opaque hit in the payload (ray origin + dir * payload.t) back along dir:
+// emission, the sun or moon, one ReSTIR block light, one bounce. `reuse`: the ReSTIR reservoirs
+// of the previous frame apply (the primary surface of this pixel).
+vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bool reuse, float horizontal,
+                 out Guide g) {
+    vec3 n = payload.normal;
+    vec3 v = -dir;
+    vec3 albedo = pow(payload.albedo, vec3(2.2));
+    vec4 material = payload.material;
+    float skyLight = payload.skyLight, blockLevel = payload.blockLight;
+    vec3 albedoSrgb = payload.albedo;
+    Surface s = surfaceOf(albedo, material, n);
+    float nv = max(dot(n, v), 1e-4);
+    g = Guide(n, s.rough, s.diffuse, envBrdf(s.f0, s.rough, nv));
+
+    vec3 radiance = vec3(0.0);
+    // Emission: LabPBR emission, or the bright texels of a listed light's own block.
+    float emission = emissionOf(material);
+    if (emission <= 0.0 && blockLevel > 0.8 && emitterSurface(hitPos, n)) {
+        emission = smoothstep(0.7, 0.95, max(albedoSrgb.r, max(albedoSrgb.g, albedoSrgb.b)));
+    }
+    radiance += albedo * (EMISSION * emission);
+
+    // Sun / moon (sealed spaces see none).
+    if (pc.light.w > 0.0 && skyLight > 0.01) {
+        vec3 l = sunSample();
+        if (dot(n, l) > 0.0) {
+            vec3 vis = traceShadow(hitPos + n * (0.02 + 0.002 * dist), l, 512.0, 0x0Fu);
+            radiance += pc.ddgiFlags.yzw * vis * evalBrdf(s, v, l);
+        }
+    }
+
+    radiance += min(blockLight(s, v, hitPos, p, prevPixel, reuse), vec3(40.0)) * pc.restir.w;
+
+    // One bounce, sampled from the BRDF: specular with the probability of its share of the
+    // reflected energy, else cosine-weighted diffuse.
+    if (pc.sky.w > 0.0 && horizontal < pc.sky.w) {
+        vec3 fv = fresnel(s.f0, nv);
+        float ws = luminance(fv), wd = luminance(s.diffuse * (1.0 - fv));
+        float pSpec = ws + wd > 0.0 ? clamp(ws / (ws + wd), 0.0, 1.0) : 0.0;
+        if (pSpec > 0.0 && pSpec < 1.0) pSpec = clamp(pSpec, 0.1, 0.9);
+        vec3 t1, t2;
+        basis(n, t1, t2);
+        vec3 l, weight;
+        bool spec = rand() < pSpec;
+        if (spec) {
+            vec3 vl = vec3(dot(v, t1), dot(v, t2), nv);
+            vec3 h = sampleVndf(vl, s.alpha, rand(), rand());
+            vec3 hw = normalize(t1 * h.x + t2 * h.y + n * h.z);
+            l = reflect(-v, hw);
+            float nl = dot(n, l);
+            float a2 = s.alpha * s.alpha;
+            weight = nl > 0.0 ? fresnel(s.f0, max(dot(v, hw), 0.0)) * smithG1(nl, a2) / pSpec : vec3(0.0);
+        } else {
+            float phi = 6.2831853 * rand(), r2 = rand(), sr = sqrt(r2);
+            l = normalize(t1 * (cos(phi) * sr) + t2 * (sin(phi) * sr) + n * sqrt(1.0 - r2));
+            weight = s.diffuse * (1.0 - fv) / (1.0 - pSpec);
+        }
+        if (dot(weight, weight) > 0.0 && !any(isnan(l))) {
+            vec3 origin = hitPos + n * 0.02;
+            payload.t = -1.0;
+            payload.backface = 0.0;
+            traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, origin, 0.0, l, 256.0, 0);
+            vec3 li;
+            if (payload.t < 0.0) {
+                // The sky; rays leaving sealed spaces escape through geometry outside the scene.
+                li = skyAlong(l) * clamp(skyLight * 4.0, 0.0, 1.0);
+            } else {
+                li = hitRadiance(origin, l, spec && s.rough < 0.35);
+            }
+            vec3 contrib = weight * li;
+            float m = max(contrib.r, max(contrib.g, contrib.b));
+            if (m > INDIRECT_CLAMP) contrib *= INDIRECT_CLAMP / m;
+            radiance += contrib * pc.ddgiFlags.x;
+        }
+    }
+    return radiance;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    uint px = uint(p.y) * uint(size.x) + uint(p.x);
+    float d = texelFetch(sceneDepth, p, 0).r;
+    float farD = farPlaneDepth(pc.invViewProj);
+    rngState = uint(p.x) * 1973u + uint(p.y) * 9277u + uint(pc.params.y) * 26699u;
+    pcg();
+
+    vec2 pixel = vec2(p) + 0.5;
+    vec2 unjittered = pixel - jitter();
+    bool sky = isSkyDepth(d, farD);
+    vec3 eye = unproject(p, 1.0 - farD, vec2(size));
+    vec3 pos = sky ? unproject(p, 0.5, vec2(size)) : unproject(p, d, vec2(size));
+    vec3 view = pos - eye;
+    float dist = sky ? 1e5 : length(view);
+    vec3 dir = view / max(length(view), 1e-6);
+    float band = bandNoise(pixel);
+
+    // The nearest translucent surface (water, stained glass, ice) in front of the opaque one;
+    // the raster translucent layer leaves exactly these pixels to this pass (TerrainRenderer).
+    float tFront = -1.0;
+    vec3 frontN = vec3(0.0), frontAlbedo = vec3(0.0);
+    bool frontWater = false, frontBack = false;
+    float frontSky = 0.0, frontBlock = 0.0;
+    if (!any(isnan(dir))) {
+        payload.t = -1.0;
+        payload.backface = 0.0;
+        float tEnd = sky ? 4096.0 : dist + 0.05 + 0.01 * dist;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x08, 0, 0, 0, eye, 0.0, dir, tEnd, 0);
+        if (payload.t >= 0.0 && !any(isnan(payload.normal))) {
+            vec3 at = eye + dir * payload.t;
+            float fadeT = smoothstep(0.0, 1.0, (pc.params.x - max(abs(at.x), abs(at.z))) / 24.0);
+            if (band < fadeT) {
+                tFront = payload.t;
+                frontN = payload.normal;
+                frontAlbedo = payload.albedo;
+                frontWater = payload.tinted > 0.5;
+                // Seen from inside the medium: under a water surface (its face turned down towards
+                // the ray). Fluid quads do not follow the blocks' winding, so backface cannot tell.
+                frontBack = frontWater && payload.normal.y < -0.5;
+                frontSky = payload.skyLight;
+                frontBlock = payload.blockLight;
+            }
+        }
+    }
+
+    if (sky && tFront < 0.0) {
+        store3(0, px, vec3(MARK_SKY, 0.0, 0.0));
+        storeGuides(px, 65504.0, vec2(0.0), vec3(0.0), 1.0, vec3(1.0), vec3(0.0));
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
+        imageStore(giCur, p, vec4(0.0));
+        return;
+    }
+
+    // The visible surface: the translucent one when there is one, else the depth sample.
+    vec3 visible = tFront >= 0.0 ? eye + dir * tFront : pos;
+    // Motion: the surface's unjittered position now and in the previous frame (static world).
+    vec2 mv = vec2(0.0);
+    vec4 prevClip = pc.prevViewProj * vec4(visible, 1.0);
+    if (pc.params.z > 0.0 && prevClip.w > 0.0) {
+        vec2 prevPx = (prevClip.xy / prevClip.w * vec2(0.5, -0.5) + 0.5) * vec2(size);
+        mv = prevPx - unjittered;
+    }
+    float viewDepth = abs(dot(pc.viewRowZ.xyz, visible) + pc.viewRowZ.w);
+    float horizontal = max(abs(pos.x), abs(pos.z));
+
+    // --- the opaque surface behind (or the only one) ---
+    vec3 c = sky ? vec3(0.0) : cross(tangent(p, ivec2(1, 0), d, pos, size), tangent(p, ivec2(0, 1), d, pos, size));
+    float len2 = dot(c, c);
+    // Past the range the raster image stays; over its last 1.5 chunks a dithered share of the
+    // pixels already does, which RR blends into a soft transition.
+    float fade = smoothstep(0.0, 1.0, (pc.params.x - horizontal) / 24.0);
+    bool inRange = !sky && band < fade;
+    vec3 n = len2 > 1e-20 ? c * inversesqrt(len2) : -dir;
+    if (dot(n, dir) > 0.0) n = -n;
+
+    // Translucent front: reflection and transmission, then the opaque path continues from it.
+    vec3 front = vec3(0.0), through = vec3(1.0);
+    vec3 rayOrigin = eye, rayDir = dir;
+    float rayStart = max(dist - 0.05 - 0.01 * dist, 0.0), rayEnd = dist + 0.05 + 0.01 * dist;
+    bool refracted = false;
+    Guide frontGuide;
+    if (tFront >= 0.0) {
+        vec3 at = eye + dir * tFront;
+        vec3 n0 = frontN;   // faces the ray (debug.rchit)
+        // Water's surface carries waves; its other faces (and glass, ice) are flat.
+        vec3 sn = n0;
+        if (frontWater && abs(n0.y) > 0.9) {
+            vec2 slope = waveSlope(at.xz + vec2(rr[15], rr[16]), rr[14]);
+            sn = normalize(vec3(-slope.x, 1.0, -slope.y) * sign(n0.y));
+        }
+        float ior = frontWater ? 1.33 : 1.52;
+        // From inside (under water looking up, inside a glass block) the ray leaves the medium.
+        float eta = frontBack ? ior : 1.0 / ior;
+        float ci = clamp(dot(-dir, sn), 0.0, 1.0);
+        float F = fresnelDielectric(ci, eta);
+        vec3 v = -dir;
+
+        // Reflection: a mirror ray, shaded directly (sun shadow ray, lightmap ambient); the sun's
+        // glint by NEE on a near-mirror GGX lobe.
+        vec3 r = reflect(dir, sn);
+        if (dot(r, n0) < 0.02) r = normalize(r + n0 * (0.02 - dot(r, n0)));
+        vec3 ro = at + n0 * 0.02;
+        payload.t = -1.0;
+        payload.backface = 0.0;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, ro, 0.0, r, 512.0, 0);
+        vec3 lr = payload.t < 0.0 ? skyAlong(r) : hitRadiance(ro, r, true);
+        front += F * lr;
+        if (pc.light.w > 0.0 && !frontBack) {
+            Surface gs = Surface(sn, vec3(0.0), vec3(frontWater ? 0.02 : 0.04), 0.06, 0.0036);
+            vec3 l = sunSample();
+            vec3 glint = evalBrdf(gs, v, l);
+            if (max(glint.r, max(glint.g, glint.b)) > 1e-4) {
+                glint *= traceShadow(ro, l, 512.0, 0x0Fu) * pc.ddgiFlags.yzw;
+                front += glint;
+            }
+        }
+        frontGuide = Guide(sn, 0.06, vec3(0.0), vec3(F));
+
+        // Transmission. Glass and ice: a thin tinted layer, the ray goes on straight (the depth
+        // sample is the surface behind); light through it multiplies by the pane's color, as
+        // shadow.rahit filters the sun. Water: the ray bends at the surface.
+        through = vec3(1.0 - F);
+        if (frontWater) {
+            vec3 t = refract(dir, sn, eta);
+            if (dot(t, t) < 0.5 || any(isnan(t))) {
+                through = vec3(0.0);   // total internal reflection
+            } else {
+                rayOrigin = at - n0 * 0.02;
+                rayDir = normalize(t);
+                rayStart = 0.0;
+                rayEnd = 256.0;
+                refracted = true;
+            }
+        } else {
+            // The pane's texture color as a linear transmittance (slightly lifted from sRGB's 2.2):
+            // dim and saturated like real stained glass, never renormalized.
+            through *= pow(max(frontAlbedo, vec3(0.0)), vec3(1.4));
+        }
+    }
+
+    // The opaque surface: the depth sample refined by a short primary ray, or the refracted one.
+    vec3 radiance = vec3(0.0);
+    Guide g = Guide(n, 1.0, vec3(1.0), vec3(0.0));
+    bool hit = false;
+    if (max(through.r, max(through.g, through.b)) > 0.0 && (refracted || (inRange && len2 > 1e-20))
+            && !any(isnan(rayOrigin)) && !any(isinf(rayOrigin))) {
+        payload.t = -1.0;
+        payload.backface = 0.0;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, rayOrigin, rayStart, rayDir, rayEnd, 0);
+        hit = payload.t >= 0.0 && !any(isnan(payload.normal));
+    }
+    float bedDistance = hit ? payload.t : 0.0;
+    if (hit) {
+        vec3 hitPos = rayOrigin + rayDir * payload.t;
+        ivec2 prevPixel = p;
+        bool reuse = false;
+        if (!refracted && pc.params.z > 0.0 && pc.restir.x > 0.0) {
+            vec4 pcl = pc.prevViewProj * vec4(hitPos, 1.0);
+            if (pcl.w > 0.0) {
+                prevPixel = ivec2(floor((pcl.xy / pcl.w * vec2(0.5, -0.5) + 0.5) * vec2(size)));
+                if (all(greaterThanEqual(prevPixel, ivec2(0))) && all(lessThan(prevPixel, size))) {
+                    float expected = length(hitPos - pc.camDelta.xyz);
+                    reuse = abs(imageLoad(giPrev, prevPixel).a - expected) < 0.05 * expected + 0.1;
+                }
+            }
+        }
+        radiance = shadeOpaque(p, hitPos, rayDir, length(hitPos), prevPixel, reuse, horizontal, g);
+        if (!refracted) imageStore(normals, p, vec4(g.n * 0.5 + 0.5, g.rough));
+    } else {
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
+    }
+
+    if (tFront < 0.0) {
+        imageStore(giCur, p, vec4(0.0, 0.0, 0.0, length(pos)));
+        if (!hit) {
+            // Vanilla-lit pixel (entities outside the scene, tile entities, past the range).
+            store3(0, px, vec3(MARK_VANILLA, 0.0, 0.0));
+            storeGuides(px, viewDepth, mv, n, 1.0, vec3(1.0), vec3(0.0));
+            imageStore(normals, p, vec4(n * 0.5 + 0.5, 0.0));
+            return;
+        }
+        if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+        store3(0, px, radiance);
+        storeGuides(px, viewDepth, mv, g.n, g.rough, g.diffuse, g.specular);
+        return;
+    }
+
+    // Behind the translucent surface nothing the scene holds: the sky, open water's depths, or
+    // (through glass) a surface outside the scene, which keeps its raster color untinted.
+    if (!hit) {
+        if (!sky && !refracted) {
+            // The diffuse albedo plane carries the glass's tint to rt_pt_resolve.comp.
+            store3(0, px, vec3(MARK_VANILLA, 0.0, 0.0));
+            storeGuides(px, viewDepth, mv, n, 1.0, through, vec3(0.0));
+            imageStore(giCur, p, vec4(0.0, 0.0, 0.0, length(pos)));
+            return;
+        }
+        radiance = sky ? skyAlong(rayDir) : vec3(0.0);
+    }
+    if (refracted && !frontBack) {
+        // Water: absorbed along the path through it (Beer-Lambert), the rest in-scattered water
+        // color lit by the sky and block light at the surface (as reflections.rgen).
+        float thickness = hit ? bedDistance : 48.0;
+        vec3 waterColor = clamp(frontAlbedo * 1.4, vec3(0.02), vec3(1.0));
+        // Absorption per block: the colors the biome's water lacks, plus a little turbidity.
+        vec3 transmit = exp(-((1.0 - waterColor) * 0.9 + 0.08) * thickness);
+        // The light entering the surface (water's own lightmap is not reliable): a shadow ray
+        // towards the sun or moon tells open water from covered, the sky's share follows it.
+        vec3 at = eye + dir * tFront;
+        vec3 vis = pc.light.w > 0.0 ? traceShadow(at + vec3(0.0, 0.05, 0.0), pc.light.xyz, 512.0, 0x0Fu) : vec3(0.0);
+        float open = max(max(vis.g, brightness(frontSky)), 0.25);
+        float bd = max(15.0 * (1.0 - frontBlock), 1.0);
+        vec3 inLight = pc.sky.rgb * open + pc.ddgiFlags.yzw * vis * (max(pc.light.y, 0.0) * 0.5 / PI)
+                + vec3(1.0, 0.55, 0.3) * (3.17 * smoothstep(0.0, 0.15, frontBlock) / (bd * bd)) / PI;
+        vec3 scatter = pow(waterColor, vec3(2.2)) * inLight * 0.55;
+        radiance = radiance * transmit + scatter * (1.0 - transmit);
+        g.diffuse *= transmit;
+    }
+    radiance = front + through * radiance;
+    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+    store3(0, px, radiance);
+    imageStore(giCur, p, vec4(0.0, 0.0, 0.0, length(visible)));
+    imageStore(normals, p, vec4(frontGuide.n * 0.5 + 0.5, frontGuide.rough));
+    // RR's guides describe the visible surface; the diffuse albedo is what shows through it, so
+    // the bed's texture detail survives denoising.
+    storeGuides(px, viewDepth, mv, frontGuide.n, frontGuide.rough, through * g.diffuse,
+                clamp(frontGuide.specular, 0.0, 1.0));
+}

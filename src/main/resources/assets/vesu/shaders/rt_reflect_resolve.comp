@@ -1,0 +1,20 @@
+#version 450
+// Blends NRD-denoised reflections (RtReflectionPass, RELAX_SPECULAR) into the scene color,
+// with the weights reflections.rgen computed: color = color * (1 - k) + reflected * m, in the
+// gamma encoding of the scene color (as the direct path of reflections.rgen blends).
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D sceneColor;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D reflections;   // rgb: radiance (linear), a: hit distance
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D weights;       // rgb: m, a: k
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(sceneColor)))) return;
+    vec4 w = imageLoad(weights, p);
+    if (w.a <= 0.0 && dot(w.rgb, w.rgb) <= 0.0) return;
+    vec4 c = imageLoad(sceneColor, p);
+    vec3 r = pow(max(imageLoad(reflections, p).rgb, vec3(0.0)), vec3(1.0 / 2.2));
+    imageStore(sceneColor, p, vec4(clamp(c.rgb * (1.0 - w.a) + r * w.rgb, 0.0, 16.0), c.a));
+}

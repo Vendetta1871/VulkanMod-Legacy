@@ -1,0 +1,47 @@
+#version 450
+// HDR post (PostProcess), downsample chain. Level 0 reads the scene (gamma-encoded HDR, see
+// post_tonemap.comp) at half resolution: rgb the linear color above the bloom threshold
+// (soft knee), a the log2 luminance of all of it. Further levels filter the level above
+// (4x4 tent), down to 1/64 of the scene: the coarse levels give bloom its width and the
+// local / global adaptation luminance.
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D src;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D dst;
+
+layout(push_constant) uniform Constants {
+    vec4 params;   // x: 1 for level 0 (src is the scene), y: bloom threshold (linear), z: knee
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dsize = imageSize(dst), ssize = imageSize(src);
+    if (any(greaterThanEqual(p, dsize))) return;
+    // 4x4 tent (1 3 3 1 per axis) around the 2x2 footprint: a Gaussian-like pyramid, so the
+    // bloom of a small hot source is a round halo, not the square of a box filter.
+    const float W[4] = float[4](1.0, 3.0, 3.0, 1.0);
+    vec4 sum = vec4(0.0);
+    float n = 0.0;
+    for (int j = 0; j < 4; j++) {
+        for (int i = 0; i < 4; i++) {
+            ivec2 q = clamp(p * 2 + ivec2(i - 1, j - 1), ivec2(0), ssize - 1);
+            vec4 s = imageLoad(src, q);
+            if (pc.params.x > 0.5) {
+                vec3 lin = pow(max(s.rgb, vec3(0.0)), vec3(2.2));
+                float l = luminance(lin);
+                // Soft-knee threshold: only light above it feeds the bloom.
+                float t = pc.params.y, k = pc.params.z;
+                float soft = clamp(l - t + k, 0.0, 2.0 * k);
+                float w = max(soft * soft / (4.0 * k + 1e-5), l - t) / max(l, 1e-5);
+                s = vec4(lin * max(w, 0.0), log2(l + 1e-4));
+            }
+            float w = W[i] * W[j];
+            sum += s * w;
+            n += w;
+        }
+    }
+    imageStore(dst, p, sum / n);
+}

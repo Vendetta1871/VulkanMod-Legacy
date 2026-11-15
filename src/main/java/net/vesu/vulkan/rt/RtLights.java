@@ -54,8 +54,9 @@ public final class RtLights {
     private static final java.util.Map<String, Integer> colorIndex = new HashMap<>();
 
     static {
-        color(1.0f, 0.82f, 0.55f, "torch", "lit_pumpkin", "lit_furnace", "fire");
-        color(1.0f, 0.18f, 0.10f, "redstone_torch", "lit_redstone_ore", "redstone_block", "powered_repeater", "powered_comparator");
+        // Flames as NVIDIA's RTX Remix for Minecraft lights them (torch, redstone torch).
+        color(1.0f, 0.35f, 0.10f, "torch", "lit_pumpkin", "lit_furnace", "fire");
+        color(1.0f, 0.15f, 0.02f, "redstone_torch", "lit_redstone_ore", "redstone_block", "powered_repeater", "powered_comparator");
         color(1.0f, 0.88f, 0.62f, "glowstone", "lit_redstone_lamp");
         color(1.0f, 0.45f, 0.12f, "lava", "flowing_lava", "magma", "lava_bucket", "blaze_rod", "blaze_powder", "magma_cream");
         color(1.0f, 0.88f, 0.62f, "glowstone_dust");
@@ -67,11 +68,12 @@ public final class RtLights {
         EXTRA_EMITTERS.put("redstone_block", 7);
     }
 
-    /** Saturated colors are lifted to a common luminance, so a red light is not a dim one. */
+    /**
+     * Radiance colors with the brightest channel at 1, as physical light colors: a saturated
+     * flame emits less light than a white lamp of the same level (lighting.rgen scales by level).
+     */
     private static void color(float r, float g, float b, String... blocks) {
-        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-        float k = Math.max(1.0f, 0.8f / lum);
-        for (String block : blocks) COLORS.put(block, new float[]{r * k, g * k, b * k});
+        for (String block : blocks) COLORS.put(block, new float[]{r, g, b});
     }
 
     /** The light color of a block or item (registry path), also for dynamic lights. */

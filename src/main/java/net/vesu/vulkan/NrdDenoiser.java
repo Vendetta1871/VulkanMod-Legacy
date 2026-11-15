@@ -19,7 +19,8 @@ import java.util.List;
 import static org.lwjgl.system.MemoryUtil.NULL;
 
 /**
- * NVIDIA NRD (RELAX_DIFFUSE) for the RT block light and indirect light, through
+ * NVIDIA NRD: RELAX_DIFFUSE for the RT block light and indirect light, SIGMA_SHADOW_TRANSLUCENCY
+ * for the sun's shadow (soft penumbrae from the jittered sun disc, colored by glass), through
  * libvesu_nrd.so (native/nrd-linux): it records into the frame's command buffer
  * between lighting.rgen and rt_composite.comp. Optional: without the library (or with
  * VESU_NRD=0) the passes keep their own temporal and spatial filter.
@@ -29,12 +30,13 @@ final class NrdDenoiser {
 
     private static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
     private static final String LIB = WINDOWS ? "vesu_nrd.dll" : "libvesu_nrd.so";
-    private static final int CREATE_SIZE = 72, FRAME_SIZE = 416, IMAGES = 304;
+    private static final int CREATE_SIZE = 72, FRAME_SIZE = 480, IMAGES = 304;
     /** Image slots in the frame struct, in order. */
-    static final int MV = 0, NORMAL_ROUGHNESS = 1, VIEWZ = 2, BLOCK_IN = 3, BLOCK_OUT = 4, GI_IN = 5, GI_OUT = 6;
+    static final int MV = 0, NORMAL_ROUGHNESS = 1, VIEWZ = 2, BLOCK_IN = 3, BLOCK_OUT = 4, GI_IN = 5, GI_OUT = 6,
+            PENUMBRA = 7, TRANSLUCENCY = 8, SHADOW_OUT = 9;
 
     private static SharedLibrary library;
-    private static long fnCreate, fnDestroy, fnDenoise;
+    private static long fnCreate, fnDestroy, fnDenoise, fnDenoiseSpecular;
     private static boolean loadAttempted, failed;
     private static int width, height, queued, frameIndex;
 
@@ -76,6 +78,8 @@ final class NrdDenoiser {
             fnCreate = lib.getFunctionAddress("vmnrd_create");
             fnDestroy = lib.getFunctionAddress("vmnrd_destroy");
             fnDenoise = lib.getFunctionAddress("vmnrd_denoise");
+            // Optional (older builds lack it): the reflections then keep their own filter.
+            fnDenoiseSpecular = lib.getFunctionAddress("vmnrd_denoise_specular");
             if (fnCreate == NULL || fnDestroy == NULL || fnDenoise == NULL) {
                 lib.free();
                 Initializer.LOGGER.warn("[nrd] {} lacks the vmnrd entry points", path);
@@ -145,7 +149,7 @@ final class NrdDenoiser {
         height = h;
         queued = frames;
         frameIndex = 0;
-        Initializer.LOGGER.info("[nrd] RELAX_DIFFUSE x2 at {}x{}, {} queued frames", w, h, frames);
+        Initializer.LOGGER.info("[nrd] RELAX_DIFFUSE x2 + SIGMA_SHADOW_TRANSLUCENCY at {}x{}, {} queued frames", w, h, frames);
         return true;
     }
 
@@ -162,7 +166,45 @@ final class NrdDenoiser {
     }
 
     static void denoise(VkCommandBuffer cmd, long[][] images, boolean reset, boolean giCheckerboard,
-                        MemoryStack stack) {
+                        float[] lightDirection, MemoryStack stack) {
+        lastFrameIndex = frameIndex;
+        lastReset = reset;
+        ByteBuffer f = frame(cmd, images, reset, frameIndex++, stack);
+        prevJitterX = CameraHistory.jitterX();
+        prevJitterY = CameraHistory.jitterY();
+        f.putInt(300, giCheckerboard ? 1 : 0);
+        if (lightDirection != null) {
+            f.putFloat(464, lightDirection[0]).putFloat(468, lightDirection[1]).putFloat(472, lightDirection[2])
+                    .putInt(476, 1);
+        }
+        int rc = JNI.callPI(MemoryUtil.memAddress(f), fnDenoise);
+        if (rc != 0) Initializer.LOGGER.warn("[nrd] denoise failed: {}", rc);
+    }
+
+    /** Whether the library can denoise the reflections (RELAX_SPECULAR). */
+    static boolean hasSpecular() {
+        return library != null && fnDenoiseSpecular != NULL && width > 0;
+    }
+
+    /**
+     * Records the reflections' denoiser for the frame {@link #denoise} ran on, after it:
+     * {@code images} as there, with BLOCK_IN / BLOCK_OUT the specular radiance and hit distance.
+     */
+    static void denoiseSpecular(VkCommandBuffer cmd, long[][] images, MemoryStack stack) {
+        ByteBuffer f = frame(cmd, images, lastReset, lastFrameIndex, stack);
+        // The jitter pair of this frame (denoise already moved "previous" on).
+        f.putFloat(272, specPrevJitterX).putFloat(276, specPrevJitterY);
+        specPrevJitterX = CameraHistory.jitterX();
+        specPrevJitterY = CameraHistory.jitterY();
+        int rc = JNI.callPI(MemoryUtil.memAddress(f), fnDenoiseSpecular);
+        if (rc != 0) Initializer.LOGGER.warn("[nrd] specular denoise failed: {}", rc);
+    }
+
+    private static int lastFrameIndex;
+    private static boolean lastReset;
+    private static float specPrevJitterX, specPrevJitterY;
+
+    private static ByteBuffer frame(VkCommandBuffer cmd, long[][] images, boolean reset, int index, MemoryStack stack) {
         ByteBuffer f = stack.calloc(FRAME_SIZE);
         f.putLong(0, cmd.address());
         CameraHistory.proj().get(8, f);
@@ -176,17 +218,14 @@ final class NrdDenoiser {
         tmp.get(200, f);
         f.putFloat(264, CameraHistory.jitterX()).putFloat(268, CameraHistory.jitterY());
         f.putFloat(272, prevJitterX).putFloat(276, prevJitterY);
-        prevJitterX = CameraHistory.jitterX();
-        prevJitterY = CameraHistory.jitterY();
         f.putFloat(280, 1.0f).putFloat(284, 1.0f);
-        f.putInt(288, frameIndex++).putInt(292, reset ? 1 : 0).putFloat(296, 100000.0f)
-                .putInt(300, giCheckerboard ? 1 : 0);
+        f.putInt(288, index).putInt(292, reset ? 1 : 0).putFloat(296, 100000.0f);
         for (int i = 0; i < images.length; i++) {
+            if (images[i] == null) continue;
             int o = IMAGES + i * 16;
             f.putLong(o, images[i][0]).putInt(o + 8, (int) images[i][1]).putInt(o + 12, (int) images[i][2]);
         }
-        int rc = JNI.callPI(MemoryUtil.memAddress(f), fnDenoise);
-        if (rc != 0) Initializer.LOGGER.warn("[nrd] denoise failed: {}", rc);
+        return f;
     }
 
     private static float prevJitterX, prevJitterY;

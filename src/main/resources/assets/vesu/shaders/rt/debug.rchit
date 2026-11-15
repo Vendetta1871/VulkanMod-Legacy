@@ -35,6 +35,7 @@ void main() {
         payload.skyLight = float(face.y & 0xFFu) / 15.0;
         payload.blockLight = float((face.y >> 8) & 0xFFu) / 15.0;
         payload.tinted = 0.0;
+        payload.backface = 0.0;
         return;
     }
     ChunkVertex a, b, c;
@@ -50,6 +51,17 @@ void main() {
     vec3 cr = cross(b.pos - a.pos, c.pos - a.pos);
     float len2 = dot(cr, cr);
     vec3 n = len2 > 1e-20 ? cr * inversesqrt(len2) : -gl_WorldRayDirectionEXT;
+    // Block faces wind counter-clockwise seen from outside: cross() points out of the block,
+    // and a ray going the same way hits the face from behind (it started inside the block).
+    payload.backface = len2 > 1e-20 && dot(n, gl_WorldRayDirectionEXT) > 0.0 ? 1.0 : 0.0;
+    // Vertex colors carry vanilla's directional face shading (top 1, bottom 0.5, north/south
+    // 0.8, east/west 0.6) besides biome tints and smooth-lighting occlusion. The shading is
+    // lighting, not surface color: divided out on axis-aligned faces, the occlusion stays.
+    vec3 an = abs(n);
+    if (len2 > 1e-20 && max(an.x, max(an.y, an.z)) > 0.99) {
+        float face = an.y > 0.5 ? (n.y > 0.0 ? 1.0 : 0.5) : (an.z > 0.5 ? 0.8 : 0.6);
+        albedo = min(albedo / face, vec3(1.0));
+    }
     if (dot(n, gl_WorldRayDirectionEXT) > 0.0) n = -n;
 
     float sky = (float((a.light >> 16) & 0xFFFFu) * w.x + float((b.light >> 16) & 0xFFFFu) * w.y

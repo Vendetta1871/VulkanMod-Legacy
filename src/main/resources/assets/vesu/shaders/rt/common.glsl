@@ -43,6 +43,7 @@ struct Payload {
     float blockLight; // 0..1
     float tinted;     // 1: vertex color has a hue (biome tint: water, grass, leaves)
     vec4 material;    // LabPBR specular: smoothness, F0 (>= 230/255: metal), porosity, emission
+    float backface;   // 1: the ray hit the back of a terrain face (DDGI probe relocation)
 };
 
 // Shadow rays (payload location 1, hit group 1): rgb transmittance through stained glass

@@ -1,0 +1,124 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_scalar_block_layout : require
+// DDGI probe update (paper section 4.2), one workgroup per probe tile: z = 0 blends the rays
+// into the irradiance tile (cosine weights, gamma-encoded), z = 1 into the distance moments
+// (mean and mean square, weights cos^50). The tile border is then filled from the interior
+// so bilinear filtering wraps across the octahedral edges. Inactive probes keep their texels.
+// Hysteresis drops on large changes (a light switched on) and big steps are damped, so the
+// probes react quickly without flickering. Backface hits carry no radiance; probes inside
+// geometry are moved out or deactivated by ddgi_relocate.comp. (Not keeping the old texels
+// of probes with some backfaces, as RTXGI does: a probe stuck with them kept the noisy value
+// of the frame it was reset on, so the result depended on where the camera had been.)
+
+#define DDGI_SET 0
+#define DDGI_PROBE_BINDING 1
+#define DDGI_PROBE_ACCESS readonly
+#define DDGI_VOLUME_BINDING 2
+#include "ddgi.glsl"
+
+layout(set = 0, binding = 0, scalar) readonly buffer DdgiRays { uvec2 rayData[]; };
+layout(set = 0, binding = 3, rgba16f) uniform image2D irradianceAtlas;
+layout(set = 0, binding = 4, rg32f) uniform image2D distanceAtlas;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// A change of a texel by more than this share of its value (linear, plus a floor for black)
+// counts as a lighting change and lowers the hysteresis. Relative and linear rather than an
+// absolute step of the gamma-encoded value: encoding stretches dark values, where the frame
+// noise of dim rooms would otherwise pass for changes all the time.
+const float CHANGE_SHARE = 0.5, CHANGE_FLOOR = 0.02;
+const float BRIGHTNESS_THRESHOLD = 0.10;   // encoded luminance steps above this are damped
+const float DISTANCE_EXPONENT = 50.0;
+const int MAX_BLENDED = 256;
+
+shared vec4 tile[DDGI_DISTANCE_TEXELS * DDGI_DISTANCE_TEXELS];
+shared vec4 rays[MAX_BLENDED];   // rgb: radiance, a: hit distance (negative: backface)
+
+float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+void main() {
+    int row = ddgi.counts.x * ddgi.counts.z;
+    int probe = int(gl_WorkGroupID.x) + int(gl_WorkGroupID.y) * row;
+    bool distanceMode = gl_WorkGroupID.z == 1u;
+    int n = distanceMode ? DDGI_DISTANCE_TEXELS : DDGI_IRRADIANCE_TEXELS;
+    ivec2 t = ivec2(gl_LocalInvocationID.xy);
+    int tid = t.x + t.y * 16;
+    if (probe >= ddgiProbeCount()) return;
+    DdgiProbe pr = ddgiProbes.probes[probe];
+    if (pr.offset.w != DDGI_ACTIVE) return;   // the same for the whole workgroup
+    bool reset = pr.grid.w != 0;
+
+    // The probe's blended rays into shared memory.
+    int blended = min(ddgi.rays.x, MAX_BLENDED);
+    int first = probe * ddgi.rays.z + ddgi.rays.y;
+    if (tid < blended) {
+        uvec2 d = rayData[first + tid];
+        vec2 rg = unpackHalf2x16(d.x), bd = unpackHalf2x16(d.y);
+        rays[tid] = vec4(rg, bd.x, bd.y);
+    }
+    barrier();
+
+    ivec2 tileOrigin = ddgiTile(probe) * (n + 2);
+    if (all(lessThan(t, ivec2(n)))) {
+        vec3 texelDir = ddgiTexelDirection(t, n);
+        vec4 sum = vec4(0.0);
+        float spacing = ddgi.cascades[ddgiCascadeOf(probe)].origin.w;
+        float maxDistance = spacing * 1.5 * 1.7320508;   // 1.5 cell diagonals
+        for (int i = 0; i < blended; i++) {
+            float cosine = max(dot(texelDir, ddgiRayDirection(ddgi.rays.y + i)), 0.0);
+            vec4 ray = rays[i];
+            if (!distanceMode) {
+                if (ray.a < 0.0) continue;   // backfaces carry no radiance
+                sum += vec4(ray.rgb * cosine, cosine);
+            } else {
+                float w = pow(cosine, DISTANCE_EXPONENT);
+                float d = min(abs(ray.a), maxDistance);
+                sum += vec4(d * w, d * d * w, 0.0, w);
+            }
+        }
+        ivec2 texel = tileOrigin + 1 + t;
+        vec4 value;
+        if (!distanceMode) {
+            vec3 result = sum.a > 1e-4 ? sum.rgb / sum.a : vec3(0.0);
+            vec3 encoded = pow(result, vec3(1.0 / DDGI_GAMMA));
+            vec3 previous = imageLoad(irradianceAtlas, texel).rgb;
+            float hysteresis = reset || dot(previous, previous) == 0.0 ? 0.0 : ddgi.params.x;
+            vec3 delta = encoded - previous;
+            vec3 previousLinear = pow(previous, vec3(DDGI_GAMMA));
+            vec3 change = abs(result - previousLinear);
+            float level = max(max(max(result.r, result.g), result.b), max(max(previousLinear.r, previousLinear.g), previousLinear.b));
+            if (max(max(change.r, change.g), change.b) > CHANGE_SHARE * level + CHANGE_FLOOR) {
+                hysteresis = max(hysteresis - 0.75, 0.0);
+            }
+            if (hysteresis > 0.0 && luminance(delta) > BRIGHTNESS_THRESHOLD) delta *= 0.25;
+            value = vec4(previous + (1.0 - hysteresis) * delta, 1.0);
+        } else {
+            vec2 result = sum.a > 1e-6 ? sum.xy / sum.a : vec2(maxDistance, maxDistance * maxDistance);
+            vec2 previous = imageLoad(distanceAtlas, texel).rg;
+            value = vec4(mix(result, previous, reset ? 0.0 : ddgi.params.x), 0.0, 1.0);
+        }
+        tile[t.x + t.y * n] = value;
+    }
+    barrier();
+
+    // Interior and border: a border texel copies the interior texel across the octahedral
+    // edge (mirrored along that edge; corners take the opposite corner).
+    int side = n + 2;
+    for (int i = tid; i < side * side; i += 256) {
+        ivec2 b = ivec2(i % side, i / side);
+        ivec2 src = b - 1;
+        bool edgeX = b.x == 0 || b.x == side - 1;
+        bool edgeY = b.y == 0 || b.y == side - 1;
+        if (edgeX && edgeY) {
+            src = ivec2(b.x == 0 ? n - 1 : 0, b.y == 0 ? n - 1 : 0);
+        } else if (edgeX) {
+            src = ivec2(b.x == 0 ? 0 : n - 1, n - b.y);
+        } else if (edgeY) {
+            src = ivec2(n - b.x, b.y == 0 ? 0 : n - 1);
+        }
+        vec4 v = tile[src.x + src.y * n];
+        if (distanceMode) imageStore(distanceAtlas, tileOrigin + b, v);
+        else imageStore(irradianceAtlas, tileOrigin + b, v);
+    }
+}

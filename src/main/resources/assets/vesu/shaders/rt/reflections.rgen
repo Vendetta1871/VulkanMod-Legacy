@@ -2,15 +2,19 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
+#include "atmosphere.glsl"
 // Ray-traced reflections, after the translucent layer: a primary ray finds the front
 // surface of each pixel - translucent (water, glass, ice) or, failing that, opaque with a
 // smooth material (RtMaterials: LabPBR smoothness / F0, metals) - and a reflection ray
-// (terrain), jittered by the roughness, is shaded from its hit's albedo and lightmap and
-// blended in by Fresnel; metals reflect in their own color.
+// (terrain), its direction drawn from the GGX distribution of the surface roughness, is
+// shaded from its hit's albedo and lightmap and blended in by Fresnel; metals reflect in
+// their own color. On glossy opaque surfaces the reflected light accumulates over frames
+// (reprojected through the surface point, distance-validated, more frames the rougher the
+// surface): one jittered ray per pixel and frame no longer shows as speckle.
 // Water gets procedural waves, a sun glint and a refraction offset of the opaque-only copy.
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
-layout(set = 0, binding = 1, rgba8) uniform image2D sceneColor;
+layout(set = 0, binding = 1, rgba16f) uniform image2D sceneColor;   // HDR (gamma-encoded, may exceed 1)
 layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
 layout(set = 0, binding = 5, rgba8) uniform readonly image2D opaqueColor;
 // The lighting pass's normals; a: roughness of the terrain hit (see lighting.rgen).
@@ -22,8 +26,25 @@ layout(push_constant) uniform Constants {
     vec4 sky;           // rgb: sky color, w: time (seconds)
     vec4 params;        // x: strength, y: opaque copy bound, z: RT range (blocks), w: sky brightness factor
     vec4 cam;           // xyz: camera position modulo 1024 (wave phase), w: 1 translucent surfaces, 0 opaque
-    vec4 flags;         // x: 1 when gbufferNormals covers this frame's reflection range
+    vec4 flags;         // x: 1 when gbufferNormals covers this frame's reflection range, y: history valid,
+                        // z: 1 NRD denoises the opaque pass (glossy GGX rays into nrdSpec, blended later)
+    mat4 prevViewProj;  // camera-relative position -> previous clip space
+    vec4 camDelta;      // xyz: previous camera - camera
+    vec4 skyMean;       // rgb: mean upper sky radiance, w: sky source radiance (atmosphere.glsl)
+    vec4 direct;        // rgb: irradiance of the direct sun / moon (scene units)
 } pc;
+
+// Reflection history of the opaque pass (RtReflectionPass): rgb accumulated reflected light,
+// a: frames; and the distance of the surface it belongs to (reprojection check).
+layout(set = 0, binding = 29, rgba16f) uniform readonly image2D reflectPrev;
+layout(set = 0, binding = 30, rgba16f) uniform writeonly image2D reflectCur;
+layout(set = 0, binding = 31, r32f) uniform readonly image2D reflectDistPrev;
+layout(set = 0, binding = 32, r32f) uniform writeonly image2D reflectDistCur;
+
+// NRD path of the opaque pass: traced reflection (linear radiance, hit distance) and the
+// blend weights rt_reflect_resolve.comp applies after RELAX_SPECULAR (rgb: m, a: k).
+layout(set = 0, binding = 35, rgba16f) uniform writeonly image2D nrdSpec;
+layout(set = 0, binding = 36, rgba16f) uniform writeonly image2D nrdSpecWeight;
 
 layout(location = 0) rayPayloadEXT Payload payload;
 layout(location = 1) rayPayloadEXT vec4 shadow;
@@ -56,16 +77,61 @@ vec2 waveSlope(vec2 xz, float t) {
     return s;
 }
 
-// Vanilla-like shading of a reflected surface: lightmap plus the fixed face shading.
-vec3 shade(vec3 albedo, vec3 n, float skyLight, float blockLight) {
-    float face = abs(n.y) > 0.5 ? (n.y > 0.0 ? 1.0 : 0.5) : (abs(n.z) > 0.5 ? 0.8 : 0.6);
-    float light = max(brightness(skyLight) * pc.params.w, brightness(blockLight)) * 0.95 + 0.05;
-    return albedo * light * face;
+vec3 toLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 toScene(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+
+vec3 skyAlong(vec3 d) {
+    return atmosphere(d, pc.light.y >= 0.0 ? pc.light.xyz : -pc.light.xyz, pc.skyMean.w, pc.skyMean.rgb);
+}
+
+// Block light from the lightmap: a torch-like source at the distance its level has fallen
+// off over (as the DDGI probes estimate it), scene units.
+vec3 blockEstimate(float blockLight) {
+    float d = max(15.0 * (1.0 - blockLight), 1.0);
+    return vec3(1.0, 0.55, 0.3) * (3.17 * smoothstep(0.0, 0.15, blockLight) / (d * d));
+}
+
+// Physical shading of a reflected surface (scene units, Lambertian): the direct light through
+// a shadow ray, the sky by its sky light, the block light estimate.
+vec3 shade(vec3 albedo, vec3 n, vec3 at, float skyLight, float blockLight) {
+    vec3 e = 3.14159265 * pc.skyMean.rgb * brightness(skyLight) + blockEstimate(blockLight);
+    float ndl = dot(n, pc.light.xyz);
+    // Never trace a NaN ray: software traversal (GPUs without RT cores) can spin on it.
+    bool finite = !any(isnan(at)) && !any(isinf(at)) && !any(isnan(n)) && !any(isnan(pc.light.xyz));
+    if (finite && ndl > 0.0 && skyLight > 0.01) {
+        shadow = vec4(1.0, 1.0, 1.0, 0.0);
+        traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                    0x0F, SHADOW_HIT_GROUP, 0, 1, at + n * 0.02, 0.0, pc.light.xyz, 512.0, 1);
+        e += pc.direct.rgb * ndl * shadow.rgb * shadow.a;
+    }
+    return toLinear(albedo) / 3.14159265 * e;
+}
+
+// A microfacet normal around n drawn from the GGX distribution (alpha = roughness).
+vec3 sampleGgx(vec3 n, float alpha, float u1, float u2) {
+    float a2 = alpha * alpha;
+    float cosTheta = sqrt((1.0 - u1) / (1.0 + (a2 - 1.0) * u1));
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    float phi = 6.2831853 * u2;
+    vec3 t = normalize(abs(n.y) < 0.999 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    vec3 b = cross(n, t);
+    return normalize(t * (cos(phi) * sinTheta) + b * (sin(phi) * sinTheta) + n * cosTheta);
 }
 
 void main() {
     ivec2 p = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
+    bool opaquePass = pc.cam.w <= 0.5;
+    // Every pixel starts without history this frame; reflecting ones overwrite it below.
+    bool nrdPath = opaquePass && pc.flags.z > 0.5;
+    if (opaquePass) {
+        imageStore(reflectCur, p, vec4(0.0));
+        imageStore(reflectDistCur, p, vec4(-1.0));
+    }
+    if (nrdPath) {
+        imageStore(nrdSpec, p, vec4(0.0));
+        imageStore(nrdSpecWeight, p, vec4(0.0));
+    }
     float d = texelFetch(sceneDepth, p, 0).r;
     float farD = farPlaneDepth(pc.invViewProj);
     if (isSkyDepth(d, farD)) return;
@@ -111,19 +177,20 @@ void main() {
     if (water) {
         vec2 slope = waveSlope(hitPos.xz + pc.cam.xz, pc.sky.w);
         n = normalize(vec3(-slope.x, 1.0, -slope.y));
-    } else if (roughness > 0.001) {
-        // Glossy: a random microfacet normal around the surface normal; FSR's temporal
-        // accumulation averages the jitter.
+    } else if (nrdPath && roughness > 0.001) {
+        // Glossy with NRD: a GGX microfacet normal per pixel and frame; RELAX_SPECULAR turns the
+        // samples into a clean blurred reflection. Without NRD the mirror direction (one random
+        // ray per frame is grain in motion) and roughness only dims it (fresnel below).
         rngState = uint(p.x) * 1973u + uint(p.y) * 9277u + uint(pc.sky.w * 60.0) * 26699u;
-        vec3 jitter = vec3(rand(), rand(), rand()) * 2.0 - 1.0;
-        n = normalize(n0 + jitter * roughness * 0.7);
+        n = sampleGgx(n0, roughness, rand(), rand());
+        if (dot(n, -dir) <= 0.0) n = n0;
     }
 
     float cosV = clamp(dot(-dir, n), 0.0, 1.0);
     vec3 f0 = metal ? albedo : vec3(water ? 0.02 : translucent ? 0.04 : max(material.g, 0.02));
     vec3 fresnel = (f0 + (1.0 - f0) * pow(1.0 - cosV, 5.0)) * pc.params.x;
     // Rough dielectrics lose the sharp reflection; metals keep their (blurred) one.
-    if (!metal) fresnel *= smoothness * smoothness;
+    if (!metal && !nrdPath) fresnel *= smoothness * smoothness;
 
     vec3 r = reflect(dir, n);
     if (dot(r, n0) < 0.02) r = normalize(r + n0 * (0.02 - dot(r, n0)));
@@ -132,8 +199,49 @@ void main() {
     payload.t = -1.0;
     // Reflections see entities too (players, mobs: one color per model face).
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, origin, 0.0, r, 512.0, 0);
-    vec3 reflected = payload.t < 0.0 ? pc.sky.rgb
-            : shade(payload.albedo, payload.normal, payload.skyLight, payload.blockLight);
+    // Reflected radiance (scene units), gamma-encoded like the scene color it blends into.
+    vec3 reflectedLin = payload.t < 0.0 ? skyAlong(r)
+            : shade(payload.albedo, payload.normal, origin + r * payload.t, payload.skyLight, payload.blockLight);
+    vec3 reflected = toScene(reflectedLin);
+    if (nrdPath) {
+        // To NRD: the radiance and hit distance; the blend happens after denoising with the
+        // weights of the direct path below (metal: mostly the tinted reflection).
+        float t = 0.75 * smoothness * pc.params.x * rangeFade;
+        vec3 f = fresnel * rangeFade;
+        vec4 weight = metal ? vec4(f * t, t) : vec4(f, f.g);
+        imageStore(nrdSpec, p, vec4(min(reflectedLin, vec3(64.0)), payload.t < 0.0 ? 1000.0 : payload.t));
+        imageStore(nrdSpecWeight, p, weight);
+        return;
+    }
+
+    // Glossy opaque surfaces: accumulate the reflected light over frames.
+    if (opaquePass && !water && roughness > 0.001) {
+        float surfaceDist = length(hitPos);
+        float frames = 0.0;
+        vec3 history = vec3(0.0);
+        if (pc.flags.y > 0.5) {
+            vec4 clip = pc.prevViewProj * vec4(hitPos, 1.0);
+            if (clip.w > 0.0) {
+                ivec2 q = ivec2(floor((clip.xy / clip.w * vec2(0.5, -0.5) + 0.5) * vec2(size)));
+                if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, size))) {
+                    float expected = length(hitPos - pc.camDelta.xyz);
+                    float stored = imageLoad(reflectDistPrev, q).r;
+                    if (stored > 0.0 && abs(stored - expected) < 0.03 * expected + 0.05) {
+                        vec4 h = imageLoad(reflectPrev, q);
+                        history = h.rgb;
+                        frames = h.a;
+                    }
+                }
+            }
+        }
+        // Up to 16 frames for rough surfaces, few for near-mirrors (their reflection moves
+        // with the view and would smear).
+        float maxFrames = mix(2.0, 16.0, clamp(roughness * 12.0, 0.0, 1.0));
+        frames = min(frames + 1.0, maxFrames);
+        reflected = mix(history, reflected, 1.0 / frames);
+        imageStore(reflectCur, p, vec4(reflected, frames));
+        imageStore(reflectDistCur, p, vec4(surfaceDist));
+    }
 
     vec4 color = imageLoad(sceneColor, p);
     vec3 c = color.rgb;
@@ -151,8 +259,10 @@ void main() {
         vec3 bed = imageLoad(opaqueColor, q).rgb;
         vec3 waterColor = clamp(albedo * 1.4, vec3(0.02), vec3(1.0));
         vec3 transmit = exp(-(1.0 - waterColor) * 0.35 * thickness);
-        float light = max(brightness(surfaceSky) * pc.params.w, brightness(surfaceBlock)) * 0.9 + 0.05;
-        c = mix(c, bed * transmit + waterColor * light * 0.55 * (1.0 - transmit), rangeFade);
+        // In-scattered light: the water color lit by the sky and block light (scene units).
+        vec3 inLight = pc.skyMean.rgb * brightness(surfaceSky) + blockEstimate(surfaceBlock) / 3.14159265;
+        vec3 scatter = toScene(toLinear(waterColor) * inLight * 0.55);
+        c = mix(c, bed * transmit + scatter * (1.0 - transmit), rangeFade);
     }
     fresnel *= rangeFade;
     if (metal) {
@@ -168,8 +278,9 @@ void main() {
             shadow = vec4(1.0, 1.0, 1.0, 0.0);
             traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                         0x0F, SHADOW_HIT_GROUP, 0, 1, origin, 0.0, pc.light.xyz, 512.0, 1);
-            c += spec * shadow.rgb * shadow.a * (metal ? albedo : vec3(1.0, 0.92, 0.8));
+            // The sun's glint in scene units (its irradiance), added in linear light.
+            c = toScene(toLinear(c) + spec * shadow.rgb * shadow.a * pc.direct.rgb * (metal ? toLinear(albedo) : vec3(1.0)));
         }
     }
-    imageStore(sceneColor, p, vec4(clamp(c, 0.0, 1.0), color.a));
+    imageStore(sceneColor, p, vec4(clamp(c, 0.0, 16.0), color.a));
 }

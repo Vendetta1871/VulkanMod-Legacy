@@ -25,6 +25,14 @@ import static org.lwjgl.vulkan.VK13.*;
 public final class FrameTargets {
 
     /**
+     * Whether the RT composite shades this frame's world (rt_composite.comp): it then draws the
+     * physical sky and the clouds itself, and the raster clouds stay off.
+     */
+    public static boolean rtShadesScene() {
+        return pack == null && net.vesu.vulkan.rt.RtScene.enabled();
+    }
+
+    /**
      * The display and, by default, the scene: a float target would skip the [0,1] clamp
      * vanilla blending relies on, so only a pack that tonemaps opts out (see {@link #sceneFormat}).
      */
@@ -69,8 +77,14 @@ public final class FrameTargets {
     /** {@link #pack} has geometry programs: the scene phase attaches their targets. */
     private static boolean geometry;
     private static boolean translucentEntered;
-    /** Format of {@link #scene}: {@link #COLOR_FORMAT} or, for the pack run this frame, {@link #HDR_SCENE_FORMAT}. */
+    /**
+     * Format of {@link #scene}: {@link #HDR_SCENE_FORMAT} while ray tracing is on (its light
+     * goes above vanilla white; PostProcess maps it to the display) or for an HDR pack,
+     * otherwise {@link #COLOR_FORMAT}.
+     */
     private static int sceneFormat = COLOR_FORMAT;
+
+    static int sceneFormat() { return sceneFormat; }
 
     /** True when this frame's scene is in GL row order (a pack runs, or the debug knob). */
     static boolean packSpaceFrame() { return packSpaceFrame; }
@@ -209,6 +223,7 @@ public final class FrameTargets {
         if (net.vesu.vulkan.rt.RtScene.enabled()) net.vesu.vulkan.rt.RtScene.destroy();
         Fsr3Upscaler.destroy();
         Fsr1Upscaler.destroy();
+        PostProcess.destroy();
         MotionVectorPass.destroy();
         opaqueColor.destroy();
         ComputeSets.destroySamplers();
@@ -512,7 +527,8 @@ public final class FrameTargets {
         // Packs keep forward depth until their programs are rewritten for reverse-Z (AUDIT 5.16).
         VRenderSystem.reverseZ = pack == null && !FORWARD_Z;
         net.vesu.render.ChunkBatcher.requestVertexFlags(selected != null ? selected.vertexFlags() : 0);
-        int wantedFormat = selected != null && selected.hdrScene() ? HDR_SCENE_FORMAT : COLOR_FORMAT;
+        int wantedFormat = (selected != null && selected.hdrScene()) || net.vesu.vulkan.rt.RtScene.enabled()
+                ? HDR_SCENE_FORMAT : COLOR_FORMAT;
         if (wantedFormat != sceneFormat) {
             // Only when the pack changes: nothing of this frame touched the targets yet.
             sceneFormat = wantedFormat;
@@ -522,7 +538,9 @@ public final class FrameTargets {
         boolean rtPack = pack != null && net.vesu.vulkan.rt.RtScene.enabled();
         temporal = (pack == null || rtPack) && wantTemporal();
         updateLodBias();
-        net.vesu.render.CameraHistory.setJitterEnabled(temporal);
+        // Ray Reconstruction resolves sub-pixel detail from the jitter like a temporal upscaler.
+        net.vesu.render.CameraHistory.setJitterEnabled(temporal
+                || (net.vesu.vulkan.rt.RtScene.enabled() && RtLightingPass.pathTracingWanted()));
         MotionVectorPass.setEnabled(temporal || (pack != null && pack.needsMotion()));
 
         // Contents of the previous frame are discarded (UNDEFINED). The source stages
@@ -587,6 +605,11 @@ public final class FrameTargets {
             // Vulkan row order, so nothing below flips it again.
             pack.record(cmd, stack);
             Drawer.invalidateBoundPipeline(cmd);
+            GpuTimer.mark(cmd, GpuTimer.PACK);
+        } else if (sceneFormat == HDR_SCENE_FORMAT && net.vesu.vulkan.rt.RtScene.enabled() && PostProcess.ENABLED
+                && !RtDebugView.ACTIVE && net.vesu.Env.get("VESU_DEBUG_VIEW") == null) {
+            // The ray-traced HDR scene through the film chain, into display range.
+            PostProcess.record(cmd, stack);
             GpuTimer.mark(cmd, GpuTimer.PACK);
         }
 

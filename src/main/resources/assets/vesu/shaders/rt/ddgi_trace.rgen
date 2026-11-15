@@ -1,0 +1,127 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// DDGI probe rays (see ddgi.glsl): one launch column per ray, one row per probe. Each ray
+// stores the radiance arriving at the probe from its direction and the hit distance:
+// negative (scaled by 0.2) on a backface, which marks probes stuck inside geometry.
+// Radiance at a hit (scene units, Lambertian): the albedo over pi times the irradiance of the
+// sun through a shadow ray (colored by stained glass), an estimate of the block light from
+// vanilla's lightmap, and the surface's own irradiance from the probes of the previous frame
+// (the bounces add up over frames), plus emission. Misses see the physical sky.
+// Inactive probes trace only the fixed rays, enough to notice geometry that wakes them. The
+// fixed rays start at the probe's grid point, not its relocated position: relocation is
+// then a function of the geometry alone (see ddgi_relocate.comp).
+
+#define DDGI_SET 0
+#define DDGI_IRRADIANCE_BINDING 24
+#define DDGI_DISTANCE_BINDING 25
+#define DDGI_PROBE_BINDING 26
+#define DDGI_PROBE_ACCESS readonly
+#define DDGI_VOLUME_BINDING 28
+#define DDGI_SAMPLING
+#include "ddgi.glsl"
+#include "atmosphere.glsl"
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 27, scalar) writeonly buffer DdgiRays { uvec2 rayData[]; };
+
+// The lighting pass's constants (RtLightingPass), of which the sun and sky are used here.
+layout(push_constant) uniform Constants {
+    mat4 invViewProj;
+    mat4 prevViewProj;
+    vec4 light;         // xyz: towards the sun/moon, w: sun shadow strength (> 0: the sun lights)
+    vec4 params;
+    vec4 cam;
+    vec4 camDelta;      // w: sky source radiance (atmosphere.glsl)
+    vec4 sky;           // rgb: mean upper sky radiance
+    vec4 restir;
+    vec4 viewRowZ;
+    vec4 ddgiFlags;     // yzw: direct sun/moon irradiance
+} pc;
+
+layout(location = 0) rayPayloadEXT Payload payload;
+layout(location = 1) rayPayloadEXT vec4 shadow;
+
+const float MAX_RAY = 256.0;
+const float MISS_DISTANCE = 1.0e4;
+
+float brightness(float l) { return l / (4.0 - 3.0 * l); }
+
+float emissionOf(vec4 material) {
+    return material.a < 254.5 / 255.0 ? material.a * (255.0 / 254.0) : 0.0;
+}
+
+vec3 traceShadow(vec3 origin, vec3 dir, float tMax, uint mask) {
+    shadow = vec4(1.0, 1.0, 1.0, 0.0);
+    traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                mask, SHADOW_HIT_GROUP, 0, 1, origin, 0.0, dir, tMax, 1);
+    return shadow.rgb * shadow.a;
+}
+
+void store(int index, vec3 radiance, float dist) {
+    radiance = clamp(radiance, vec3(0.0), vec3(32.0));
+    rayData[index] = uvec2(packHalf2x16(radiance.rg), packHalf2x16(vec2(radiance.b, dist)));
+}
+
+void main() {
+    int r = int(gl_LaunchIDEXT.x);
+    int probe = int(gl_LaunchIDEXT.y);
+    if (probe >= ddgiProbeCount() || r >= ddgi.rays.z) return;
+    int index = probe * ddgi.rays.z + r;
+    if (ddgiProbes.probes[probe].offset.w != DDGI_ACTIVE && r >= ddgi.rays.y) return;
+
+    int cascade = ddgiCascadeOf(probe);
+    vec3 origin = ddgiGridPosition(ddgiGridOf(ddgiSlotOf(probe), cascade), cascade);
+    if (r >= ddgi.rays.y) origin += ddgiProbes.probes[probe].offset.xyz;
+    vec3 dir = ddgiRayDirection(r);
+    if (any(isnan(origin)) || any(isnan(dir))) {
+        store(index, vec3(0.0), MISS_DISTANCE);
+        return;
+    }
+    // Opaque and cutout terrain: probes see through glass, water and entities. They also see
+    // past the diagonal quads of cross-shaped plants (grass, flowers, saplings): a probe in a
+    // block of tall grass otherwise saw little but grass around it and darkened its whole
+    // cell of the ground. Leaves, crops and other axis-aligned cutout faces still occlude.
+    float tMin = 0.0;
+    for (int i = 0; i < 4; i++) {
+        payload.t = -1.0;
+        payload.backface = 0.0;
+        traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x03, 0, 0, 0, origin, tMin, dir, MAX_RAY, 0);
+        vec3 hn = abs(payload.normal);
+        bool crossPlant = payload.t >= 0.0 && hn.y < 0.1 && abs(hn.x - hn.z) < 0.05;
+        if (!crossPlant) break;
+        tMin = payload.t + 0.01;
+        payload.t = -1.0;
+    }
+    if (payload.t < 0.0) {
+        vec3 sunDir = pc.light.y >= 0.0 ? pc.light.xyz : -pc.light.xyz;
+        store(index, atmosphere(dir, sunDir, pc.camDelta.w, pc.sky.rgb), MISS_DISTANCE);
+        return;
+    }
+    if (payload.backface > 0.5) {
+        store(index, vec3(0.0), -0.2 * payload.t);
+        return;
+    }
+
+    vec3 hit = origin + dir * payload.t;
+    vec3 n = payload.normal;
+    vec3 albedo = pow(payload.albedo, vec3(2.2));
+    // Block light from the lightmap: a torch-like source (lighting.rgen) at the distance its
+    // level has fallen off over, warm.
+    float bl = payload.blockLight;
+    float lightDist = max(15.0 * (1.0 - bl), 1.0);
+    vec3 light = vec3(1.0, 0.55, 0.3) * (3.17 * smoothstep(0.0, 0.15, bl) / (lightDist * lightDist));
+    float ndl = dot(n, pc.light.xyz);
+    if (pc.light.w > 0.0 && ndl > 0.0 && payload.skyLight > 0.01) {
+        light += traceShadow(hit + n * 0.02, pc.light.xyz, 512.0, 0x0Fu) * pc.ddgiFlags.yzw * ndl;
+    }
+    // The probes hold the cosine-weighted mean radiance (irradiance over pi); untrusted or
+    // missing probes blend into the open sky's, scaled by the sky light.
+    vec4 probeIrr = ddgiIrradianceConf(hit, n, -dir);
+    vec3 bounce = mix(3.14159265 * pc.sky.rgb * brightness(payload.skyLight), probeIrr.rgb * 3.14159265,
+            clamp(probeIrr.a, 0.0, 1.0));
+    // Emission (scene units of RTX Remix's terrain emission, 100 times the texture color).
+    vec3 emitted = albedo * (10.0 * emissionOf(payload.material));
+    store(index, albedo / 3.14159265 * (light + bounce) + emitted, payload.t);
+}

@@ -11,22 +11,13 @@
 //    reuse, after Bitterli et al. 2020); its noisy estimate is accumulated over
 //    frames (depth-validated reprojection) into the history image. Shadow rays pass through
 //    stained glass and ice and take their color.
-//  - one cosine-distributed indirect (GI) ray on half the pixels per frame, shaded from its hit's albedo and lightmap
-//    (sky color on a miss where the pixel sees the sky), accumulated likewise.
+//  - indirect light: one cosine-distributed ray on half the pixels per frame, ending in the
+//    radiance cache (sharc.glsl, RtSharc; NRD denoises it, else it is accumulated likewise),
+//    or without the cache (VESU_SHARC=0) the DDGI probes (ddgi.glsl, RtDdgi).
 // rt_composite.comp filters the histories spatially and relights the scene color.
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
-// Per light two entries: xyz center relative to the origin, w level; then rgb color.
-layout(set = 0, binding = 6, scalar) readonly buffer Lights { vec4 lights[]; };
-// Dynamic lights (held / dropped light sources), same layout; indices from DYNAMIC on.
-layout(set = 0, binding = 23, scalar) readonly buffer DynamicLights { vec4 dynamicLights[]; };
-const int DYNAMIC = 1 << 29;
-
-vec4 lightAt(int li) { return li >= DYNAMIC ? dynamicLights[(li - DYNAMIC) * 2] : lights[li * 2]; }
-vec3 lightColor(int li) { return li >= DYNAMIC ? dynamicLights[(li - DYNAMIC) * 2 + 1].rgb : lights[li * 2 + 1].rgb; }
-layout(set = 0, binding = 7, scalar) readonly buffer Grid { ivec4 cells[]; };          // cell xyz, start | count << 24
-layout(set = 0, binding = 8, scalar) readonly buffer LightIndex { int lightIndex[]; };
 layout(set = 0, binding = 9, rgba16f) uniform readonly image2D historyPrev;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D historyCur;   // rgb: block light, a: frames
 layout(set = 0, binding = 11, rgba16f) uniform writeonly image2D aux;          // y: vanilla block, z: sky term, w: fade (-1 none, 0 no hit)
@@ -35,7 +26,7 @@ layout(set = 0, binding = 13, rgba16f) uniform readonly image2D giPrev;
 layout(set = 0, binding = 14, rgba16f) uniform writeonly image2D giCur;      // rgb: indirect light, a: distance
 layout(set = 0, binding = 15, rgba8) uniform writeonly image2D aux2;         // rgb: sun factor, a: indirect light fade
 layout(set = 0, binding = 17, rgba32f) uniform readonly image2D reservoirPrev;
-layout(set = 0, binding = 18, rgba32f) uniform writeonly image2D reservoirCur; // x: light index (bits), y: W, z: M
+layout(set = 0, binding = 18, rgba32f) uniform writeonly image2D reservoirCur; // x: light index (bits), y: W, z: M, w: surface normal (encodeNormal)
 // NRD inputs (this frame's samples, not accumulated): rgb radiance, a: hit distance.
 layout(set = 0, binding = 19, rgba16f) uniform writeonly image2D blockRaw;
 layout(set = 0, binding = 20, rgba16f) uniform writeonly image2D giRaw;
@@ -43,24 +34,42 @@ layout(set = 0, binding = 21, r32f) uniform writeonly image2D viewZ;
 // Surface albedo (texture * vertex tint) of the primary hit: lets the composite light pixels
 // vanilla left (near) black.
 layout(set = 0, binding = 22, rgba8) uniform writeonly image2D albedoOut;
+// SIGMA (NRD) inputs for the sun shadow: penumbra radius (distance to the occluder times the
+// sun's angular radius), translucency (x: 1 unoccluded, yzw: light through stained glass).
+layout(set = 0, binding = 33, r16f) uniform writeonly image2D sigmaPenumbra;
+layout(set = 0, binding = 34, rgba8) uniform writeonly image2D sigmaTranslucency;
+const float SUN_ANGULAR_RADIUS = 0.0046;
+const float FP16_MAX = 65504.0;
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered: the depth was rendered with it
     mat4 prevViewProj;  // camera-relative position -> previous clip space
-    vec4 light;         // xyz: towards the sun/moon, w: sun shadow strength
+    vec4 light;         // xyz: towards the sun/moon, w: 1 when it can light (a dimension with a sky)
     vec4 params;        // x: shadow range (blocks), y: frame, z: history valid, w: grid mask
     vec4 cam;           // xyz: camera - light origin, w: light count
-    vec4 camDelta;      // xyz: previous camera - camera, w: sky brightness factor
-    vec4 sky;           // rgb: sky radiance (luminance 1), w: indirect light range (blocks, 0: off)
+    vec4 camDelta;      // xyz: previous camera - camera, w: sky source radiance (atmosphere.glsl)
+    vec4 sky;           // rgb: mean upper sky radiance, w: indirect light range (blocks, 0: off)
     vec4 restir;        // x: 1 when the previous reservoirs' light indices are still valid, y: NRD denoises,
                         // z: dynamic light count, w: NRD frame index parity (indirect light checkerboard)
     vec4 viewRowZ;      // camera-relative position -> view-space z (third row of the view matrix)
+    vec4 ddgiFlags;     // x: 1 when the DDGI probes (RtDdgi) give the indirect light, yzw: direct sun/moon irradiance
 } pc;
+
+#define DDGI_SET 0
+#define DDGI_IRRADIANCE_BINDING 24
+#define DDGI_DISTANCE_BINDING 25
+#define DDGI_PROBE_BINDING 26
+#define DDGI_PROBE_ACCESS readonly
+#define DDGI_VOLUME_BINDING 28
+#define DDGI_SAMPLING
+#include "ddgi.glsl"
+#include "atmosphere.glsl"
+#include "lights.glsl"
+#include "sharc.glsl"
 
 layout(location = 0) rayPayloadEXT Payload payload;
 layout(location = 1) rayPayloadEXT vec4 shadow;
 
-const int CELL = 8;
 const int MAX_CANDIDATES = 8;
 const float MAX_FRAMES = 24.0;
 
@@ -116,39 +125,6 @@ vec3 traceShadow(vec3 origin, vec3 dir, float tMax, uint mask) {
     return shadow.rgb * shadow.a;
 }
 
-int findCell(ivec3 c) {
-    int mask = int(pc.params.w);
-    int slot = (c.x * 73856093 ^ c.y * 19349663 ^ c.z * 83492791) & mask;
-    for (int i = 0; i <= mask; i++) {
-        ivec4 e = cells[slot];
-        if (e.x == int(0x80000000)) return -1;
-        if (e.xyz == c) return slot;
-        slot = (slot + 1) & mask;
-    }
-    return -1;
-}
-
-// Unshadowed block light from one emitter: vanilla's level falloff (one level per block)
-// through the brightness curve, shaped by the angle of incidence.
-float lightTarget(vec4 l, vec3 pos, vec3 n, out vec3 toLight, out float dist) {
-    toLight = l.xyz - pc.cam.xyz - pos;
-    dist = length(toLight);
-    float level = l.w - max(dist - 0.5, 0.0);
-    if (level <= 0.0) return 0.0;
-    float ndl = dot(n, toLight) / max(dist, 1e-4);
-    if (ndl <= 0.0) return 0.0;
-    return brightness(level / 15.0) * (0.35 + 0.65 * ndl);
-}
-
-// Distance along the ray at which it enters the light's own block (stops the shadow ray there).
-float blockEntry(vec3 origin, vec3 dir, vec3 center) {
-    vec3 inv = 1.0 / dir;
-    vec3 t0 = (center - 0.5 - origin) * inv;
-    vec3 t1 = (center + 0.5 - origin) * inv;
-    vec3 tmin = min(t0, t1);
-    return max(max(tmin.x, tmin.y), tmin.z);
-}
-
 struct Reservoir {
     int light;    // -1: none
     float wsum;
@@ -175,11 +151,28 @@ void addCandidate(inout Reservoir r, int li, float target, float weight, float m
 }
 
 // Merges a previous-frame reservoir, re-evaluating its light at this pixel.
+// The surface normal quantized to 8 bits per axis, an integer exact in a float.
+float encodeNormal(vec3 n) {
+    uvec3 q = uvec3(clamp(n * 0.5 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+    return float(q.x | q.y << 8 | q.z << 16);
+}
+vec3 decodeNormal(float f) {
+    uint v = uint(f);
+    return vec3(uvec3(v, v >> 8, v >> 16) & 0xFFu) / 255.0 * 2.0 - 1.0;
+}
+
+// Merges a previous-frame reservoir, re-evaluating its light at this pixel. As RTXDI does,
+// reservoirs of a different surface are rejected (normal, or distance from the previous
+// camera off by more than 10%): their lights are no fair candidates here, and merging
+// them darkened and brightened edges and corners.
 void mergeReservoir(inout Reservoir r, ivec2 q, vec3 pos, vec3 n) {
     vec4 pr = imageLoad(reservoirPrev, q);
     int li = floatBitsToInt(pr.x);
     float m = min(pr.z, RESERVOIR_M_CAP);
     if (li < 0 || m <= 0.0 || !(pr.y > 0.0)) return;
+    if (dot(decodeNormal(pr.w), n) < 0.9) return;
+    float expected = length(pos - pc.camDelta.xyz);
+    if (abs(imageLoad(giPrev, q).a - expected) > 0.1 * expected + 0.1) return;
     float t = targetOf(li, pos, n);
     addCandidate(r, li, t, t * pr.y * m, m);
 }
@@ -228,13 +221,21 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
 
     float W = r.light >= 0 && r.target > 0.0 && r.M > 0.0 ? r.wsum / (r.M * r.target) : 0.0;
     if (W <= 0.0) {
-        imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), W, r.M, 0.0));
+        imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), W, r.M, encodeNormal(n)));
         return vec3(0.0);
     }
 
-    // A random point inside the emitter's block: soft shadows over the accumulated frames.
+    // A random point of the small emitter (0.16 blocks): defined shadows, a little soft.
     vec3 center = lightAt(r.light).xyz - pc.cam.xyz;
-    vec3 target = center + (vec3(rand(), rand(), rand()) - 0.5) * 0.6;
+    // The emitter's center: a jittered point gave soft shadows only after many frames of
+    // history, and noise whenever motion reset it.
+    vec3 target = center;
+    if (pc.restir.y > 0.0) {
+        // With NRD: a random point of the flame (RTX Remix's torch sphere, radius 0.08); the
+        // denoiser turns the noise into soft shadow edges.
+        float u = rand() * 2.0 - 1.0, phi = 6.2831853 * rand(), rr = 0.08 * pow(rand(), 1.0 / 3.0);
+        target += vec3(sqrt(1.0 - u * u) * vec2(cos(phi), sin(phi)), u) * rr;
+    }
     vec3 origin = pos + n * 0.02;
     vec3 dir = target - origin;
     float len = length(dir);
@@ -256,7 +257,7 @@ vec3 blockLight(vec3 pos, vec3 n, ivec2 p, ivec2 prevPixel, bool reuse) {
     // the neighbours. Reusing it (the target ignores visibility) made a still camera settle
     // darker than a moving one, whose reuse is invalidated.
     bool occluded = max(vis.r, max(vis.g, vis.b)) <= 0.0;
-    imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), occluded ? 0.0 : W, r.M, 0.0));
+    imageStore(reservoirCur, p, vec4(intBitsToFloat(r.light), occluded ? 0.0 : W, r.M, encodeNormal(n)));
     return vis * lightColor(r.light) * (r.target * W);
 }
 
@@ -275,12 +276,20 @@ vec3 indirect(vec3 pos, vec3 n, float skyLight) {
     if (any(isnan(dir)) || any(isnan(pos))) return vec3(0.0);
     payload.t = -1.0;
     traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, pos + n * 0.02, 0.0, dir, 128.0, 0);
-    if (payload.t < 0.0) return pc.sky.rgb * pc.camDelta.w * brightness(skyLight);
+    // Irradiance estimate (pi * radiance): the sky's, or the hit's albedo times a rough
+    // estimate of its own irradiance from its lightmap.
+    if (payload.t < 0.0) return 3.14159265 * atmosphere(dir, pc.light.y >= 0.0 ? pc.light.xyz : -pc.light.xyz,
+            pc.camDelta.w, pc.sky.rgb) * brightness(skyLight);
     giHitDistance = payload.t;
+    // The radiance the hit sends back: from the radiance cache (sharc.glsl, all bounces of
+    // light) when it knows the voxel, else a rough estimate from the hit's lightmap.
     vec3 hn = payload.normal;
-    float face = abs(hn.y) > 0.5 ? (hn.y > 0.0 ? 1.0 : 0.5) : (abs(hn.z) > 0.5 ? 0.8 : 0.6);
-    float light = max(brightness(payload.skyLight) * pc.camDelta.w, brightness(payload.blockLight));
-    return payload.albedo * light * face;
+    if (dot(hn, dir) > 0.0) hn = -hn;
+    vec4 cached = sharcQuery(pos + n * 0.02 + dir * payload.t, hn);
+    if (cached.w > 0.0) return 3.14159265 * cached.rgb;
+    vec3 e = vec3(3.14159265 * dot(pc.sky.rgb, vec3(0.2126, 0.7152, 0.0722)) * brightness(payload.skyLight))
+            + pc.ddgiFlags.yzw * 0.5 * payload.skyLight * payload.skyLight;
+    return pow(payload.albedo, vec3(2.2)) * e;
 }
 
 // Whether the surface belongs to a light-emitting block (its own faces, a torch's model):
@@ -364,22 +373,47 @@ void main() {
         pos = eye + dir * payload.t;
     }
 
-    // Sun/moon: only occlusion darkens (colored through stained glass); faces turned away
-    // keep vanilla's face shading.
+    // Sun/moon: only occlusion darkens; faces turned away keep vanilla's face shading. The
+    // occlusion is the transmittance itself: opaque blockers give 0, stained glass its color
+    // (dim and tinted, never brighter than the open sun).
+    // Physical rig: aux2.rgb is the direct light's visibility (the composite multiplies the
+    // irradiance and the cosine); sealed spaces (no sky light at all) see none.
     vec3 sunFactor = vec3(1.0);
     float ndl = dot(n, pc.light.xyz);
     float sky = hit ? payload.skyLight : 1.0;
-    if (fade > 0.0 && pc.light.w > 0.0 && ndl > 0.0 && sky > 0.01) {
-        vec3 lit = traceShadow(pos + n * (0.02 + 0.002 * dist), pc.light.xyz, 512.0, 0x0Fu);
-        // Occlusion darkens by the shadow strength; the hue of stained glass the light passed
-        // through applies in full (scaled by the strength it would be a faint tint).
-        float through = max(max(lit.r, lit.g), lit.b);
-        vec3 hue = through > 1e-3 ? lit / through : vec3(1.0);
-        sunFactor = (1.0 - pc.light.w * fade * (1.0 - through)) * mix(vec3(1.0), hue, fade);
+    float occluder = FP16_MAX;   // distance to the sun shadow's occluder (SIGMA penumbra)
+    if (sky <= 0.01 || pc.light.w <= 0.0) { sunFactor = vec3(0.0); occluder = 0.05; }
+    else if (fade > 0.0 && ndl > 0.0) {
+        // The sun disc is 0.53 degrees across: a jittered direction within it gives the
+        // penumbra; the light carries the atmosphere's color (ddgiFlags.yzw).
+        // With NRD the direction is jittered within the 0.53 degree sun disc and SIGMA turns
+        // the noise into soft penumbrae; without it the shadow stays hard (no noise).
+        float r = pc.restir.y > 0.0 ? sqrt(rand()) * SUN_ANGULAR_RADIUS : 0.0, a = 6.2831853 * rand();
+        vec3 t1 = normalize(abs(pc.light.y) < 0.99 ? cross(pc.light.xyz, vec3(0.0, 1.0, 0.0)) : cross(pc.light.xyz, vec3(1.0, 0.0, 0.0)));
+        vec3 sunDir = normalize(pc.light.xyz + (t1 * cos(a) + cross(pc.light.xyz, t1) * sin(a)) * r);
+        vec3 so = pos + n * (0.02 + 0.002 * dist);
+        sunFactor = traceShadow(so, sunDir, 512.0, 0x0Fu);
+        if (shadow.a <= 0.0 && pc.restir.y > 0.0) {
+            // Occluded: the distance to the occluder sizes SIGMA's penumbra.
+            payload.t = -1.0;
+            traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0x07, 0, 0, 0, so, 0.0, sunDir, 512.0, 0);
+            occluder = payload.t >= 0.0 ? payload.t : 0.05;
+        } else if (max(sunFactor.r, max(sunFactor.g, sunFactor.b)) < 0.999) {
+            // Light through stained glass: SIGMA keeps the color only behind an occluder;
+            // the pane's distance is not known (any-hit pass-through), a typical one is used.
+            occluder = 2.0;
+        }
+    } else if (ndl <= 0.0) {
+        occluder = 0.05;   // facing away: in its own shadow
     }
     // a: linear roughness of a terrain hit (NRD's IN_NORMAL_ROUGHNESS; the opaque reflection
     // pass skips pixels with a > 0.5); 0 without a hit (entities: reflections still trace).
     imageStore(normals, p, vec4(n * 0.5 + 0.5, hit ? 1.0 - payload.material.r : 0.0));
+    if (pc.restir.y > 0.0) {
+        imageStore(sigmaPenumbra, p, vec4(occluder >= FP16_MAX ? FP16_MAX
+                : min(occluder * SUN_ANGULAR_RADIUS * 0.5, 32768.0)));
+        imageStore(sigmaTranslucency, p, vec4(occluder >= FP16_MAX ? 1.0 : 0.0, clamp(sunFactor, 0.0, 1.0)));
+    }
     float distance = length(pos);
 
     if (!hit) {
@@ -419,7 +453,7 @@ void main() {
     vec3 rt = vec3(0.0);
     lightDistance = 0.0;
     if (fade > 0.0) {
-        rt = min(blockLight(pos, n, p, prevPixel, reuse), vec3(1.5));
+        rt = min(blockLight(pos, n, p, prevPixel, reuse), vec3(40.0));
     } else {
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
     }
@@ -472,7 +506,14 @@ void main() {
     vec3 giNew = vec3(0.0);
     vec3 giSample = vec3(0.0);
     giHitDistance = 0.0;
-    if (giFade > 0.0) {
+    if (giFade > 0.0 && pc.ddgiFlags.x > 0.0) {
+        // Irradiance: the probes hold it over pi (cosine-weighted mean radiance). Where they
+        // cannot be trusted (see ddgiConfidence) or do not reach, the open sky's irradiance
+        // scaled by vanilla's sky light takes over smoothly.
+        vec4 probe = ddgiIrradianceConf(pos, n, -dir);
+        vec3 fallback = 3.14159265 * pc.sky.rgb * brightness(skyLight);
+        giNew = mix(fallback, probe.rgb * 3.14159265, clamp(probe.a, 0.0, 1.0));
+    } else if (giFade > 0.0) {
         bool trace = nrd ? giCell(p) : frames <= 1.0 || ((p.x + p.y + int(pc.params.y)) & 1) == 0;
         if (trace) giSample = indirect(pos, n, skyLight);
         giNew = trace ? mix(giHist, giSample, 1.0 / max(frames * 0.5, 1.0)) : giHist;
@@ -485,7 +526,7 @@ void main() {
     imageStore(giCur, p, vec4(giNew, distance));
     imageStore(aux2, p, vec4(sunFactor, giFade));
 
-    float skyTerm = brightness(skyLight) * pc.camDelta.w;
+    float skyTerm = brightness(skyLight);
     // w > 0 marks a hit; a pixel past the shadow range keeps vanilla block light.
     imageStore(aux, p, vec4(emitter, brightness(blockLevel), skyTerm, max(fade, 1e-4)));
 }

@@ -1,0 +1,35 @@
+#version 460
+// SHaRC resolve (see sharc.glsl), one thread per voxel: blends this frame's samples into the
+// cached radiance and clears the sums; voxels without samples for STALE_FRAMES are evicted.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer SharcKeys { uint sharcKeys[]; };
+layout(set = 0, binding = 1) buffer SharcVoxels { vec4 sharcVoxels[]; };
+layout(set = 0, binding = 2) buffer SharcAccum { uvec4 sharcAccum[]; };
+
+const float SHARC_SCALE = 4096.0;
+// Sample count the history holds at most, and the slowest response in frames: a voxel seen
+// by few paths still follows a change of light within about a second.
+const float MAX_SAMPLES = 256.0, MAX_FRAMES = 32.0;
+const uint STALE_FRAMES = 120u;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(sharcKeys.length()) || sharcKeys[i] == 0u) return;
+    uvec4 a = sharcAccum[i];
+    uint count = a.w & 0xFFFFu, age = a.w >> 16;
+    vec4 v = sharcVoxels[i];
+    if (count > 0u) {
+        vec3 mean = vec3(a.xyz) / (SHARC_SCALE * float(count));
+        float n = min(v.w, MAX_SAMPLES);
+        float alpha = max(float(count) / (n + float(count)), 1.0 / MAX_FRAMES);
+        sharcVoxels[i] = vec4(mix(v.rgb, mean, alpha), min(n + float(count), MAX_SAMPLES));
+        sharcAccum[i] = uvec4(0u);
+    } else if (age + 1u > STALE_FRAMES) {
+        sharcKeys[i] = 0u;
+        sharcVoxels[i] = vec4(0.0);
+        sharcAccum[i] = uvec4(0u);
+    } else {
+        sharcAccum[i] = uvec4(0u, 0u, 0u, (age + 1u) << 16);
+    }
+}

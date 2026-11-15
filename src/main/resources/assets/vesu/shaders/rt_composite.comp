@@ -1,12 +1,19 @@
 #version 450
-// T8: applies the RT lighting from lighting.rgen to the scene color. The accumulated block
-// light is filtered with an edge-aware 5x5 kernel (wider while the history is short), then
-// the pixel is relit: vanilla's light (sky + block) is replaced by the shadowed sun share
-// plus the ray-traced block light and a fraction of vanilla's block light as bounce, and the
-// indirect light as a correction of vanilla's sky ambient (occlusion darkens, bounces tint).
+#extension GL_GOOGLE_include_directive : require
+#include <rt/atmosphere.glsl>
+// T8: shades the scene from the RT lighting of lighting.rgen with the physical light rig of
+// NVIDIA's RTX Remix for Minecraft, in scene units (physical radiance times
+// RtLighting.SCENE_SCALE). Lit surfaces are Lambertian: their albedo (texture times biome
+// tint and vanilla's smooth-lighting occlusion, linearized) over pi times the irradiance of
+// the direct sun or moon (shadow-ray visibility, cosine), the indirect light (DDGI probes) and
+// the ray-traced block light (filtered with an edge-aware 5x5 kernel without NRD), plus
+// emission for light sources' own surfaces. The sky is the atmosphere model's radiance with
+// the sun disc. Vanilla-lit pixels (entities, terrain past the RT range) are converted to
+// scene units by the open sky's white level; the last 20% of the render distance fades into
+// the sky as Remix does. Output stays gamma-encoded (the post chain's convention).
 
 layout(set = 0, binding = 0) uniform sampler2D sceneDepth;
-layout(set = 0, binding = 1, rgba8) uniform image2D sceneColor;
+layout(set = 0, binding = 1, rgba16f) uniform image2D sceneColor;   // HDR (gamma-encoded, may exceed 1)
 layout(set = 0, binding = 2, rgba16f) uniform readonly image2D history;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D aux;
 layout(set = 0, binding = 4, rgba8) uniform readonly image2D normals;
@@ -15,16 +22,32 @@ layout(set = 0, binding = 6, rgba8) uniform readonly image2D aux2;     // rgb: s
 layout(set = 0, binding = 7, rgba16f) uniform readonly image2D blockDenoised;   // NRD outputs
 layout(set = 0, binding = 8, rgba16f) uniform readonly image2D giDenoised;
 layout(set = 0, binding = 9, rgba8) uniform readonly image2D albedo;   // texture * vertex tint
+layout(set = 0, binding = 10, rgba8) uniform readonly image2D sigmaShadow;   // NRD SIGMA output (with NRD)
 
 layout(push_constant) uniform Constants {
     mat4 invViewProj;   // jittered
-    vec4 params;        // x: block light strength, y: bounce share, z: debug view (1: block, 2: GI), w: GI strength
-    vec4 flags;         // x: NRD outputs replace the own filter
+    vec4 params;        // x: block light strength, z: debug view (1: block, 2: GI), w: indirect light strength
+    vec4 flags;         // x: NRD outputs replace the own filter, y: the indirect light comes from DDGI (smooth, used as is)
+    vec4 sun;           // xyz: towards the sun, w: sky source radiance (atmosphere.glsl)
+    vec4 direct;        // rgb: irradiance of the direct light (sun by day, moon at night)
+    vec4 lightDir;      // xyz: towards the direct light, w: render distance (blocks)
+    vec4 skyMean;       // rgb: mean upper sky radiance, w: vanilla white -> scene units
+    vec4 clouds;        // xz: camera in the cloud pattern (blocks), y: layer bottom - camera, w: 1 on
+    vec4 fog;           // rgb: vanilla's fog color (display encoded), w: fog start
+    vec4 fogEnd;        // x: fog end
 } pc;
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
-const float AMBIENT = 0.03;
+const float PI = 3.14159265;
+// Emission of light sources' own surfaces: RTX Remix's terrain emission (100 times the
+// texture color), in scene units, on the texture's bright texels (flames, lamp glass).
+const float EMISSION = 10.0;
+
+vec3 toLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 toScene(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+
+#include <rt/sky.glsl>
 
 vec3 unproject(ivec2 p, float depth, vec2 size) {
     vec2 uv = (vec2(p) + 0.5) / size;
@@ -38,29 +61,55 @@ void main() {
     if (any(greaterThanEqual(p, size))) return;
 
     vec4 a = imageLoad(aux, p);
-    if (a.w < 0.0) return;
     vec4 color = imageLoad(sceneColor, p);
+    float depth = texelFetch(sceneDepth, p, 0).r;
+    vec3 pos = unproject(p, depth, vec2(size));
+    vec3 viewDir = normalize(pos);
+    // Reverse-Z: the far plane is depth 0 (no shader packs with RT).
+    if (depth <= 0.0) {
+        vec4 cl = traceClouds(viewDir, 1e9);
+        imageStore(sceneColor, p, vec4(toScene(mix(skyRadiance(viewDir), cl.rgb, cl.a)), color.a));
+        return;
+    }
+    float dist = length(pos);
+    float range = pc.lightDir.w;
+    // Past 60-75% of the render distance (vanilla's fog band) the terrain fades into the sky.
+    float skyFade = smoothstep(0.6 * range, 0.75 * range, dist);
+    // Vanilla-lit color without vanilla's terrain fog (linear, radial), in scene units.
+    float vf = clamp((dist - pc.fog.w) / max(pc.fogEnd.x - pc.fog.w, 1.0), 0.0, 0.95);
+    vec3 vanilla = toLinear(max((color.rgb - pc.fog.rgb * vf) / (1.0 - vf), vec3(0.0))) * pc.skyMean.w;
     vec4 a2 = imageLoad(aux2, p);
-    if (a.x > 0.5) {
-        // A light source's own surface: fully lit in its own colors (vanilla leaves blocks
-        // that glow only for RT, like redstone, dark).
-        // Faded with the RT range like the rest: no hard edge against vanilla's emitters.
-        vec4 c = imageLoad(sceneColor, p);
-        imageStore(sceneColor, p, vec4(mix(c.rgb, max(c.rgb, imageLoad(albedo, p).rgb), a.w), c.a));
+    // Share of the open-sky white level that is direct light (the sun's shadows on vanilla-lit pixels).
+    float directLum = dot(pc.direct.rgb, vec3(0.2126, 0.7152, 0.0722)) * 0.5 / PI;
+    float directShare = directLum / max(directLum + dot(pc.skyMean.rgb, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
+
+    if (a.w < 0.0) {
+        // Past the RT range: vanilla's color in scene units.
+        imageStore(sceneColor, p, vec4(toScene(mix(vanilla, skyRadiance(viewDir), skyFade)), color.a));
         return;
     }
     if (a.w == 0.0) {
-        // No primary hit (entities): sun shadows only.
-        imageStore(sceneColor, p, vec4(color.rgb * a2.rgb, color.a));
+        // No primary hit (entities): vanilla's shading, shadowed from the direct light.
+        float vis = dot(a2.rgb, vec3(0.3333));
+        vec3 c = vanilla * mix(1.0 - directShare, 1.0, vis);
+        imageStore(sceneColor, p, vec4(toScene(mix(c, skyRadiance(viewDir), skyFade)), color.a));
+        return;
+    }
+
+    vec3 n = imageLoad(normals, p).xyz * 2.0 - 1.0;
+    vec3 albedoSrgb = imageLoad(albedo, p).rgb;
+    vec3 alb = toLinear(albedoSrgb);
+    if (a.x > 0.5) {
+        // A light source's own surface: emission on its bright texels, the rest lit as usual.
+        float mask = smoothstep(0.7, 0.95, max(albedoSrgb.r, max(albedoSrgb.g, albedoSrgb.b)));
+        vec3 lit = alb * EMISSION * mask + alb / PI * pc.skyMean.rgb * PI;
+        imageStore(sceneColor, p, vec4(toScene(mix(vanilla, lit, a.w)), color.a));
         return;
     }
 
     bool nrd = pc.flags.x > 0.0;
     // With NRD the own history is a 1x1 placeholder (RtLightingPass): not read.
     vec4 h = nrd ? vec4(0.0, 0.0, 0.0, 1.0) : imageLoad(history, p);
-    vec3 n = imageLoad(normals, p).xyz * 2.0 - 1.0;
-    vec3 pos = unproject(p, texelFetch(sceneDepth, p, 0).r, vec2(size));
-    float dist = length(pos);
     int stride = h.a < 6.0 ? 3 : h.a < 16.0 ? 2 : 1;
 
     vec3 sum = vec3(0.0);
@@ -99,34 +148,32 @@ void main() {
         rt = max(imageLoad(blockDenoised, p).rgb, vec3(0.0));
         indirect = max(imageLoad(giDenoised, p).rgb, vec3(0.0));
     }
+    if (pc.flags.y > 0.0) indirect = imageLoad(gi, p).rgb;
 
-    vec3 sunFactor = a2.rgb;
-    float giFade = a2.a, vanillaBlock = a.y, skyTerm = a.z, fade = a.w;
-    // Several emitters add up where vanilla takes the brightest: the cap keeps lit areas
-    // near vanilla's level while shadows, falloff and glass tint come from the rays.
-    // The bounce share follows the traced light's hue (light through colored glass stays colored).
-    float rtMax = max(max(rt.r, rt.g), rt.b);
-    vec3 hue = rtMax > 0.02 ? rt / rtMax : vec3(1.0);
-    vec3 traced = 1.3 * rt + pc.params.y * vanillaBlock * hue;
-    vec3 block = mix(vec3(vanillaBlock), traced, pc.params.x * fade);
-    // Open ground under the sky gathers about skyTerm: the difference is occlusion or bounce.
-    vec3 giDelta = pc.params.w * giFade * (indirect - vec3(skyTerm));
-    vec3 lightNew = AMBIENT + skyTerm * sunFactor + block + giDelta;
-    float lightOld = AMBIENT + skyTerm + vanillaBlock;
-    vec3 ratio = lightNew / lightOld;
+    float giFade = a2.a, skyTerm = a.z, fade = a.w;
     if (pc.params.z > 1.5) {
-        imageStore(sceneColor, p, vec4(indirect, color.a));
+        imageStore(sceneColor, p, vec4(toScene(indirect), color.a));
         return;
     }
     if (pc.params.z > 0.0) {
-        imageStore(sceneColor, p, vec4(rt, color.a));
+        imageStore(sceneColor, p, vec4(toScene(rt), color.a));
         return;
     }
-    // Relighting scales vanilla's color (keeping its fog and shading). Where vanilla's light is
-    // (near) black that cannot add light - a fresh emitter in a chunk vanilla has not
-    // relit, light around corners - so dark pixels are lit from their albedo instead.
-    vec3 relit = color.rgb * clamp(ratio, vec3(0.0), vec3(2.0));
-    vec3 fromAlbedo = imageLoad(albedo, p).rgb * clamp(lightNew, vec3(0.0), vec3(1.0));
-    float dark = (1.0 - smoothstep(0.08, 0.3, lightOld)) * fade;
-    imageStore(sceneColor, p, vec4(mix(relit, max(relit, fromAlbedo), dark), color.a));
+    // Irradiance: direct light (visibility from the shadow ray, Lambert's cosine), indirect
+    // light (the open sky's where no probe reaches), ray-traced block light.
+    vec3 skyIrradiance = PI * pc.skyMean.rgb * skyTerm;
+    // Sun visibility: SIGMA's denoised soft shadow with NRD (unpacked: squared; colored part
+    // where the light passed glass), the raw shadow ray otherwise.
+    vec3 vis = a2.rgb;
+    if (nrd) {
+        vec4 sh = imageLoad(sigmaShadow, p);
+        sh *= sh;
+        vis = mix(sh.yzw, vec3(1.0), sh.x);
+    }
+    vec3 e = pc.direct.rgb * vis * max(dot(n, pc.lightDir.xyz), 0.0)
+            + mix(skyIrradiance, indirect, giFade * min(pc.params.w, 1.0))
+            + rt * pc.params.x;
+    vec3 lit = alb / PI * e;
+    lit = mix(vanilla, lit, fade);
+    imageStore(sceneColor, p, vec4(toScene(mix(lit, skyRadiance(viewDir), skyFade)), color.a));
 }
