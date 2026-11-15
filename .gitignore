@@ -3,25 +3,24 @@ build/
 .gradle/
 out/
 
-# Run directory: keep configs/scripts that matter to the autotest, drop game state
-run/client/logs/
-run/client/crash-reports/
-run/client/versions/
-run/client/cache/
-run/client/region/
-run/client/DIM-1/
-run/client/DIM1/
-run/client/stats/
-run/client/advancements/
-run/client/optionsof.txt
-run/client/usercache.json
-run/client/usernamecache.json
-run/client/*.png
-run/client/*.log
-run/client/screenshots/
-run/server/
-run/*/saves/
-run/*/options.txt
+# Run directory: whitelist. Only the configs the autotest relies on are kept;
+# game state, logs, captures and debug dumps stay local. A new config that should
+# be shared needs its own "!" line below.
+run/*
+!run/client/
+run/client/*
+!run/client/config/
+run/client/config/*
+!run/client/config/catalogue.cfg
+!run/client/config/cleanroom_mod_list_favourites.txt
+!run/client/config/forge.cfg
+!run/client/config/forgeChunkLoading.cfg
+!run/client/config/forge_early.cfg
+!run/client/config/kirino_engine.cfg
+!run/client/config/vesu_settings.json
+!run/client/config/cleanroom/
+run/client/config/cleanroom/*
+!run/client/config/cleanroom/compatibility.cfg
 
 # IDE
 .idea/
@@ -32,10 +31,3 @@ run/*/options.txt
 AGENTS.md
 AUDIT.md
 AUDIT-drafts/
-
-run/client/.mixin.out/
-run/*/*.png
-run/client/vm_mvp_dump.txt
-run/client/config/vesu/
-run/client/config/cleanroom_load_timings.dat
-run/client/config/splash.properties
