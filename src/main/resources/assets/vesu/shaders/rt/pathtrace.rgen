@@ -490,6 +490,8 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
     vec4 material = payload.material;
     float skyLight = payload.skyLight, blockLevel = payload.blockLight;
     Surface s = surfaceOf(albedo, material, n);
+    // LabPBR blue 65-255: subsurface amount (RTX Remix for Minecraft's LabPBRConverter.sssIntensity).
+    float sss = material.b >= 65.0 / 255.0 ? (material.b * 255.0 - 65.0) / 190.0 : 0.0;
     float nv = max(dot(n, v), 1e-4);
     g = Guide(n, s.rough, s.diffuse, envBrdf(s.f0, s.rough, nv));
 
@@ -505,6 +507,12 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
             // Plants: the shadow ray leaves their own tuft first.
             vec3 vis = traceShadow(thin ? hitPos + l * 0.5 : hitPos + n * (0.02 + 0.002 * dist), l, 512.0, 0x0Fu);
             radiance += pc.ddgiFlags.yzw * vis * evalBrdf(s, v, l);
+        } else if (sss > 0.0) {
+            // Thin translucent surfaces (leaves): RTX Remix's thin-opaque subsurface, light passing
+            // through from behind as a diffuse transmission lobe tinted by the albedo (the mod's
+            // single-scattering fallback), its strength the LabPBR subsurface amount.
+            vec3 vis = traceShadow(hitPos - payload.normal * (0.02 + 0.002 * dist), l, 512.0, 0x0Fu);
+            radiance += pc.ddgiFlags.yzw * vis * s.diffuse * (sss * -dot(n, l) / PI);
         }
     }
 
