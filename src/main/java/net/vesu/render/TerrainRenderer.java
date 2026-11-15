@@ -364,6 +364,7 @@ public class TerrainRenderer {
             net.vesu.vulkan.Drawer.enterTranslucent();
             // The lighting ran on entering the layer: path-traced water and glass replace the raster ones.
             VRenderSystem.ptTranslucentRange = VRenderSystem.pathTracedRange();
+            VRenderSystem.translucentScale = VRenderSystem.rtVanillaScale();
         }
         currentLayer = layer;
         logStats();
@@ -433,6 +434,7 @@ public class TerrainRenderer {
         // every frame (renderChunkLayer is always invoked for the translucent layer).
         if (layer == BlockRenderLayer.TRANSLUCENT) {
             VRenderSystem.ptTranslucentRange = 0.0f;
+            VRenderSystem.translucentScale = 1.0f;
             EntityRenderer.flushWeather();
         }
     }

@@ -30,17 +30,26 @@ final class PostProcess {
     /** Exposure bias. */
     private static final float EXPOSURE_BIAS = 1.0f;
     /**
-     * Bloom: by day only the hottest emitters (pre-tonemap radiance 250, broad and faint: 0.1),
-     * at night every emitter (threshold 1, intensity 1.5); blended with the daylight.
+     * Bloom, its threshold in exposed units (after auto-exposure, 1 = display white): by day only
+     * what is far brighter than white (the sun, emitters in shade; broad and faint like Remix's
+     * 0.1), at night every emitter above white (Remix's threshold 1, intensity lowered from 1.5:
+     * ours adds to the full image, not to a halo layer); blended with the daylight. Thresholds in
+     * scene radiance made a bright evening sky bloom as a whole.
      */
-    private static final float BLOOM_THRESHOLD_DAY = 25.0f, BLOOM_THRESHOLD_NIGHT = 0.1f, BLOOM_KNEE = 0.5f;
-    private static final float BLOOM_DAY = 0.1f, BLOOM_NIGHT = 1.5f;
+    private static final float BLOOM_THRESHOLD_DAY = 6.0f, BLOOM_THRESHOLD_NIGHT = 1.5f, BLOOM_KNEE = 0.5f;
+    private static final float BLOOM_DAY = 0.08f, BLOOM_NIGHT = 0.35f;
     /**
      * Auto-exposure: key value and a 4 EV window (log2 of the exposure), whose bottom rises 2 EV
      * at dusk and night: a bright evening sky does not expose the scene down (Remix's dusk and
      * night profiles); fast adaptation.
      */
     private static final float KEY = 0.18f, EV_MIN_DAY = -2.0f, EV_MIN_NIGHT = 0.0f, EV_MAX = 2.0f, ADAPT_SPEED = 3.0f;
+    /**
+     * Night: moonlight is 500 times weaker than sunlight, 7-8 EV under the day key. The window
+     * reaches up to +6.5 EV, and the key drops (0.05), so the night reads as moonlit dark
+     * rather than as a dim day; caves under the sky follow the same limits.
+     */
+    private static final float EV_MAX_NIGHT = 6.5f, KEY_NIGHT = 0.05f;
     /** Local tonemapping: shadows 1.4, highlights 2.5. */
     private static final float LOCAL_SHADOWS = 1.4f, LOCAL_HIGHLIGHTS = 2.5f, LOCAL_STRENGTH = 1.0f;
 
@@ -98,12 +107,15 @@ final class PostProcess {
                 (float) Math.log(BLOOM_THRESHOLD_DAY), daylight));
         float bloom = lerp(BLOOM_NIGHT, BLOOM_DAY, daylight);
         float evMin = lerp(EV_MIN_NIGHT, EV_MIN_DAY, daylight);
+        float evMax = lerp(EV_MAX_NIGHT, EV_MAX, daylight);
+        float key = (float) Math.exp(lerp((float) Math.log(KEY_NIGHT), (float) Math.log(KEY), daylight));
         // Downsample chain.
         down.bind(cmd);
         for (int i = 0; i < LEVELS; i++) {
             long set = downSets[slot][i];
             writeStorage(set, 0, i == 0 ? scene.colorView() : levels[i - 1].view, stack);
             writeStorage(set, 1, levels[i].view, stack);
+            writeStorage(set, 2, exposure.view, stack);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, down.layout(), 0, stack.longs(set), null);
             ByteBuffer pc = stack.calloc(16);
             pc.putFloat(0, i == 0 ? 1.0f : 0.0f).putFloat(4, bloomThreshold).putFloat(8, BLOOM_KNEE * bloomThreshold);
@@ -122,7 +134,7 @@ final class PostProcess {
         expo.bind(cmd);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, expo.layout(), 0, stack.longs(es), null);
         ByteBuffer pe = stack.calloc(32);
-        pe.putFloat(0, KEY).putFloat(4, evMin).putFloat(8, EV_MAX)
+        pe.putFloat(0, key).putFloat(4, evMin).putFloat(8, evMax)
                 .putFloat(12, 1.0f - (float) Math.exp(-dt * ADAPT_SPEED)).putFloat(16, resetExposure ? 1.0f : 0.0f);
         vkCmdPushConstants(cmd, expo.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pe);
         expo.dispatch(cmd, 1, 1, 1);
@@ -181,13 +193,13 @@ final class PostProcess {
     private static void prepare() {
         if (down != null) return;
         int s = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, c = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        downLayout = layout(new int[]{s, s});
+        downLayout = layout(new int[]{s, s, s});
         expoLayout = layout(new int[]{s, s});
         toneLayout = layout(new int[]{s, c, c, c, c, c, s});
         try (MemoryStack stack = stackPush()) {
             int sets = SLOTS * (LEVELS + 2);
             VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
-            sizes.get(0).type(s).descriptorCount(SLOTS * (LEVELS * 2 + 2 + 2));
+            sizes.get(0).type(s).descriptorCount(SLOTS * (LEVELS * 3 + 2 + 2));
             sizes.get(1).type(c).descriptorCount(SLOTS * 5);
             LongBuffer p = stack.mallocLong(1);
             RtPipeline.check(vkCreateDescriptorPool(Vulkan.getDevice(), VkDescriptorPoolCreateInfo.calloc(stack)

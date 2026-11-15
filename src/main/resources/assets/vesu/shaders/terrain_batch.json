@@ -24,7 +24,8 @@
                 { "name": "AlphaRef", "type": "float", "count": 1 },
                 { "name": "LodEdgeStart", "type": "float", "count": 1 },
                 { "name": "LodEdgeEnd", "type": "float", "count": 1 },
-                { "name": "PtTranslucentRange", "type": "float", "count": 1 }
+                { "name": "PtTranslucentRange", "type": "float", "count": 1 },
+                { "name": "TranslucentScale", "type": "float", "count": 1 }
             ]
         }
     ],

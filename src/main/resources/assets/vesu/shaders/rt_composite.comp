@@ -30,7 +30,7 @@ layout(push_constant) uniform Constants {
     vec4 flags;         // x: NRD outputs replace the own filter, y: the indirect light comes from DDGI (smooth, used as is)
     vec4 sun;           // xyz: towards the sun, w: sky source radiance (atmosphere.glsl)
     vec4 direct;        // rgb: irradiance of the direct light (sun by day, moon at night)
-    vec4 lightDir;      // xyz: towards the direct light, w: render distance (blocks)
+    vec4 lightDir;      // xyz: towards the direct light, w: vanilla's terrain fog end (blocks, LOD-scaled)
     vec4 skyMean;       // rgb: mean upper sky radiance, w: vanilla white -> scene units
     vec4 clouds;        // xz: camera in the cloud pattern (blocks), y: layer bottom - camera, w: 1 on
     vec4 fog;           // rgb: vanilla's fog color (display encoded), w: fog start

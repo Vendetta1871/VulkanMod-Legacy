@@ -437,8 +437,13 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
     radiance += min(blockLight(s, v, hitPos, p, prevPixel, reuse), vec3(40.0)) * pc.restir.w;
 
     // One bounce, sampled from the BRDF: specular with the probability of its share of the
-    // reflected energy, else cosine-weighted diffuse.
-    if (pc.sky.w > 0.0 && horizontal < pc.sky.w) {
+    // reflected energy, else cosine-weighted diffuse. Past the indirect light's range (a dithered
+    // share over its last 24 blocks) the open sky's light by vanilla's sky light stands in: on an
+    // overcast day it is nearly all the light there is.
+    float giFade = pc.sky.w > 0.0 ? smoothstep(0.0, 1.0, (pc.sky.w - horizontal) / 24.0) : 0.0;
+    if (rand() >= giFade) {
+        radiance += s.diffuse * pc.sky.rgb * brightness(skyLight) * pc.ddgiFlags.x;
+    } else {
         vec3 fv = fresnel(s.f0, nv);
         float ws = luminance(fv), wd = luminance(s.diffuse * (1.0 - fv));
         float pSpec = ws + wd > 0.0 ? clamp(ws / (ws + wd), 0.0, 1.0) : 0.0;

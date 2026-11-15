@@ -261,6 +261,19 @@ final class RtLightingPass {
         return ptThisFrame && tracedFrame == FrameTargets.recordingId() ? tracedRange : 0.0f;
     }
 
+    /**
+     * Vanilla's display white in scene units, gamma encoded (the conversion rt_composite and
+     * rt_pt_resolve apply to vanilla-lit pixels), when this frame's lighting relit the scene; else 1.
+     */
+    static float vanillaScale() {
+        if (tracedFrame != FrameTargets.recordingId() || !RtLighting.hasSky()) return 1.0f;
+        float[] sun = RtLighting.sun();
+        float[] direct = RtLighting.directLight(sun), skyMean = RtLighting.skyMean(sun);
+        float physWhite = (0.2126f * direct[0] + 0.7152f * direct[1] + 0.0722f * direct[2]) * 0.5f / (float) Math.PI
+                + (0.2126f * skyMean[0] + 0.7152f * skyMean[1] + 0.0722f * skyMean[2]);
+        return (float) Math.pow(physWhite, 1.0 / 2.2) / RtLighting.vanillaWhite(sun);
+    }
+
     /** Whether the next frames will be path traced (jitter for RR; checked before the scene). */
     static boolean pathTracingWanted() {
         return PT_ALLOWED && Rr2Denoiser.available();
@@ -419,13 +432,18 @@ final class RtLightingPass {
                 .putFloat(76, gi).putFloat(80, nrd ? 1.0f : 0.0f).putFloat(84, ddgi ? 1.0f : 0.0f);
         p.putFloat(96, sun[0]).putFloat(100, sun[1]).putFloat(104, sun[2]).putFloat(108, skySource);
         p.putFloat(112, direct[0]).putFloat(116, direct[1]).putFloat(120, direct[2]);
-        p.putFloat(128, sun[0] * s).putFloat(132, sun[1] * s).putFloat(136, sun[2] * s)
-                .putFloat(140, net.minecraft.client.Minecraft.getMinecraft().gameSettings.renderDistanceChunks * 16.0f);
+        // The fade into the sky follows vanilla's terrain fog, pushed out with the LOD terrain
+        // (VRenderSystem.terrainFog): with distant terrain on it starts past the LODs, not at 60%
+        // of the vanilla render distance, where it hid them behind the sky below the horizon.
+        float far = VRenderSystem.terrainFog(
+                net.minecraft.client.Minecraft.getMinecraft().gameSettings.renderDistanceChunks * 16.0f)[1];
+        p.putFloat(128, sun[0] * s).putFloat(132, sun[1] * s).putFloat(136, sun[2] * s).putFloat(140, far);
         // Vanilla-lit pixels (entities, terrain past the RT range) to scene units: the physical
         // radiance of a white surface under the open sky against vanilla's daylight white.
         float physWhite = (0.2126f * direct[0] + 0.7152f * direct[1] + 0.0722f * direct[2]) * 0.5f / (float) Math.PI
                 + (0.2126f * skyMean[0] + 0.7152f * skyMean[1] + 0.0722f * skyMean[2]);
-        float vanillaWhite = sky ? 0.2f + 0.8f * sun[3] : 1.0f;
+        // Vanilla's white is display encoded: linearized like the pixels it converts.
+        float vanillaWhite = sky ? (float) Math.pow(RtLighting.vanillaWhite(sun), 2.2) : 1.0f;
         p.putFloat(144, skyMean[0]).putFloat(148, skyMean[1]).putFloat(152, skyMean[2])
                 .putFloat(156, sky ? physWhite / vanillaWhite : 1.0f);
         // Clouds (traced in the composite): the camera in the cloud pattern's space (vanilla's

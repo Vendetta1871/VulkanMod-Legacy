@@ -48,6 +48,17 @@ vec3 tent(sampler2D level, vec2 uv) {
     return c / 16.0;
 }
 
+// The tent of the log luminance (alpha).
+float tentA(sampler2D level, vec2 uv) {
+    vec2 t = 1.0 / vec2(textureSize(level, 0));
+    float c = textureLod(level, uv, 0.0).a * 4.0;
+    c += (textureLod(level, uv + vec2(t.x, 0.0), 0.0).a + textureLod(level, uv - vec2(t.x, 0.0), 0.0).a
+            + textureLod(level, uv + vec2(0.0, t.y), 0.0).a + textureLod(level, uv - vec2(0.0, t.y), 0.0).a) * 2.0;
+    c += textureLod(level, uv + t, 0.0).a + textureLod(level, uv - t, 0.0).a
+            + textureLod(level, uv + vec2(t.x, -t.y), 0.0).a + textureLod(level, uv + vec2(-t.x, t.y), 0.0).a;
+    return c / 16.0;
+}
+
 void main() {
     ivec2 size = imageSize(sceneColor);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -67,7 +78,13 @@ void main() {
     // the frame's mean (post_exposure). Darker neighbourhoods get up to "shadows" times more
     // exposure, brighter ones down to 1 / "highlights".
     vec2 ex = imageLoad(exposure, ivec2(0)).xy;
-    float localLog = textureLod(level4, uv, 0.0).a;
+    // Tent-filtered and spread over three levels: one bilinear level drew its texel grid as
+    // blocks of different exposure around bright areas (the sun at sunset).
+    float localLog = 0.25 * tentA(level3, uv) + 0.4 * tentA(level4, uv) + 0.35 * tentA(level5, uv);
+    // Within 1 EV of the pixel's own luminance: a bright pixel next to dark terrain (the sky over
+    // a silhouette) is not lifted with it, a dark one next to the sun not crushed - no halos.
+    float pixelLog = log2(luminance(lin) + 1e-4);
+    localLog = clamp(localLog, pixelLog - 1.0, pixelLog + 1.0);
     float gain = exp2(clamp(ex.y - localLog, -log2(pc.params.w), log2(pc.params.z)) * pc.extra.x);
 
     // Saturation 0.8 before the curve: vanilla textures times biome tints are far more

@@ -7,9 +7,11 @@
 
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D src;
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D dst;
+// The previous frame's adapted exposure (post_exposure.comp): the bloom threshold is in exposed units.
+layout(set = 0, binding = 2, rg32f) uniform readonly image2D exposure;
 
 layout(push_constant) uniform Constants {
-    vec4 params;   // x: 1 for level 0 (src is the scene), y: bloom threshold (linear), z: knee
+    vec4 params;   // x: 1 for level 0 (src is the scene), y: bloom threshold (exposed, 1 = white), z: knee
 } pc;
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -25,13 +27,15 @@ void main() {
     const float W[4] = float[4](1.0, 3.0, 3.0, 1.0);
     vec4 sum = vec4(0.0);
     float n = 0.0;
+    float e = imageLoad(exposure, ivec2(0)).x;
+    e = e > 0.0 ? e : 1.0;   // the first frame: nothing adapted yet
     for (int j = 0; j < 4; j++) {
         for (int i = 0; i < 4; i++) {
             ivec2 q = clamp(p * 2 + ivec2(i - 1, j - 1), ivec2(0), ssize - 1);
             vec4 s = imageLoad(src, q);
             if (pc.params.x > 0.5) {
                 vec3 lin = pow(max(s.rgb, vec3(0.0)), vec3(2.2));
-                float l = luminance(lin);
+                float l = luminance(lin) * e;
                 // Soft-knee threshold: only light above it feeds the bloom.
                 float t = pc.params.y, k = pc.params.z;
                 float soft = clamp(l - t + k, 0.0, 2.0 * k);

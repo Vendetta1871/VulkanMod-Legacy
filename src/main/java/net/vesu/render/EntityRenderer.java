@@ -804,7 +804,9 @@ public class EntityRenderer {
             } else {
                 VRenderSystem.disableCull();
             }
-            VRenderSystem.setShaderColor(weatherTint[0], weatherTint[1], weatherTint[2], weatherTint[3]);
+            // Over the ray-traced HDR scene: vanilla white to scene units, like the translucent layer.
+            float k = VRenderSystem.rtVanillaScale();
+            VRenderSystem.setShaderColor(weatherTint[0] * k, weatherTint[1] * k, weatherTint[2] * k, weatherTint[3]);
             VRenderSystem.setShaderPipeline(particlePipeline);
             Drawer.currentBlendState = weatherBlend;
 

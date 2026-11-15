@@ -14,6 +14,8 @@ layout(binding = 1) uniform UniformBufferObject {
     float LodEdgeEnd;
     // Translucent layer only: range of the path-traced water and glass (pathtrace.rgen); 0: off.
     float PtTranslucentRange;
+    // Translucent layer over the ray-traced scene: vanilla white to scene units (gamma space); else 1.
+    float TranslucentScale;
 };
 
 layout(binding = 2) uniform sampler2D Sampler0;
@@ -84,5 +86,6 @@ void main() {
         color.rgb = mix(FogColor.rgb, color.rgb, f);
     }
 
+    color.rgb *= TranslucentScale;
     fragColor = color;
 }

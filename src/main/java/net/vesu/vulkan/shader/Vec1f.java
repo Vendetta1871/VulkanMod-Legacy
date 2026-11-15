@@ -30,6 +30,7 @@ public class Vec1f extends Field {
             case "LodEdgeStart" -> this.floatSet = VRenderSystem::getLodEdgeStart;
             case "LodEdgeEnd" -> this.floatSet = VRenderSystem::getLodEdgeEnd;
             case "PtTranslucentRange" -> this.floatSet = VRenderSystem::getPtTranslucentRange;
+            case "TranslucentScale" -> this.floatSet = VRenderSystem::getTranslucentScale;
             case "RedOverlay" -> this.floatSet = net.vesu.render.EntityRenderer::getRedOverlay;
         }
     }

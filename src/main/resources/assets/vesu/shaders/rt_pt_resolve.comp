@@ -23,7 +23,7 @@ layout(push_constant) uniform Constants {
     vec4 flags;         // y: 1 shows RR's input (debug), z: mode (0 before RR, 1 after), w: RR output row length (padded width)
     vec4 sun;           // xyz: towards the sun, w: sky source radiance (atmosphere.glsl)
     vec4 direct;        // rgb: irradiance of the direct light
-    vec4 lightDir;      // xyz: towards the direct light, w: render distance (blocks)
+    vec4 lightDir;      // xyz: towards the direct light, w: vanilla's terrain fog end (blocks, LOD-scaled)
     vec4 skyMean;       // rgb: mean upper sky radiance, w: vanilla white -> scene units
     vec4 clouds;        // xz: camera in the cloud pattern, y: layer bottom - camera, w: 1 on
     vec4 fog;           // rgb: vanilla's fog color (display encoded), w: fog start
@@ -85,7 +85,12 @@ void main() {
     if (depth > 0.0) {
         float range = pc.lightDir.w;
         float skyFade = smoothstep(0.6 * range, 0.75 * range, length(pos));
-        if (skyFade > 0.0) c = mix(c, skyRadiance(viewDir), skyFade);
+        if (skyFade > 0.0) {
+            // Into the sky as the sky pixels show it: with the clouds (at night a cloud-covered
+            // sky is far darker than the clear one, a bright rim otherwise outlines the terrain).
+            vec4 cl = traceClouds(viewDir, 1e9);
+            c = mix(c, mix(skyRadiance(viewDir), cl.rgb, cl.a), skyFade);
+        }
     }
     imageStore(sceneColor, p, vec4(toScene(c), color.a));
 }

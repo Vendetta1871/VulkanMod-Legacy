@@ -113,9 +113,17 @@ public class VRenderSystem {
      * last 24 blocks like the path tracer. 0: off. Set only while the translucent layer draws.
      */
     public static float ptTranslucentRange;
+    /**
+     * Gamma-space scale of the raster translucent layer drawn over the ray-traced HDR scene:
+     * vanilla's display white to scene units (rt_composite's vanilla conversion), 1 otherwise.
+     */
+    public static float translucentScale = 1.0f;
+    public static float getTranslucentScale() { return translucentScale; }
     public static float getPtTranslucentRange() { return ptTranslucentRange; }
     /** The path-traced range of the frame being recorded (RtLightingPass), 0 without path tracing. */
     public static float pathTracedRange() { return RtLightingPass.pathTracedRange(); }
+    /** Vanilla white in scene units, gamma encoded, while ray tracing relights the scene; else 1. */
+    public static float rtVanillaScale() { return RtLightingPass.vanillaScale(); }
     /**
      * Forward depth (a pack) with distant terrain through the pack's terrain programs: the
      * scene's perspective reaches {@link #lodFarPlane} as with reverse-Z.

@@ -188,6 +188,16 @@ final class RtLighting {
         static double len(double[] a) { return Math.sqrt(dot(a, a)); }
     }
 
+    /**
+     * Vanilla's sky light white of a fully lit surface (World.getSunBrightness): 0.2 at night up
+     * to 1 at noon, dimmed by rain and thunder (each 5/16). Divides the physical white level when
+     * vanilla-lit pixels convert to scene units.
+     */
+    static float vanillaWhite(float[] sun) {
+        float day = sun[3] * (1.0f - rainStrength() * 5.0f / 16.0f) * (1.0f - thunderStrength() * 5.0f / 16.0f);
+        return 0.2f + 0.8f * day;
+    }
+
     /** Rain and thunder strength 0..1 (overcast skies cast no sharp shadows). */
     static float overcast() {
         Minecraft mc = Minecraft.getMinecraft();
