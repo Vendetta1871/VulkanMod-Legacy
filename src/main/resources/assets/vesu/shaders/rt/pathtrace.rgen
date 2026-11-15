@@ -80,7 +80,13 @@ void storeRemod(uint px, vec3 m) {
     uint o = floatBitsToUint(rr[7]) + px * 3u;
     rr[o] = m.x; rr[o + 1u] = m.y; rr[o + 2u] = m.z;
 }
+// RTX Remix's guide preparation (prepare_ray_reconstruction.comp.slang, demodulateRoughness with
+// rtx.rayreconstruction.upscalerRoughnessDemodulationMultiplier 0.15 / Offset 1.5): the specular
+// albedo scaled down on rough surfaces, near-black diffuse albedo cleared (RR would read it as a
+// very brightly lit pixel).
 void storeGuides(uint px, float depth, vec2 mv, vec3 n, float rough, vec3 dalb, vec3 salb) {
+    salb *= 0.15 * pow(1.0 / (rough + 0.1), 1.5);
+    if (all(lessThan(dalb, vec3(0.5 / 255.0)))) dalb = vec3(0.0);
     rr[plane(1) + px] = depth;
     uint o = plane(2) + px * 2u;
     rr[o] = mv.x; rr[o + 1u] = mv.y;
