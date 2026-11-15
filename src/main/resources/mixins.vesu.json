@@ -62,6 +62,7 @@
     "render.GlStateManagerTexGenM",
     "render.GlStateManagerTextureM",
     "render.GameSettingsM",
+    "render.ScreenShotHelperM",
     "render.ParticleManagerM",
     "render.FramebufferM",
     "render.SimulationWorldM",
