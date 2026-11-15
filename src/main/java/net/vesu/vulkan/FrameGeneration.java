@@ -434,9 +434,10 @@ public final class FrameGeneration {
     private static int surfaceFormat(int vkFormat) {
         return switch (vkFormat) {
             case VK_FORMAT_B8G8R8A8_UNORM -> FORMAT_B8G8R8A8_UNORM;
+            // FfxApiSurfaceFormat (ffx_api_types.h): R8G8B8A8_SRGB 12, R10G10B10A2_UNORM 17.
             case VK_FORMAT_B8G8R8A8_SRGB -> 15;
-            case VK_FORMAT_R8G8B8A8_SRGB -> 11;
-            case VK_FORMAT_A2B10G10R10_UNORM_PACK32 -> 3;
+            case VK_FORMAT_R8G8B8A8_SRGB -> 12;
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32 -> 17;
             default -> FORMAT_R8G8B8A8_UNORM;
         };
     }
