@@ -92,6 +92,8 @@ public final class LodSession {
     // Coverage of the sections vanilla has built: (z * n + x) * 16 + y.
     private int[] cover = new int[70 * 70 * 16 / 32 + 2];
     private int coverX, coverZ, coverN;
+    /** Per cover column this frame: 0 not looked up, 1 chunk loaded, 2 missing or empty. */
+    private final byte[] coverColumn = new byte[70 * 70];
 
     LodSession(File dir, int dimension, boolean sky) {
         this.dir = dir;
@@ -906,12 +908,25 @@ public final class LodSession {
         java.util.List<?> infos = mc.renderGlobal == null ? null
                 : ((net.vesu.mixin.render.RenderGlobalAccessor) mc.renderGlobal).vesu$getRenderInfos();
         if (infos == null) return;
+        // A section compiled before its chunk arrived (the edge of the render distance) is
+        // compiled empty and draws nothing until its rebuild: it covers nothing yet.
+        java.util.Arrays.fill(coverColumn, 0, coverN * coverN, (byte) 0);
+        net.minecraft.client.multiplayer.WorldClient world = mc.world;
         for (int i = 0, n = infos.size(); i < n; i++) {
             RenderChunk rc = ((net.vesu.mixin.render.ContainerInfoAccessor) infos.get(i)).vesu$getRenderChunk();
-            if (rc == null || rc.getCompiledChunk() == CompiledChunk.DUMMY) continue;
+            if (rc == null) continue;
+            CompiledChunk compiled = rc.getCompiledChunk();
+            if (compiled == CompiledChunk.DUMMY || compiled.isEmpty() && rc.needsUpdate()) continue;
             BlockPos p = rc.getPosition();
             int gx = (p.getX() >> 4) - coverX, gz = (p.getZ() >> 4) - coverZ, gy = p.getY() >> 4;
             if (gx < 0 || gz < 0 || gx >= coverN || gz >= coverN || gy < 0 || gy > 15) continue;
+            int col = gz * coverN + gx;
+            if (coverColumn[col] == 0) {
+                net.minecraft.world.chunk.Chunk c = world == null ? null
+                        : world.getChunkProvider().getLoadedChunk(p.getX() >> 4, p.getZ() >> 4);
+                coverColumn[col] = (byte) (c != null && !c.isEmpty() ? 1 : 2);
+            }
+            if (coverColumn[col] != 1) continue;
             int bit = (gz * coverN + gx) * 16 + gy;
             cover[bit >> 5] |= 1 << (bit & 31);
         }
