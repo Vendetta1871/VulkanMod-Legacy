@@ -32,6 +32,7 @@ void main() {
         }
         payload.t = gl_HitTEXT;
         payload.normal = en;
+        payload.shading = en;
         payload.skyLight = float(face.y & 0xFFu) / 15.0;
         payload.blockLight = float((face.y >> 8) & 0xFFu) / 15.0;
         payload.tinted = 0.0;
@@ -52,6 +53,8 @@ void main() {
         lod = max(log2(payload.cone * gl_HitTEXT * 16.0 / slope), 0.0);
     }
     vec3 albedo = textureLod(blockAtlas, uv, lod).rgb * tint.rgb;
+    vec4 nmap = textureLod(normalAtlas, uv, lod);
+    albedo *= nmap.b;   // LabPBR ambient occlusion, into the albedo as RTX Remix for Minecraft bakes it
 
     // Degenerate (zero-area) triangles have no normal: face the ray instead. A NaN normal
     // would turn into NaN secondary rays, which software traversal can spin on.
@@ -69,7 +72,28 @@ void main() {
         float face = an.y > 0.5 ? (n.y > 0.0 ? 1.0 : 0.5) : (an.z > 0.5 ? 0.8 : 0.6);
         albedo = min(albedo / face, vec3(1.0));
     }
-    if (dot(n, gl_WorldRayDirectionEXT) > 0.0) n = -n;
+    // Shading normal from the normal map: tangent frame from the triangle's texture coordinates.
+    vec3 ns = n;
+    if (len2 > 1e-20 && (abs(nmap.r - 0.502) > 0.004 || abs(nmap.g - 0.502) > 0.004)) {
+        vec3 e1 = b.pos - a.pos, e2 = c.pos - a.pos;
+        vec2 d1 = b.uv - a.uv, d2 = c.uv - a.uv;
+        float det = d1.x * d2.y - d1.y * d2.x;
+        if (abs(det) > 1e-12) {
+            vec3 t = (e1 * d2.y - e2 * d1.y) / det;
+            vec3 bt = (e2 * d1.x - e1 * d2.x) / det;
+            t = normalize(t - n * dot(n, t));
+            bt = normalize(bt - n * dot(n, bt) - t * dot(t, bt));
+            vec2 xy = nmap.rg * 2.0 - 1.0;
+            vec3 m = normalize(t * xy.x + bt * xy.y + n * sqrt(max(1.0 - dot(xy, xy), 0.0)));
+            if (!any(isnan(m))) ns = m;
+        }
+    }
+    if (dot(n, gl_WorldRayDirectionEXT) > 0.0) {
+        n = -n;
+        ns = -ns;
+    }
+    // A shading normal facing away from the ray falls back to the geometric one.
+    if (dot(ns, gl_WorldRayDirectionEXT) > -0.02) ns = n;
 
     float sky = (float((a.light >> 16) & 0xFFFFu) * w.x + float((b.light >> 16) & 0xFFFFu) * w.y
             + float((c.light >> 16) & 0xFFFFu) * w.z) / 240.0;
@@ -79,6 +103,7 @@ void main() {
     payload.albedo = albedo;
     payload.t = gl_HitTEXT;
     payload.normal = n;
+    payload.shading = ns;
     payload.skyLight = clamp(sky, 0.0, 1.0);
     payload.blockLight = clamp(block, 0.0, 1.0);
     // Vertex colors carry face shading and smooth-lighting occlusion (grey) besides biome

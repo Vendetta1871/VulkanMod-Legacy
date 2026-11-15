@@ -26,7 +26,8 @@ import static org.lwjgl.vulkan.VK10.*;
  * 33-34 SIGMA inputs of the lighting pass (sun shadow penumbra, translucency),
  * 35-36 reflections for NRD (RtReflectionPass): radiance + hit distance, blend weights,
  * 37-39 radiance cache (RtSharc): voxel keys, voxels, this frame's sums,
- * 40 Ray Reconstruction's input planes (Rr2Denoiser, written by pathtrace.rgen).
+ * 40 Ray Reconstruction's input planes (Rr2Denoiser, written by pathtrace.rgen),
+ * 41 LabPBR normal atlas (RtMaterials.normalImage).
  * Bindings a pass does not use stay unwritten.
  */
 final class RtDescriptors {
@@ -92,6 +93,7 @@ final class RtDescriptors {
                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
                 {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, raygen},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, hits},
         };
         bindingCount = bindings.length;
         try (MemoryStack stack = stackPush()) {
@@ -164,6 +166,10 @@ final class RtDescriptors {
                 n = image(writes, n, set, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
                         // Without a material atlas every surface is plain (all-zero material).
                         (materials != null ? materials : net.vesu.vulkan.rt.RtMaterials.blank()).getTextureImageView(),
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
+                VulkanImage normalMaps = net.vesu.vulkan.rt.RtMaterials.normalImage();
+                n = image(writes, n, set, 41, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),
+                        (normalMaps != null ? normalMaps : net.vesu.vulkan.rt.RtMaterials.blankNormal()).getTextureImageView(),
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stack);
             }
             n = image(writes, n, set, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, ComputeSets.nearestClampSampler(),

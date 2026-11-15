@@ -33,6 +33,9 @@ layout(set = 0, binding = 2, scalar) readonly buffer InstanceData {
 layout(set = 0, binding = 3) uniform sampler2D blockAtlas;
 #ifdef RT_HIT
 layout(set = 0, binding = 16) uniform sampler2D materialAtlas;
+// LabPBR normal maps (RtMaterials.normalImage): RG tangent-space normal (DirectX: +Y along +v),
+// B ambient occlusion, A height.
+layout(set = 0, binding = 41) uniform sampler2D normalAtlas;
 #endif
 
 struct Payload {
@@ -45,6 +48,7 @@ struct Payload {
     vec4 material;    // LabPBR specular: smoothness, F0 (>= 230/255: metal), porosity, emission
     float backface;   // 1: the ray hit the back of a terrain face (DDGI probe relocation)
     float cone;       // in: spread angle per unit distance of the ray's pixel footprint (0: texture level 0)
+    vec3 shading;     // shading normal (LabPBR normal map; the geometric normal without one), faces like normal
 };
 
 // Shadow rays (payload location 1, hit group 1): rgb transmittance through stained glass

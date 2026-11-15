@@ -33,7 +33,7 @@ public final class RtMaterials {
     private static final byte DEFAULT_SMOOTHNESS = (byte) Math.round(255.0 * (1.0 - Math.sqrt(180.0 / 255.0)));
 
     private static boolean dirty = true;
-    private static VulkanImage image;
+    private static VulkanImage image, normalImage;
     private static VulkanImage builtFor;
 
     /** R11: sprite materials are gathered off the render thread, one build at a time. */
@@ -47,7 +47,8 @@ public final class RtMaterials {
     private static VulkanImage pendingFor;
 
     /** One sprite's material texels, tightly packed RGBA8. */
-    private record Rect(int x, int y, int w, int h, ByteBuffer pixels) {}
+    /** One sprite's material texels and its LabPBR normal texels ({@code _n}), tightly packed RGBA8. */
+    private record Rect(int x, int y, int w, int h, ByteBuffer pixels, ByteBuffer normals) {}
 
     private record Sprite(String name, int x, int y, int w, int h) {}
 
@@ -82,6 +83,15 @@ public final class RtMaterials {
         return builtFor == atlas ? image : null;
     }
 
+    /**
+     * The LabPBR normal atlas of the same build ({@code _n}: RG tangent-space normal, DirectX
+     * convention; B ambient occlusion; A height), or null while there is none. Sprites without a
+     * map hold a flat normal and no occlusion.
+     */
+    public static VulkanImage normalImage() {
+        return builtFor == TextureBridge.getAtlasImage() ? normalImage : null;
+    }
+
     /** Snapshots the sprite layout here, reads the textures on the worker. */
     private static void start(VulkanImage atlas) {
         dirty = false;
@@ -107,12 +117,10 @@ public final class RtMaterials {
         try {
             for (Sprite s : layout) {
                 ByteBuffer px = MemoryUtil.memCalloc(s.w * s.h * 4);
-                if (fromPack(mc, s.name, px, s.w, 0, 0, s.w, s.h)
-                        || fromDefaults(s.name, px, s.w, 0, 0, s.w, s.h)) {
-                    rects.add(new Rect(s.x, s.y, s.w, s.h, px));
-                } else {
-                    MemoryUtil.memFree(px);
-                }
+                ByteBuffer nx = MemoryUtil.memCalloc(s.w * s.h * 4);
+                if (!fromPack(mc, s.name, "_s", px, s.w, s.h)) fromDefaults(px, s.w, s.h);
+                if (!fromPack(mc, s.name, "_n", nx, s.w, s.h)) flatNormals(nx, s.w, s.h);
+                rects.add(new Rect(s.x, s.y, s.w, s.h, px, nx));
             }
         } catch (RuntimeException | LinkageError e) {
             freeAll(rects);
@@ -142,14 +150,23 @@ public final class RtMaterials {
         int w = atlas.getWidth(), h = atlas.getHeight();
         try {
             VulkanImage next = new VulkanImage(1, w, h, 4, false, true);
+            VulkanImage nextNormals = new VulkanImage(1, w, h, 4, false, true);
             next.beginTileBatch();
             next.clearInBatch();
             for (Rect r : rects) {
                 next.uploadSubTextureAsync(0, r.w, r.h, r.x, r.y, 4, 0, 0, r.w, r.pixels);
             }
             next.endTileBatch();
+            nextNormals.beginTileBatch();
+            nextNormals.clearInBatch();
+            for (Rect r : rects) {
+                nextNormals.uploadSubTextureAsync(0, r.w, r.h, r.x, r.y, 4, 0, 0, r.w, r.normals);
+            }
+            nextNormals.endTileBatch();
             if (image != null) image.free();
+            if (normalImage != null) normalImage.free();
             image = next;
+            normalImage = nextNormals;
             builtFor = atlas;
             Initializer.LOGGER.info("[rt] materials: {}x{}, {} sprites", w, h, rects.size());
         } catch (Exception | LinkageError e) {
@@ -174,22 +191,25 @@ public final class RtMaterials {
     }
 
     private static void freeAll(java.util.List<Rect> rects) {
-        for (Rect r : rects) MemoryUtil.memFree(r.pixels);
+        for (Rect r : rects) {
+            MemoryUtil.memFree(r.pixels);
+            MemoryUtil.memFree(r.normals);
+        }
     }
 
     /** Copies {@code <texture>_s.png} (nearest-scaled to the sprite, first animation frame). */
-    private static boolean fromPack(Minecraft mc, String iconName, ByteBuffer out, int stride,
-                                    int x0, int y0, int sw, int sh) {
+    /** Copies {@code <texture><suffix>.png} (nearest-scaled to the sprite, first animation frame). */
+    private static boolean fromPack(Minecraft mc, String iconName, String suffix, ByteBuffer out, int sw, int sh) {
         ResourceLocation name = new ResourceLocation(iconName);
-        ResourceLocation spec = new ResourceLocation(name.getNamespace(), "textures/" + name.getPath() + "_s.png");
-        try (IResource res = mc.getResourceManager().getResource(spec)) {
+        ResourceLocation map = new ResourceLocation(name.getNamespace(), "textures/" + name.getPath() + suffix + ".png");
+        try (IResource res = mc.getResourceManager().getResource(map)) {
             BufferedImage img = TextureUtil.readBufferedImage(res.getInputStream());
             int iw = img.getWidth();
             int ih = Math.min(img.getHeight(), Math.max(1, iw * sh / sw));
             for (int y = 0; y < sh; y++) {
                 for (int x = 0; x < sw; x++) {
                     int argb = img.getRGB(x * iw / sw, y * ih / sh);
-                    int o = ((y0 + y) * stride + x0 + x) * 4;
+                    int o = (y * sw + x) * 4;
                     out.put(o, (byte) (argb >> 16)).put(o + 1, (byte) (argb >> 8))
                             .put(o + 2, (byte) argb).put(o + 3, (byte) (argb >>> 24));
                 }
@@ -198,23 +218,38 @@ public final class RtMaterials {
         } catch (java.io.IOException e) {
             return false;
         } catch (RuntimeException e) {
-            // A broken _s.png (unreadable, null image) only loses this sprite's material.
-            Initializer.LOGGER.warn("[rt] skipping material {}: {}", spec, e.toString());
+            // A broken map (unreadable, null image) only loses this sprite's material.
+            Initializer.LOGGER.warn("[rt] skipping material {}: {}", map, e.toString());
             return false;
         }
     }
 
-    private static boolean fromDefaults(String iconName, ByteBuffer out, int stride, int x0, int y0, int sw, int sh) {
-        for (int y = 0; y < sh; y++) {
-            for (int x = 0; x < sw; x++) {
-                int o = ((y0 + y) * stride + x0 + x) * 4;
-                out.put(o, DEFAULT_SMOOTHNESS).put(o + 1, (byte) 0).put(o + 2, (byte) 0).put(o + 3, (byte) 255);
-            }
+    /** A flat LabPBR normal (0.5, 0.5), no occlusion, no height. */
+    private static void flatNormals(ByteBuffer out, int sw, int sh) {
+        for (int i = 0; i < sw * sh; i++) {
+            out.put(i * 4, (byte) 128).put(i * 4 + 1, (byte) 128).put(i * 4 + 2, (byte) 255).put(i * 4 + 3, (byte) 255);
         }
-        return true;
     }
 
-    private static VulkanImage blank;
+    private static void fromDefaults(ByteBuffer out, int sw, int sh) {
+        for (int i = 0; i < sw * sh; i++) {
+            out.put(i * 4, DEFAULT_SMOOTHNESS).put(i * 4 + 1, (byte) 0).put(i * 4 + 2, (byte) 0).put(i * 4 + 3, (byte) 255);
+        }
+    }
+
+    private static VulkanImage blank, blankNormal;
+
+    /** A 1x1 flat normal without occlusion: the fallback of the normal atlas. */
+    public static VulkanImage blankNormal() {
+        if (blankNormal == null) {
+            blankNormal = new VulkanImage(1, 1, 1, 4, false, true);
+            ByteBuffer flat = MemoryUtil.memCalloc(4);
+            flatNormals(flat, 1, 1);
+            blankNormal.uploadSubTextureAsync(0, 1, 1, 0, 0, 4, 0, 0, 1, flat);
+            MemoryUtil.memFree(flat);
+        }
+        return blankNormal;
+    }
 
     /** A 1x1 all-zero material: the fallback when the atlas could not be built. */
     public static VulkanImage blank() {
@@ -236,6 +271,14 @@ public final class RtMaterials {
         if (image != null) {
             image.free();
             image = null;
+        }
+        if (normalImage != null) {
+            normalImage.free();
+            normalImage = null;
+        }
+        if (blankNormal != null) {
+            blankNormal.free();
+            blankNormal = null;
         }
         builtFor = null;
         dirty = true;

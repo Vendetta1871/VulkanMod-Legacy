@@ -484,7 +484,7 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
     // Thin plants (cross sprites, the only faces off the block axes) are lit like the ground they
     // grow on: a vertical blade would see no noon sun, and the crossing quad would shade it.
     bool thin = max(abs(n.x), max(abs(n.y), abs(n.z))) < 0.95;
-    if (thin) n = vec3(0.0, 1.0, 0.0);
+    n = thin ? vec3(0.0, 1.0, 0.0) : payload.shading;
     vec3 v = -dir;
     vec3 albedo = pow(payload.albedo, vec3(2.2));
     vec4 material = payload.material;
