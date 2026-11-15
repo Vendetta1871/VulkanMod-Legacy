@@ -1,0 +1,20 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "rx_common.glsl"
+// local_tonemap/luminance.comp.slang: three synthetic exposures (highlights, midtones, shadows),
+// tonemapped, as display luminances.
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D outLuminance;
+layout(set = 0, binding = 1) uniform sampler2D hdr;
+layout(set = 0, binding = 5, rg32f) uniform readonly image2D exposure;
+layout(push_constant) uniform Args { float exposureFactor; float shadows; float highlights; } cb;
+layout(local_size_x = 16, local_size_y = 16) in;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(outLuminance)))) return;
+    float avgExposure = cb.exposureFactor * imageLoad(exposure, ivec2(0)).r;
+    vec3 c = texelFetch(hdr, p, 0).rgb * avgExposure;
+    float h = bt709(linearToGamma(acesFitted(c * cb.highlights, false)));
+    float m = bt709(linearToGamma(acesFitted(c, false)));
+    float s = bt709(linearToGamma(acesFitted(c * cb.shadows, false)));
+    imageStore(outLuminance, p, vec4(h, m, s, 1.0));
+}

@@ -6,66 +6,73 @@ import org.lwjgl.vulkan.*;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
+import java.util.ArrayList;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * HDR post chain of the ray-traced frame (docs/rt-production-look.md section 3), on the
- * RGBA16F scene before the upscaler: a downsample chain (post_down.comp: thresholded bloom
- * source, log luminance), auto-exposure (post_exposure.comp) and the tonemap
- * (post_tonemap.comp: bloom, local adaptation, exposure bias, ACES), written back into the
- * scene in display range. Only without a shader pack (packs grade their own image).
- * VESU_POST=0 leaves the scene as is (values above 1 then clip).
+ * HDR post chain of the ray-traced frame: a port of NVIDIA RTX Remix's (dxvk-remix,
+ * RtxContext::dispatchBloom / dispatchToneMapping) with the settings NVIDIA's RTX Remix for
+ * Minecraft ships (packaging/rtx.conf), on the RGBA16F scene before the upscaler:
+ * <ol>
+ *   <li>rx_linear: the gamma-encoded scene as linear radiance in Remix's units;</li>
+ *   <li>bloom (rtx_bloom.cpp): 13-tap downsample chain, the first step thresholded, tent
+ *       upsampling, composite;</li>
+ *   <li>auto-exposure (rtx_auto_exposure.cpp): EV100 histogram, center metering, mean mapped to
+ *       middle grey, adapted over time;</li>
+ *   <li>local tonemapping (rtx_local_tone_mapping.cpp): exposure fusion of three synthetic
+ *       exposures over a Laplacian pyramid, guided upsampling, ACES, written back in display
+ *       range.</li>
+ * </ol>
+ * Only without a shader pack (packs grade their own image). VESU_POST=0 leaves the scene as is.
  */
 final class PostProcess {
 
     static final boolean ENABLED = !"0".equals(Env.get("VESU_POST"));
-    private static final int LEVELS = 6;
     private static final int SLOTS = RtDescriptors.SLOTS;
 
-    // The post settings of NVIDIA's RTX Remix for Minecraft (packaging/rtx.conf and the time
-    // profiles), in scene units (physical radiance times RtLighting.SCENE_SCALE).
-    /** Exposure bias. */
-    private static final float EXPOSURE_BIAS = 1.0f;
+    // rtx.conf of RTX Remix for Minecraft (unset keys: dxvk-remix defaults).
+    /** rtx.bloom.steps, burnIntensity (x0.01 in DxvkBloom::dispatchComposite), luminanceThreshold. */
+    private static final int BLOOM_STEPS = 8;
+    private static final float BLOOM_INTENSITY = 0.01f * 0.1f, BLOOM_THRESHOLD = 250.0f;
+    /** rtx.autoExposure: evMinValue, evMaxValue, autoExposureSpeed (per second), exposureAverageMode (0 mean), center metering. */
+    private static final float EV_MIN = -2.5f, EV_MAX = 1.5f, EXPOSURE_SPEED = 10.0f, CENTER_METERING_SIZE = 0.75f;
+    private static final int AVERAGE_MODE = 0;
+    /** rtx.localtonemap: exposure, shadows, highlights, exposurePreferenceSigma/Offset, mip (default 3), finalizeWithACES. */
+    private static final float LT_EXPOSURE = 0.21405728f, LT_SHADOWS = 1.4f, LT_HIGHLIGHTS = 2.5f;
+    private static final float LT_SIGMA = 3.5f, LT_OFFSET = -0.1f;
+    private static final int LT_MIP = 3;
     /**
-     * Bloom, its threshold in exposed units (after auto-exposure, 1 = display white): by day only
-     * what is far brighter than white (the sun, emitters in shade; broad and faint like Remix's
-     * 0.1), at night every emitter above white (Remix's threshold 1, intensity lowered from 1.5:
-     * ours adds to the full image, not to a halo layer); blended with the daylight. Thresholds in
-     * scene radiance made a bright evening sky bloom as a whole.
+     * Scene units to Remix's radiance units (RtLighting.SCENE_SCALE: scene = Remix x 0.1).
+     * VESU_POST_UNIT overrides it.
      */
-    private static final float BLOOM_THRESHOLD_DAY = 6.0f, BLOOM_THRESHOLD_NIGHT = 1.5f, BLOOM_KNEE = 0.5f;
-    private static final float BLOOM_DAY = 0.08f, BLOOM_NIGHT = 0.35f;
-    /**
-     * Auto-exposure: key value and a 4 EV window (log2 of the exposure), whose bottom rises 2 EV
-     * at dusk and night: a bright evening sky does not expose the scene down (Remix's dusk and
-     * night profiles); fast adaptation.
-     */
-    private static final float KEY = 0.18f, EV_MIN_DAY = -2.0f, EV_MIN_NIGHT = 0.0f, EV_MAX = 2.0f, ADAPT_SPEED = 3.0f;
-    /**
-     * Night: moonlight is 500 times weaker than sunlight, 7-8 EV under the day key. The window
-     * reaches up to +6.5 EV, and the key drops (0.05), so the night reads as moonlit dark
-     * rather than as a dim day; caves under the sky follow the same limits.
-     */
-    private static final float EV_MAX_NIGHT = 6.5f, KEY_NIGHT = 0.05f;
-    /** Local tonemapping: shadows 1.4, highlights 2.5. */
-    private static final float LOCAL_SHADOWS = 1.4f, LOCAL_HIGHLIGHTS = 2.5f, LOCAL_STRENGTH = 0.0f;
+    private static final float UNIT_SCALE = envFloat("VESU_POST_UNIT", 1.0f / RtLighting.SCENE_SCALE);
 
-    private static final StorageImage[] levels = new StorageImage[LEVELS];
-    private static final StorageImage exposure = new StorageImage(VK_FORMAT_R32G32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT);
+    private static final int STORAGE_SAMPLED = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    private static final StorageImage hdr = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, STORAGE_SAMPLED);
+    private static final StorageImage[] bloom = new StorageImage[BLOOM_STEPS];
+    private static final StorageImage[] lum = new StorageImage[LT_MIP + 1], wts = new StorageImage[LT_MIP + 1],
+            asm = new StorageImage[LT_MIP + 1];
+    private static final StorageImage exposure = new StorageImage(VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
+    private static final StorageImage histogram = new StorageImage(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_STORAGE_BIT);
     static {
-        for (int i = 0; i < LEVELS; i++) {
-            levels[i] = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        for (int i = 0; i < BLOOM_STEPS; i++) bloom[i] = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, STORAGE_SAMPLED);
+        for (int i = 0; i <= LT_MIP; i++) {
+            lum[i] = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, STORAGE_SAMPLED);
+            wts[i] = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, STORAGE_SAMPLED);
+            asm[i] = new StorageImage(VK_FORMAT_R16G16B16A16_SFLOAT, STORAGE_SAMPLED);
         }
     }
 
-    private static ComputePipeline down, expo, tone;
-    private static long downLayout, expoLayout, toneLayout, pool;
-    private static final long[][] downSets = new long[SLOTS][LEVELS];
-    private static final long[] expoSets = new long[SLOTS], toneSets = new long[SLOTS];
+    /** Descriptor sets per frame slot: one per dispatch. */
+    private static final int SETS = 48;
+    private static ComputePipeline linear, bloomDown, bloomUp, bloomComposite, hist, expo, ltLum, ltWeight, ltMip,
+            ltBlend, ltLaplacian, ltFinal;
+    private static long setLayout, pool;
+    private static final long[][] sets = new long[SLOTS][SETS];
+    private static int nextSet;
     private static boolean resetExposure = true;
     private static long lastNanos;
 
@@ -75,13 +82,20 @@ final class PostProcess {
         prepare();
         RenderTarget scene = FrameTargets.scene;
         int w = scene.width(), h = scene.height();
-        java.util.ArrayList<StorageImage> created = new java.util.ArrayList<>();
-        int lw = w, lh = h;
-        for (int i = 0; i < LEVELS; i++) {
-            lw = Math.max(1, (lw + 1) / 2);
-            lh = Math.max(1, (lh + 1) / 2);
-            if (levels[i].ensure(lw, lh)) created.add(levels[i]);
+        ArrayList<StorageImage> created = new ArrayList<>();
+        if (hdr.ensure(w, h)) created.add(hdr);
+        for (int i = 0; i < BLOOM_STEPS; i++) {
+            int d = 1 << (i + 1);
+            if (bloom[i].ensure((w + d - 1) / d, (h + d - 1) / d)) created.add(bloom[i]);
         }
+        for (int i = 0; i <= LT_MIP; i++) {
+            int lw = Math.max(1, w >> i), lh = Math.max(1, h >> i);
+            if (lum[i].ensure(lw, lh)) created.add(lum[i]);
+            if (wts[i].ensure(lw, lh)) created.add(wts[i]);
+            if (asm[i].ensure(lw, lh)) created.add(asm[i]);
+        }
+        boolean freshHistogram = histogram.ensure(256, 1);
+        if (freshHistogram) created.add(histogram);
         if (exposure.ensure(1, 1)) {
             created.add(exposure);
             resetExposure = true;
@@ -98,61 +112,69 @@ final class PostProcess {
                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         }
         FrameTargets.pipelineBarrier(cmd, pre, stack);
-        // The previous frame's reads of the levels before this frame's writes.
-        barrier(cmd, stack);
+        barrier(cmd, stack);   // the previous frame's reads before this frame's writes
 
         int slot = Drawer.getCurrentFrame() % SLOTS;
-        float daylight = RtLighting.hasSky() ? RtLighting.sun()[3] : 1.0f;
-        float bloomThreshold = (float) Math.exp(lerp((float) Math.log(BLOOM_THRESHOLD_NIGHT),
-                (float) Math.log(BLOOM_THRESHOLD_DAY), daylight));
-        float bloom = lerp(BLOOM_NIGHT, BLOOM_DAY, daylight);
-        float evMin = lerp(EV_MIN_NIGHT, EV_MIN_DAY, daylight);
-        float evMax = lerp(EV_MAX_NIGHT, EV_MAX, daylight);
-        float key = (float) Math.exp(lerp((float) Math.log(KEY_NIGHT), (float) Math.log(KEY), daylight));
-        // Downsample chain.
-        down.bind(cmd);
-        for (int i = 0; i < LEVELS; i++) {
-            long set = downSets[slot][i];
-            writeStorage(set, 0, i == 0 ? scene.colorView() : levels[i - 1].view, stack);
-            writeStorage(set, 1, levels[i].view, stack);
-            writeStorage(set, 2, exposure.view, stack);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, down.layout(), 0, stack.longs(set), null);
-            ByteBuffer pc = stack.calloc(16);
-            pc.putFloat(0, i == 0 ? 1.0f : 0.0f).putFloat(4, bloomThreshold).putFloat(8, BLOOM_KNEE * bloomThreshold);
-            vkCmdPushConstants(cmd, down.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
-            down.dispatch(cmd, (levels[i].width + 7) / 8, (levels[i].height + 7) / 8, 1);
-            barrier(cmd, stack);
-        }
-
-        // Auto-exposure from the coarsest level.
+        nextSet = 0;
         long now = System.nanoTime();
         float dt = lastNanos == 0L ? 0.016f : Math.min(0.25f, (now - lastNanos) / 1e9f);
         lastNanos = now;
-        long es = expoSets[slot];
-        writeStorage(es, 0, levels[LEVELS - 1].view, stack);
-        writeStorage(es, 1, exposure.view, stack);
-        expo.bind(cmd);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, expo.layout(), 0, stack.longs(es), null);
-        ByteBuffer pe = stack.calloc(32);
-        pe.putFloat(0, key).putFloat(4, evMin).putFloat(8, evMax)
-                .putFloat(12, 1.0f - (float) Math.exp(-dt * ADAPT_SPEED)).putFloat(16, resetExposure ? 1.0f : 0.0f);
-        vkCmdPushConstants(cmd, expo.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pe);
-        expo.dispatch(cmd, 1, 1, 1);
-        resetExposure = false;
-        barrier(cmd, stack);
 
-        // Tonemap in place.
-        long ts = toneSets[slot];
-        writeStorage(ts, 0, scene.colorView(), stack);
-        for (int i = 1; i <= 5; i++) writeSampler(ts, i, levels[i].view, stack);
-        writeStorage(ts, 6, exposure.view, stack);
-        tone.bind(cmd);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tone.layout(), 0, stack.longs(ts), null);
-        ByteBuffer pt = stack.calloc(32);
-        pt.putFloat(0, EXPOSURE_BIAS).putFloat(4, bloom).putFloat(8, LOCAL_SHADOWS).putFloat(12, LOCAL_HIGHLIGHTS)
-                .putFloat(16, LOCAL_STRENGTH).putFloat(20, 0.0f);
-        vkCmdPushConstants(cmd, tone.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pt);
-        tone.dispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+        // Linear radiance in Remix's units.
+        dispatch(cmd, slot, linear, hdr.view, new long[0], scene.colorView(),
+                push(stack, 16).putFloat(0, UNIT_SCALE), groups(w), groups(h), stack);
+
+        // Bloom.
+        for (int i = 0; i < BLOOM_STEPS; i++) {
+            StorageImage in = i == 0 ? hdr : bloom[i - 1], out = bloom[i];
+            ByteBuffer pc = push(stack, 32).putFloat(0, 1.0f / in.width).putFloat(4, 1.0f / in.height)
+                    .putFloat(8, 1.0f / out.width).putFloat(12, 1.0f / out.height)
+                    .putInt(16, out.width).putInt(20, out.height).putFloat(24, i == 0 ? Math.max(0.01f, BLOOM_THRESHOLD) : -1.0f);
+            dispatch(cmd, slot, bloomDown, out.view, new long[]{in.view}, 0L, pc, groups(out.width), groups(out.height), stack);
+        }
+        for (int i = BLOOM_STEPS - 1; i > 0; i--) {
+            StorageImage in = bloom[i], out = bloom[i - 1];
+            ByteBuffer pc = push(stack, 32).putFloat(0, 1.0f / in.width).putFloat(4, 1.0f / in.height)
+                    .putFloat(8, 1.0f / out.width).putFloat(12, 1.0f / out.height).putInt(16, out.width).putInt(20, out.height);
+            dispatch(cmd, slot, bloomUp, out.view, new long[]{in.view}, 0L, pc, groups(out.width), groups(out.height), stack);
+        }
+        dispatch(cmd, slot, bloomComposite, hdr.view, new long[]{bloom[0].view}, 0L,
+                push(stack, 32).putFloat(0, 1.0f / w).putFloat(4, 1.0f / h).putInt(8, w).putInt(12, h).putFloat(16, BLOOM_INTENSITY),
+                groups(w), groups(h), stack);
+
+        // Auto-exposure (a fresh histogram holds garbage: one exposure pass clears it first).
+        ByteBuffer pe = push(stack, 32).putFloat(0, EV_MIN).putFloat(4, EV_MAX - EV_MIN)
+                .putFloat(8, 1.0f - (float) Math.pow(2.0, -EXPOSURE_SPEED * dt)).putInt(12, AVERAGE_MODE).putInt(16, 1);
+        if (freshHistogram) dispatch(cmd, slot, expo, hdr.view, new long[0], 0L, pe, 1, 1, stack);
+        dispatch(cmd, slot, hist, hdr.view, new long[]{hdr.view}, 0L,
+                push(stack, 16).putFloat(0, EV_MIN).putFloat(4, EV_MAX - EV_MIN).putFloat(8, CENTER_METERING_SIZE).putInt(12, 1),
+                groups(w), groups(h), stack);
+        pe.putInt(16, resetExposure ? 1 : 0);
+        dispatch(cmd, slot, expo, hdr.view, new long[0], 0L, pe, 1, 1, stack);
+        resetExposure = false;
+
+        // Local tonemapping.
+        dispatch(cmd, slot, ltLum, lum[0].view, new long[]{hdr.view}, 0L,
+                push(stack, 16).putFloat(0, LT_EXPOSURE).putFloat(4, (float) Math.pow(2.0, LT_SHADOWS))
+                        .putFloat(8, (float) Math.pow(2.0, -LT_HIGHLIGHTS)), groups(w), groups(h), stack);
+        dispatch(cmd, slot, ltWeight, wts[0].view, new long[]{lum[0].view}, 0L,
+                push(stack, 16).putFloat(0, LT_SIGMA * LT_SIGMA).putFloat(4, LT_OFFSET), groups(w), groups(h), stack);
+        for (int i = 1; i <= LT_MIP; i++) {
+            dispatch(cmd, slot, ltMip, lum[i].view, new long[]{lum[i - 1].view}, 0L, push(stack, 16),
+                    groups(lum[i].width), groups(lum[i].height), stack);
+            dispatch(cmd, slot, ltMip, wts[i].view, new long[]{wts[i - 1].view}, 0L, push(stack, 16),
+                    groups(wts[i].width), groups(wts[i].height), stack);
+        }
+        dispatch(cmd, slot, ltBlend, asm[LT_MIP].view, new long[]{lum[LT_MIP].view, wts[LT_MIP].view}, 0L, push(stack, 16),
+                groups(asm[LT_MIP].width), groups(asm[LT_MIP].height), stack);
+        for (int i = LT_MIP; i > 0; i--) {
+            dispatch(cmd, slot, ltLaplacian, asm[i - 1].view,
+                    new long[]{lum[i - 1].view, lum[i].view, wts[i - 1].view, asm[i].view}, 0L, push(stack, 16),
+                    groups(asm[i - 1].width), groups(asm[i - 1].height), stack);
+        }
+        dispatch(cmd, slot, ltFinal, scene.colorView(), new long[]{asm[0].view, lum[0].view, hdr.view}, 0L,
+                push(stack, 32).putFloat(0, w).putFloat(4, h).putFloat(8, 1.0f / w).putFloat(12, 1.0f / h)
+                        .putFloat(16, LT_EXPOSURE).putInt(20, 1), groups(w), groups(h), stack);
 
         VkImageMemoryBarrier2.Buffer post = VkImageMemoryBarrier2.calloc(1, stack);
         FrameTargets.imageBarrier(post.get(0), scene.colorImage(), VK_IMAGE_ASPECT_COLOR_BIT,
@@ -160,6 +182,29 @@ final class PostProcess {
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         FrameTargets.pipelineBarrier(cmd, post, stack);
+    }
+
+    private static int groups(int n) { return (n + 15) / 16; }
+
+    private static ByteBuffer push(MemoryStack stack, int size) { return stack.calloc(size); }
+
+    /**
+     * One pass: binding 0 its storage output, 1-4 the sampled inputs (unused ones get the HDR
+     * image), 5 the exposure, 6 the histogram, 7 a storage input (the scene; else the HDR image).
+     */
+    private static void dispatch(VkCommandBuffer cmd, int slot, ComputePipeline p, long out, long[] inputs, long storageIn,
+                                 ByteBuffer pc, int gx, int gy, MemoryStack stack) {
+        long set = sets[slot][nextSet++];
+        writeStorage(set, 0, out, stack);
+        for (int i = 0; i < 4; i++) writeSampler(set, 1 + i, i < inputs.length ? inputs[i] : hdr.view, stack);
+        writeStorage(set, 5, exposure.view, stack);
+        writeStorage(set, 6, histogram.view, stack);
+        writeStorage(set, 7, storageIn != 0L ? storageIn : hdr.view, stack);
+        p.bind(cmd);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout(), 0, stack.longs(set), null);
+        vkCmdPushConstants(cmd, p.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
+        p.dispatch(cmd, gx, gy, 1);
+        barrier(cmd, stack);
     }
 
     private static void barrier(VkCommandBuffer cmd, MemoryStack stack) {
@@ -191,32 +236,9 @@ final class PostProcess {
     }
 
     private static void prepare() {
-        if (down != null) return;
+        if (linear != null) return;
         int s = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, c = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        downLayout = layout(new int[]{s, s, s});
-        expoLayout = layout(new int[]{s, s});
-        toneLayout = layout(new int[]{s, c, c, c, c, c, s});
-        try (MemoryStack stack = stackPush()) {
-            int sets = SLOTS * (LEVELS + 2);
-            VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
-            sizes.get(0).type(s).descriptorCount(SLOTS * (LEVELS * 3 + 2 + 2));
-            sizes.get(1).type(c).descriptorCount(SLOTS * 5);
-            LongBuffer p = stack.mallocLong(1);
-            RtPipeline.check(vkCreateDescriptorPool(Vulkan.getDevice(), VkDescriptorPoolCreateInfo.calloc(stack)
-                    .sType$Default().maxSets(sets).pPoolSizes(sizes), null, p), "post pool");
-            pool = p.get(0);
-            for (int i = 0; i < SLOTS; i++) {
-                for (int l = 0; l < LEVELS; l++) downSets[i][l] = allocate(downLayout, stack);
-                expoSets[i] = allocate(expoLayout, stack);
-                toneSets[i] = allocate(toneLayout, stack);
-            }
-        }
-        down = compute("post_down.comp", downLayout, 16);
-        expo = compute("post_exposure.comp", expoLayout, 32);
-        tone = compute("post_tonemap.comp", toneLayout, 32);
-    }
-
-    private static long layout(int[] types) {
+        int[] types = {s, c, c, c, c, s, s, s};
         try (MemoryStack stack = stackPush()) {
             VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(types.length, stack);
             for (int i = 0; i < types.length; i++) {
@@ -225,40 +247,75 @@ final class PostProcess {
             LongBuffer p = stack.mallocLong(1);
             RtPipeline.check(vkCreateDescriptorSetLayout(Vulkan.getDevice(), VkDescriptorSetLayoutCreateInfo.calloc(stack)
                     .sType$Default().pBindings(b), null, p), "post set layout");
-            return p.get(0);
+            setLayout = p.get(0);
+            VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(2, stack);
+            sizes.get(0).type(s).descriptorCount(SLOTS * SETS * 4);
+            sizes.get(1).type(c).descriptorCount(SLOTS * SETS * 4);
+            RtPipeline.check(vkCreateDescriptorPool(Vulkan.getDevice(), VkDescriptorPoolCreateInfo.calloc(stack)
+                    .sType$Default().maxSets(SLOTS * SETS).pPoolSizes(sizes), null, p), "post pool");
+            pool = p.get(0);
+            for (int i = 0; i < SLOTS; i++) {
+                for (int j = 0; j < SETS; j++) {
+                    LongBuffer out = stack.mallocLong(1);
+                    RtPipeline.check(vkAllocateDescriptorSets(Vulkan.getDevice(), VkDescriptorSetAllocateInfo.calloc(stack)
+                            .sType$Default().descriptorPool(pool).pSetLayouts(stack.longs(setLayout)), out), "post set");
+                    sets[i][j] = out.get(0);
+                }
+            }
         }
+        linear = compute("rx_linear.comp");
+        bloomDown = compute("rx_bloom_down.comp");
+        bloomUp = compute("rx_bloom_up.comp");
+        bloomComposite = compute("rx_bloom_composite.comp");
+        hist = compute("rx_histogram.comp");
+        expo = compute("rx_exposure.comp");
+        ltLum = compute("rx_lt_luminance.comp");
+        ltWeight = compute("rx_lt_weight.comp");
+        ltMip = compute("rx_lt_mip.comp");
+        ltBlend = compute("rx_lt_blend.comp");
+        ltLaplacian = compute("rx_lt_laplacian.comp");
+        ltFinal = compute("rx_lt_final.comp");
     }
 
-    private static long allocate(long layout, MemoryStack stack) {
-        LongBuffer out = stack.mallocLong(1);
-        RtPipeline.check(vkAllocateDescriptorSets(Vulkan.getDevice(), VkDescriptorSetAllocateInfo.calloc(stack)
-                .sType$Default().descriptorPool(pool).pSetLayouts(stack.longs(layout)), out), "post set");
-        return out.get(0);
-    }
-
-    private static ComputePipeline compute(String file, long layout, int push) {
+    private static ComputePipeline compute(String file) {
         ShaderSPIRVUtils.SPIRV spv = ShaderSPIRVUtils.compileShaderFile(file, ShaderSPIRVUtils.ShaderKind.COMPUTE_SHADER);
         if (spv == null) throw new RuntimeException("post shader " + file + " failed to compile");
-        ComputePipeline p = new ComputePipeline(spv, new long[]{layout}, push);
+        ComputePipeline p = new ComputePipeline(spv, new long[]{setLayout}, 32);
         spv.free();
         return p;
     }
 
-    /** The device must be idle. */
-    static void destroy() {
-        for (StorageImage img : levels) img.destroy();
-        exposure.destroy();
-        resetExposure = true;
-        if (down != null) {
-            down.cleanUp();
-            expo.cleanUp();
-            tone.cleanUp();
-            down = expo = tone = null;
-            vkDestroyDescriptorPool(Vulkan.getDevice(), pool, null);
-            for (long l : new long[]{downLayout, expoLayout, toneLayout}) vkDestroyDescriptorSetLayout(Vulkan.getDevice(), l, null);
-            pool = downLayout = expoLayout = toneLayout = 0L;
+    private static float envFloat(String name, float fallback) {
+        String v = Env.get(name);
+        if (v == null) return fallback;
+        try {
+            return Float.parseFloat(v);
+        } catch (NumberFormatException e) {
+            return fallback;
         }
     }
 
-    private static float lerp(float a, float b, float t) { return a + (b - a) * t; }
+    /** The device must be idle. */
+    static void destroy() {
+        hdr.destroy();
+        for (StorageImage img : bloom) img.destroy();
+        for (int i = 0; i <= LT_MIP; i++) {
+            lum[i].destroy();
+            wts[i].destroy();
+            asm[i].destroy();
+        }
+        exposure.destroy();
+        histogram.destroy();
+        resetExposure = true;
+        if (linear != null) {
+            for (ComputePipeline p : new ComputePipeline[]{linear, bloomDown, bloomUp, bloomComposite, hist, expo, ltLum,
+                    ltWeight, ltMip, ltBlend, ltLaplacian, ltFinal}) {
+                p.cleanUp();
+            }
+            linear = null;
+            vkDestroyDescriptorPool(Vulkan.getDevice(), pool, null);
+            vkDestroyDescriptorSetLayout(Vulkan.getDevice(), setLayout, null);
+            pool = setLayout = 0L;
+        }
+    }
 }

@@ -1,0 +1,17 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "rx_common.glsl"
+// bloom_composite.comp.slang
+layout(set = 0, binding = 0, rgba16f) uniform image2D hdr;
+layout(set = 0, binding = 1) uniform sampler2D bloom;
+layout(push_constant) uniform Args { vec2 imageSizeInverse; ivec2 imageSize; float intensity; } cb;
+layout(local_size_x = 16, local_size_y = 16) in;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, cb.imageSize))) return;
+    vec2 uv = clamp((vec2(p) + 0.5) * cb.imageSizeInverse, 0.0, 1.0);
+    vec4 src = textureLod(bloom, uv, 0.0);
+    vec4 dst = imageLoad(hdr, p);
+    if (any(isnan(dst)) || any(isinf(dst)) || any(isnan(src)) || any(isinf(src))) return;
+    imageStore(hdr, p, dst + src * cb.intensity);
+}

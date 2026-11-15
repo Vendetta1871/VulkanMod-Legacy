@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "rx_common.glsl"
+// auto_exposure.comp.slang: the histogram's mean (or median) EV100 mapped to middle grey,
+// adapted over time; the histogram is cleared for the next frame.
+layout(set = 0, binding = 5, rg32f) uniform image2D exposure;
+layout(set = 0, binding = 6, r32ui) uniform uimage2D histogram;
+layout(push_constant) uniform Args { float evMinValue; float evRange; float adaptation; uint averageMode; uint reset; } cb;
+layout(local_size_x = 256) in;
+shared float counts[HISTOGRAM_SIZE];
+
+void main() {
+    uint li = gl_LocalInvocationIndex;
+    counts[li] = float(imageLoad(histogram, ivec2(li, 0)).r);
+    barrier();
+    if (li == 0u) {
+        float total = 0.0, weighted = 0.0;
+        for (int i = 0; i < HISTOGRAM_SIZE; i++) {
+            total += counts[i];
+            weighted += counts[i] * float(i);
+        }
+        float average;
+        if (cb.averageMode == 1u) {
+            float median = (total - counts[0]) / 2.0, prefix = 0.0;
+            average = 0.5;
+            for (int i = 0; i < HISTOGRAM_SIZE; i++) {
+                prefix += counts[i];
+                if (i == 0) continue;
+                if (prefix > median) break;
+                average = float(i) + 0.5;
+            }
+        } else {
+            average = total > 0.0 ? weighted / total : 0.0;
+        }
+        float normalizedEV = clamp((average - 1.0) / float(HISTOGRAM_SIZE - 2), 0.0, 1.0);
+        float currentLum = ev100Luminance(normalizedEV * cb.evRange + cb.evMinValue);
+        const float middleGrey = 0.18;
+        float current = middleGrey / max(0.001, currentLum * (1.0 - middleGrey));
+        float previous = imageLoad(exposure, ivec2(0)).r;
+        bool valid = cb.reset == 0u && previous > 0.0 && !isnan(previous) && !isinf(previous);
+        float adapted = valid ? previous + (current - previous) * cb.adaptation : current;
+        imageStore(exposure, ivec2(0), vec4(adapted, current, 0.0, 0.0));
+    }
+    imageStore(histogram, ivec2(li, 0), uvec4(0u));
+}

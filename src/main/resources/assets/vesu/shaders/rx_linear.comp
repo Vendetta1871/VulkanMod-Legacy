@@ -1,0 +1,16 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "rx_common.glsl"
+// The scene (gamma-encoded HDR, the RT passes' convention) as linear radiance in Remix's units.
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D outHdr;
+layout(set = 0, binding = 7, rgba16f) uniform readonly image2D scene;
+layout(push_constant) uniform Args { float unitScale; } cb;
+layout(local_size_x = 16, local_size_y = 16) in;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(outHdr)))) return;
+    vec4 src = imageLoad(scene, p);
+    vec3 c = pow(max(src.rgb, vec3(0.0)), vec3(SRGB_GAMMA)) * cb.unitScale;
+    if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+    imageStore(outHdr, p, vec4(min(c, vec3(65504.0)), src.a));
+}

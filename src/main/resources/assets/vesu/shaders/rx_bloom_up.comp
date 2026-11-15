@@ -1,0 +1,18 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "rx_common.glsl"
+// bloom_upsample.comp.slang: 3x3 tent of the coarser level, added to the finer one.
+layout(set = 0, binding = 0, rgba16f) uniform image2D outColor;
+layout(set = 0, binding = 1) uniform sampler2D inColor;
+layout(push_constant) uniform Args { vec2 inputSizeInverse; vec2 outputSizeInverse; ivec2 outputSize; } cb;
+layout(local_size_x = 16, local_size_y = 16) in;
+vec3 tap(vec2 uv, float x, float y) { return textureLod(inColor, uv + vec2(x, y) * cb.inputSizeInverse, 0.0).rgb; }
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, cb.outputSize))) return;
+    vec2 uv = (vec2(p) + 0.5) * cb.outputSizeInverse;
+    vec3 r = (tap(uv, -1, -1) + tap(uv, 1, -1) + tap(uv, -1, 1) + tap(uv, 1, 1)) / 16.0
+           + (tap(uv, 0, -1) + tap(uv, -1, 0) + tap(uv, 1, 0) + tap(uv, 0, 1)) * (2.0 / 16.0)
+           + tap(uv, 0, 0) * (4.0 / 16.0);
+    imageStore(outColor, p, imageLoad(outColor, p) + vec4(r, 0.0));
+}

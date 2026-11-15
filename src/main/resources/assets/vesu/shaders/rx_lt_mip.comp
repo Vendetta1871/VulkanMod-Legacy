@@ -1,0 +1,17 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "rx_common.glsl"
+// image_utils/generate_mipmap.comp.slang, Gaussian: a 3x3 kernel as four bilinear taps.
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D outLevel;
+layout(set = 0, binding = 1) uniform sampler2D finer;
+layout(local_size_x = 16, local_size_y = 16) in;
+void main() {
+    ivec2 res = imageSize(outLevel);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, res))) return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(res);
+    vec2 d = 0.5 / vec2(res);
+    vec4 t = textureLod(finer, uv + vec2(-d.x, -d.y), 0.0) + textureLod(finer, uv + vec2(-d.x, d.y), 0.0)
+           + textureLod(finer, uv + vec2(d.x, -d.y), 0.0) + textureLod(finer, uv + vec2(d.x, d.y), 0.0);
+    imageStore(outLevel, p, t * 0.25);
+}
