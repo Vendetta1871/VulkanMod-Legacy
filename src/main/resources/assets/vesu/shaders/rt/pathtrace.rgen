@@ -103,6 +103,12 @@ uint pcg() {
     return (w >> 22u) ^ w;
 }
 float rand() { return float(pcg() >> 8) * (1.0 / 16777216.0); }
+// Ray Reconstruction wants samples independent across pixels and frames: the seed is a hash
+// chain of pixel and frame, not a linear mix of them (equal seeds in other pixels and frames).
+uint hashU(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
+    return x;
+}
 
 vec3 unproject(ivec2 p, float depth, vec2 size) {
     vec2 uv = (vec2(p) + 0.5) / size;
@@ -280,7 +286,10 @@ vec3 blockLight(Surface s, vec3 v, vec3 pos, ivec2 p, ivec2 prevPixel, bool reus
     }
     if (reuse) {
         ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
-        mergeReservoir(r, prevPixel, pos, n);
+        // Permuted temporal reuse (DLSS-RR guide 3.5): a random neighbour of the reprojected pixel,
+        // so neighbouring pixels do not inherit one shared sample.
+        ivec2 t = prevPixel + ivec2(int(pcg() % 3u) - 1, int(pcg() % 3u) - 1);
+        mergeReservoir(r, all(greaterThanEqual(t, ivec2(0))) && all(lessThan(t, size)) ? t : prevPixel, pos, n);
         for (int k = 0; k < 3; k++) {
             float ang = 6.2831853 * rand();
             ivec2 q = prevPixel + ivec2(vec2(cos(ang), sin(ang)) * (2.0 + 10.0 * rand()));
@@ -504,7 +513,7 @@ void main() {
     uint px = uint(p.y) * uint(size.x) + uint(p.x);
     float d = texelFetch(sceneDepth, p, 0).r;
     float farD = farPlaneDepth(pc.invViewProj);
-    rngState = uint(p.x) * 1973u + uint(p.y) * 9277u + uint(pc.params.y) * 26699u;
+    rngState = hashU(uint(p.x) + hashU(uint(p.y) + hashU(uint(pc.params.y))));
     pcg();
 
     vec2 pixel = vec2(p) + 0.5;
@@ -550,7 +559,8 @@ void main() {
 
     if (sky && tFront < 0.0) {
         store3(0, px, vec3(MARK_SKY, 0.0, 0.0));
-        storeGuides(px, 65504.0, vec2(0.0), vec3(0.0), 1.0, vec3(1.0), vec3(0.0));
+        storeGuides(px, 65504.0, vec2(0.0), vec3(0.0), 0.0, vec3(0.5), vec3(0.0));   // the guide's sky defaults
+        storeRemod(px, vec3(1.0));
         imageStore(reservoirCur, p, vec4(intBitsToFloat(-1), 0.0, 0.0, 0.0));
         imageStore(giCur, p, vec4(0.0));
         return;
@@ -687,9 +697,9 @@ void main() {
             return;
         }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
-        // Demodulated: RR denoises the lighting only and the texture comes back at full detail
-        // afterwards, however noisy the lighting under it.
-        vec3 m = max(g.diffuse + g.specular, vec3(0.03));
+        // VESU_RR_DEMOD=1: RR denoises the lighting only and the texture comes back afterwards.
+        // Off by default: the guide wants the full noisy colour, RR demodulates with the albedos.
+        vec3 m = rr[11] > 0.5 ? max(g.diffuse + g.specular, vec3(0.03)) : vec3(1.0);
         store3(0, px, radiance / m);
         storeGuides(px, viewDepth, mv, g.n, g.rough, g.diffuse / m, g.specular / m);
         storeRemod(px, m);

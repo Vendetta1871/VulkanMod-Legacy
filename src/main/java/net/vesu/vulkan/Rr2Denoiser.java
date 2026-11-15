@@ -39,6 +39,8 @@ final class Rr2Denoiser {
     static final int[] LD = {3, 1, 2, 3, 1, 3, 3};
     /** Plane 7 (not an RR input): the albedo the colour was divided by, multiplied back after RR. */
     static final int PLANES = 8, LD_REMOD = 3;
+    /** VESU_RR_DEMOD=1: RR gets the colour divided by the albedo (header float 11), see pathtrace.rgen. */
+    static final boolean DEMOD = "1".equals(net.vesu.Env.get("VESU_RR_DEMOD"));
     /** Header: plane offsets (floats) 0-6, width 8, height 9, padded output width 10; jitter 12-13, wave time 14, camera xz modulo 1024 15-16 (floats). */
     static final int HEADER = 256;
 
@@ -160,7 +162,7 @@ final class Rr2Denoiser {
     static void writeHeader(VkCommandBuffer cmd, float jx, float jy, float time, float camX, float camZ, MemoryStack stack) {
         ByteBuffer hdr = stack.calloc(80);
         for (int i = 0; i < PLANES; i++) hdr.putInt(i * 4, (int) (planes[i] / 4));
-        hdr.putInt(32, width).putInt(36, height).putInt(40, outW);
+        hdr.putInt(32, width).putInt(36, height).putInt(40, outW).putFloat(44, DEMOD ? 1.0f : 0.0f);
         hdr.putFloat(48, jx).putFloat(52, jy).putFloat(56, time).putFloat(60, camX).putFloat(64, camZ);
         vkCmdUpdateBuffer(cmd, inputs.buffer, 0, hdr);
     }

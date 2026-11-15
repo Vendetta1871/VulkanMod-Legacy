@@ -59,7 +59,6 @@ public final class FrameTargets {
     private static String upscaler = "auto";
     private static boolean blitOnly;
     private static boolean temporal;
-    private static final boolean RR_JITTER = "1".equals(net.vesu.Env.get("VESU_RR_JITTER"));
 
     /**
      * Debug knob for the shader-pack coordinate convention (docs/shaderpacks, D4):
@@ -543,9 +542,10 @@ public final class FrameTargets {
         boolean rr = net.vesu.vulkan.rt.RtScene.enabled() && RtLightingPass.pathTracingWanted();
         temporal = !rr && (pack == null || rtPack) && wantTemporal();
         updateLodBias();
-        // RR gets the colour without the surface texture, which is multiplied back afterwards at the
-        // pixel centre: without jitter that texture lines up with RR's output (VESU_RR_JITTER=1 jitters).
-        net.vesu.render.CameraHistory.setJitterEnabled(temporal || (rr && RR_JITTER));
+        // RR resolves the jitter itself and wants many positions (DLSS-RR guide 3.6: at least 32).
+        // Demodulated input (VESU_RR_DEMOD=1) multiplies the texture back unjittered, so no jitter there.
+        net.vesu.render.CameraHistory.setJitterEnabled(temporal || (rr && !Rr2Denoiser.DEMOD));
+        net.vesu.render.CameraHistory.setMinJitterPhases(rr ? 32 : 1);
         MotionVectorPass.setEnabled(temporal || (pack != null && pack.needsMotion()));
 
         // Contents of the previous frame are discarded (UNDEFINED). The source stages

@@ -33,7 +33,10 @@ public final class CameraHistory {
 
     /** Temporary switch until a temporal upscaler (F5) turns jitter on. */
     private static boolean jitterEnabled = Env.get("VESU_JITTER") != null;
-    private static int jitterIndex;
+    private static int jitterIndex, minJitterPhases = 1;
+
+    /** At least this many jitter positions (Ray Reconstruction wants 32 or more). */
+    public static void setMinJitterPhases(int n) { minJitterPhases = n; }
     private static float jitterX, jitterY;
 
     private CameraHistory() {}
@@ -52,7 +55,7 @@ public final class CameraHistory {
         valid = false;
 
         if (jitterEnabled) {
-            int phases = jitterPhaseCount(FrameTargets.scene.width(), FrameTargets.display.width());
+            int phases = Math.max(minJitterPhases, jitterPhaseCount(FrameTargets.scene.width(), FrameTargets.display.width()));
             jitterIndex = (jitterIndex % phases) + 1;
             jitterX = (float) halton(jitterIndex, 2) - 0.5f;
             jitterY = (float) halton(jitterIndex, 3) - 0.5f;
