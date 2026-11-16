@@ -35,6 +35,9 @@ public class VesuMod {
         // Entity and leaf culling settings follow the client tick.
         net.vesu.render.OcclusionCuller.init();
         net.vesu.render.HudCache.init();
+        // Particle precipitation: spawner tick and the sprites stitched into the block atlas.
+        net.vesu.weather.Spawner.init();
+        net.vesu.weather.WeatherSprites.init();
 
         if (AutoTest.ENABLED) {
             MinecraftForge.EVENT_BUS.register(AutoTest.class);

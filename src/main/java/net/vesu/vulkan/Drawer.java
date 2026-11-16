@@ -190,6 +190,28 @@ public class Drawer {
     }
 
     /**
+     * Non-indexed instanced draw from a persistent instance buffer ({@link net.vesu.render.BetterClouds}):
+     * the buffer binds at instance rate, every instance is {@code verticesPerInstance} vertices whose
+     * shape the vertex shader derives from {@code gl_VertexIndex}. {@code runs} holds
+     * {@code runCount} (first instance, instance count) pairs, all drawn with one pipeline/UBO bind.
+     */
+    public void drawInstancedRuns(VertexBuffer instanceBuffer, int verticesPerInstance, int[] runs, int runCount) {
+        assertCommandBufferState();
+        if (runCount <= 0 || shadowOnly) return;
+        Pipeline boundPipeline = VRenderSystem.getShaderPipeline();
+        bindPipeline(boundPipeline);
+        uploadAndBindUBOs(boundPipeline);
+        try (MemoryStack stack = stackPush()) {
+            VkCommandBuffer commandBuffer = commandBuffers.get(currentFrame);
+            vkCmdBindVertexBuffers(commandBuffer, 0, stack.longs(instanceBuffer.getId()), stack.longs(0L));
+            for (int r = 0; r < runCount; r++) {
+                vkCmdDraw(commandBuffer, verticesPerInstance, runs[2 * r + 1], 0, runs[2 * r]);
+            }
+        }
+        currentIndex++;
+    }
+
+    /**
      * Non-indexed line draw for the debug-box / selection-box capture (GL_LINES,
      * GL_LINE_STRIP). The caller sets {@link VRenderSystem#topology} to the matching line
      * topology and binds the POSITION_COLOR line pipeline; the width is taken from

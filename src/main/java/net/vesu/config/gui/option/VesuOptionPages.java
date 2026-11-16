@@ -324,24 +324,18 @@ public final class VesuOptionPages {
                                 I18n.format("options.graphics.fast"), I18n.format("options.graphics.fancy"))
                                 .tooltip("Fancy draws transparent leaves, detailed weather and other details. Changing it rebuilds all chunks.")
                                 .impact(Impact.MEDIUM),
-                        vanillaCycle(GameSettings.Options.RENDER_CLOUDS, () -> gs().clouds, 4, 3,
-                                v -> switch (v) {
-                                    case 0 -> I18n.format("options.off");
-                                    case 1 -> I18n.format("options.clouds.fast");
-                                    case 2 -> I18n.format("options.clouds.fancy");
-                                    default -> "Better";
-                                })
-                                .skip(3)
-                                .tooltip("Fast clouds are flat, Fancy clouds have volume. Better, volumetric clouds, is not available yet.")
+                        cloudsCycle()
+                                .tooltip("Fast clouds are flat, Fancy clouds have volume. Better draws a wide, slowly drifting field "
+                                        + "of soft volumetric clouds that glow at sunrise and sunset and thicken in rain "
+                                        + "(overworld, no shader pack). With ray tracing on, the traced clouds are used.")
                                 .impact(Impact.LOW),
                         new Option.Cycle<>("Precipitation", Storage.VESU, new String[]{"off", "fancy", "particle"}, v -> switch (v) {
                             case "off" -> "Off";
                             case "particle" -> "Particle";
                             default -> "Fancy";
-                        }, () -> "off".equals(cfg().precipitation) ? "off" : "fancy", v -> cfg().precipitation = v)
-                                .skip("particle")
+                        }, () -> cfg().precipitation, v -> cfg().precipitation = v)
                                 .tooltip("Rain and snow. Off hides them and their splashes; the rain still sounds. "
-                                        + "Particle, drops as particles, is not available yet.")
+                                        + "Particle draws single drops and flakes that splash on the ground and ripple on water.")
                                 .impact(Impact.LOW),
                         vanillaCycle(GameSettings.Options.PARTICLES, () -> gs().particleSetting,
                                 I18n.format("options.particles.all"), I18n.format("options.particles.decreased"),
@@ -428,6 +422,30 @@ public final class VesuOptionPages {
         return new Option.Toggle(name(option), Storage.VANILLA, getter, v -> {
             if (v != getter.get()) gs().setOptionValue(option, 1);
         });
+    }
+
+    /**
+     * Vanilla clouds Off/Fast/Fancy plus Better, Vesu's own setting on top of Fancy: vanilla
+     * keeps Fancy (options.txt, the traced clouds), {@link Config#betterClouds} selects Better.
+     */
+    private static Option.Cycle<Integer> cloudsCycle() {
+        return new Option.Cycle<>(name(GameSettings.Options.RENDER_CLOUDS), Storage.VANILLA, new Integer[]{0, 1, 2, 3},
+                v -> switch (v) {
+                    case 0 -> I18n.format("options.off");
+                    case 1 -> I18n.format("options.clouds.fast");
+                    case 2 -> I18n.format("options.clouds.fancy");
+                    default -> "Better";
+                },
+                () -> gs().clouds == 2 && cfg().betterClouds ? 3 : gs().clouds,
+                v -> {
+                    int delta = Math.floorMod(Math.min(v, 2) - gs().clouds, 3);
+                    if (delta != 0) gs().setOptionValue(GameSettings.Options.RENDER_CLOUDS, delta);
+                    boolean better = v == 3;
+                    if (cfg().betterClouds != better) {
+                        cfg().betterClouds = better;
+                        Initializer.saveConfig();
+                    }
+                });
     }
 
     private static Option.Cycle<Integer> vanillaCycle(GameSettings.Options option, IntSupplier getter, String... labels) {

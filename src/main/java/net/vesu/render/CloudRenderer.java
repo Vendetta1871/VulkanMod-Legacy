@@ -74,6 +74,7 @@ public class CloudRenderer {
         cloudPipeline = new Pipeline(POSITION_TEX_COLOR, "clouds");
         cloudPipeline.setDepthClamp(true);
         cloudBuffer = MemoryUtil.memAlloc(FANCY_VERTS_MAX * POSITION_TEX_COLOR.getSize());
+        BetterClouds.init();
     }
 
     /**
@@ -184,6 +185,14 @@ public class CloudRenderer {
         // shading factors (M12), so the fragment multiplies colour x shading x texture
         // exactly like vanilla's per-vertex product.
         VRenderSystem.setShaderColor(r, g, b, 1.0f);
+
+        // Better: the cloud-cube field on top of Fancy, overworld only, without a shader pack
+        // (a pack shades the vanilla cloud geometry with its own clouds program).
+        if (mc.gameSettings.shouldRenderClouds() == 2 && Initializer.CONFIG.effectiveBetterClouds()
+                && world.provider.getDimension() == 0 && net.vesu.shader.PackManager.active() == null) {
+            return BetterClouds.render(world, headMV, partialTicks, cloudTickCounter, eyeX, eyeY, eyeZ);
+        }
+
         VRenderSystem.setShaderPipeline(cloudPipeline);
         // SRC_ALPHA / ONE_MINUS_SRC_ALPHA, matching vanilla's tryBlendFuncSeparate.
         Drawer.currentBlendState = Pipeline.DEFAULT_BLEND_STATE;

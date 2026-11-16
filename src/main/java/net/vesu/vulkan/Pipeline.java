@@ -1146,8 +1146,9 @@ public class Pipeline {
 
         bindingDescription.binding(0);
         bindingDescription.stride(vertexFormat.getSize());
-        // GPU particles: one record per instance, the quad corners come from gl_VertexIndex.
+        // GPU particles and better-cloud cubes: one record per instance, the shape comes from gl_VertexIndex.
         bindingDescription.inputRate(vertexFormat == net.vesu.render.GpuParticles.FORMAT
+                || vertexFormat == net.vesu.render.BetterClouds.FORMAT
                 ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX);
 
         return bindingDescription;

@@ -20,6 +20,10 @@ public class Vec4Array extends Field {
             this.set = net.vesu.render.DynamicLights::viewSpaceArrayAll;
         } else if (this.name.equals("ParticleAxes")) {
             this.set = net.vesu.render.GpuParticles::axes;
+        } else if (this.name.equals("BcVert")) {
+            this.set = net.vesu.render.BetterClouds::vertParams;
+        } else if (this.name.equals("BcFrag")) {
+            this.set = net.vesu.render.BetterClouds::fragParams;
         }
     }
 

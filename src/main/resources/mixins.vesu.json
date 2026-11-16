@@ -69,6 +69,8 @@
     "render.SimulationWorldServerM",
     "render.SDLHooksM",
     "render.WeatherM",
+    "render.WorldClientWeatherM",
+    "render.ParticleMotionAccessor",
     "render.NetHandlerPlayClientM",
     "render.ChunkProviderClientM",
     "render.BlockLeavesM",

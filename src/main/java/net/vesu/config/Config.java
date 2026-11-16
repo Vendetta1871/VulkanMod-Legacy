@@ -61,8 +61,17 @@ public class Config {
      */
     public int simulationDistance = 12;
     public static final int SIMULATION_DISTANCE_MIN = 5, SIMULATION_DISTANCE_MAX = 32;
-    /** Rain and snow: fancy (the vanilla drawing) | off. */
+    /**
+     * Rain and snow: fancy (the vanilla drawing) | particle (rain, snow and ambient weather
+     * as particles, see {@link net.vesu.weather.Weather}) | off.
+     */
     public String precipitation = "fancy";
+    /**
+     * The fourth cloud quality, above vanilla's Fancy: a drifting field of soft, semi-transparent
+     * cloud cubes lit by sun angle and time of day ({@link net.vesu.render.BetterClouds}). Only
+     * applies while vanilla clouds are Fancy.
+     */
+    public boolean betterClouds = false;
 
     /**
      * Fancy leaves: off | hollow (a face with two leaf layers behind it) | aggressive (a leaf
@@ -280,6 +289,18 @@ public class Config {
 
     public int effectiveSimulationDistance() {
         return Math.max(SIMULATION_DISTANCE_MIN, Math.min(SIMULATION_DISTANCE_MAX, simulationDistance));
+    }
+
+    /** {@link #precipitation}, VESU_PRECIPITATION=off|fancy|particle overriding it. */
+    public String effectivePrecipitation() {
+        String env = Env.get("VESU_PRECIPITATION");
+        return env != null ? env : precipitation;
+    }
+
+    /** {@link #betterClouds}; VESU_CLOUDS=better turns it on, any other value off. */
+    public boolean effectiveBetterClouds() {
+        String env = Env.get("VESU_CLOUDS");
+        return env != null ? env.equals("better") : betterClouds;
     }
 
     private static float envFloat(String name, float fallback) {
