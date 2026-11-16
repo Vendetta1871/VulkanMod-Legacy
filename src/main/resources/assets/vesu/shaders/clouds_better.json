@@ -5,19 +5,20 @@
             "type": "vertex",
             "fields": [
                 { "name": "MVP", "type": "matrix4x4", "count": 16 },
-                { "name": "BcVert", "type": "vec4array", "count": 5 }
+                { "name": "BcVert", "type": "vec4array", "count": 9 }
             ]
         },
         {
             "binding": 1,
             "type": "fragment",
             "fields": [
-                { "name": "BcFrag", "type": "vec4array", "count": 5 }
+                { "name": "BcFrag", "type": "vec4array", "count": 6 }
             ]
         }
     ],
     "samplers": [
         { "name": "Sampler0" },
-        { "name": "Sampler1" }
+        { "name": "Sampler1" },
+        { "name": "Sampler2" }
     ]
 }

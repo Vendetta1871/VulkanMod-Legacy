@@ -462,7 +462,9 @@ final class RtLightingPass {
         // drift of 0.03 blocks per tick along x, wrapped at the pattern's 3072 blocks), the
         // layer's bottom relative to the camera, on/off.
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
-        boolean clouds = sky && mc.world != null && mc.gameSettings.shouldRenderClouds() != 0;
+        // Better clouds are rastered over the composite instead (BetterClouds).
+        boolean clouds = sky && mc.world != null && mc.gameSettings.shouldRenderClouds() != 0
+                && !net.vesu.render.BetterClouds.wanted(mc.world);
         if (clouds) {
             double drift = (mc.world.getTotalWorldTime() + mc.getRenderPartialTicks()) * 0.03;
             p.putFloat(160, (float) ((((cx + drift) % 3072.0) + 3072.0) % 3072.0))

@@ -72,6 +72,11 @@ public final class LodSystem {
         return session != null && Initializer.CONFIG.lodRendering && VRenderSystem.reverseZ;
     }
 
+    /** Distant terrain is on and drawn, with or without a shader pack. */
+    public static boolean rendering() {
+        return session != null && Initializer.CONFIG.lodRendering;
+    }
+
     public static double distanceBlocks() {
         return Initializer.CONFIG.lodDistance * 16.0;
     }

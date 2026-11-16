@@ -78,11 +78,36 @@ public final class BetterClouds {
     private static final float WORLD_CURVATURE = 0.0f;
     private static final boolean FRUSTUM_CULLING = true;
 
-    private static final float GAMMA = 1.0f, SUN_PATH_ANGLE_DEG = 0.0f;
-    private static final float RISE_START = -785, RISE_END = 1163, SET_START = 10837, SET_END = 12785;
     private static final float REF_RISE_START = -785, REF_RISE_END = 1163, REF_SET_START = 10837, REF_SET_END = 12785;
-    private static final float DAY_BRIGHTNESS = 1.0f, NIGHT_BRIGHTNESS = 1.0f, SATURATION = 1.0f;
-    private static final float OPACITY = 0.2f, OPACITY_FACTOR = 1.0f, OPACITY_EXPONENT = 1.5f;
+
+    /**
+     * A shader preset (spec 2.2): colour handling and sun path for the target the clouds land
+     * in. "Default" without a shader pack; under a pack the shipped preset matching its name, so
+     * the clouds sit in the pack's colour space and follow its tilted sun path.
+     */
+    private record Preset(float gamma, float sunPathAngle, float riseStart, float riseEnd, float setStart,
+                          float setEnd, float day, float night, float saturation, float opacity,
+                          float opacityFactor, float opacityExponent) {
+        static Preset of(float gamma, float sunPathAngle, float day, float night, float saturation, float opacityFactor) {
+            return new Preset(gamma, sunPathAngle, -785, 1163, 10837, 12785, day, night, saturation, 0.2f,
+                    opacityFactor, 1.5f);
+        }
+    }
+
+    private static final Preset DEFAULT = Preset.of(1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+    private static final Preset SOFT_VOXELS_LITE = Preset.of(-2.2f, -25.0f, 2.25f, 1.0f, 1.0f, 1.0f);
+    private static final Preset BSL = Preset.of(1.0f, -40.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+    private static final Preset CHOCAPIC_V6 = Preset.of(-2.25f, -40.0f, 0.71f, 0.41f, 1.3f, 0.75f);
+    private static final Preset CHOCAPIC_V9 = Preset.of(-2.25f, -40.0f, 1.21f, 0.5f, 1.0f, 0.5f);
+    private static final Preset COMPLEMENTARY_REIMAGINED = Preset.of(1.0f, 0.0f, 1.2f, 1.0f, 1.1f, 1.0f);
+    private static final Preset COMPLEMENTARY_V4 = Preset.of(-2.25f, -40.0f, 0.6f, 0.9f, 1.3f, 1.0f);
+    private static final Preset KAPPA = new Preset(-2.4f, -35.0f, -1500, 500, 11500, 13000, 4.0f, 0.46f, 1.0f,
+            0.2f, 1.0f, 0.75f);
+    private static final Preset RETHINKING_VOXELS = Preset.of(1.5f, 0.0f, 1.5f, 1.0f, 0.75f, 1.0f);
+    private static final Preset SOLAS = Preset.of(1.0f, -40.0f, 0.86f, 1.0f, 0.8f, 1.0f);
+
+    private static Preset preset = DEFAULT;
+    private static Object presetFor;
     private static final float[] TOP_COLOR = {1.0f, 1.0f, 1.0f};
     private static final float[] BOTTOM_COLOR = {0.75f, 0.75f, 0.75f};
     private static final float COLOR_TRANSITION_END = 0.5f;
@@ -100,8 +125,8 @@ public final class BetterClouds {
     private static VulkanImage lightTexture;
 
     /** UBO fields {@code BcVert} / {@code BcFrag}, see clouds_better.vsh / .fsh. */
-    private static final float[] VERT = new float[20];
-    private static final float[] FRAG = new float[20];
+    private static final float[] VERT = new float[36];
+    private static final float[] FRAG = new float[24];
 
     private static World lastWorld;
     private static long seed;
@@ -117,6 +142,22 @@ public final class BetterClouds {
     private static VertexBuffer instanceBuffer;
     private static int[] runs = new int[64];
 
+    /**
+     * The prepared draw of this frame. Below the cloud layer vanilla asks for the clouds before
+     * the terrain; they are kept until the translucent layer starts, after opaque terrain, the
+     * distant terrain, the RT lighting and a pack's DEFERRED passes (spec 8.2).
+     */
+    private static boolean pending;
+    private static long pendingFrame;
+    private static int drawRuns;
+    private static final float[] PROJ = new float[16];
+    private static final Matrix4f DRAW_MV = new Matrix4f();
+    /** The recording whose translucent layer has started: clouds asked for later draw at once. */
+    private static long translucentFrame = -1;
+    /** Sampled view of a pack's distant-terrain depth (dhDepthTex0), rebuilt when the view changes. */
+    private static VulkanImage dhDepth;
+    private static long dhDepthView;
+
     /** Cloud-tick bookkeeping for the interpolated clock (spec 4.1). */
     private static long lastTotalTime = Long.MIN_VALUE, lastTickWorldTime;
     private static long ticksPerClientTick;
@@ -126,6 +167,13 @@ public final class BetterClouds {
     public static void init() {
         pipeline = new Pipeline(FORMAT, "clouds_better");
         pipeline.setDepthClamp(true);
+    }
+
+    /** Better replaces the vanilla clouds this frame: Fancy + Better, overworld (any pack, RT or not). */
+    public static boolean wanted(World world) {
+        Minecraft mc = Minecraft.getMinecraft();
+        return world != null && mc.gameSettings.shouldRenderClouds() == 2
+                && Initializer.CONFIG.effectiveBetterClouds() && world.provider.getDimension() == 0;
     }
 
     public static float[] vertParams() {
@@ -146,6 +194,7 @@ public final class BetterClouds {
     public static boolean render(World world, Matrix4f headMV, float partialTicks, int cloudTickCounter,
                                  double eyeX, double eyeY, double eyeZ) {
         if (pipeline == null) return false;
+        pending = false;
         Minecraft mc = Minecraft.getMinecraft();
         Entity viewer = mc.getRenderViewEntity();
         double camX = eyeX, camY = eyeY + (viewer != null ? viewer.getEyeHeight() : 0.0f), camZ = eyeZ;
@@ -223,6 +272,7 @@ public final class BetterClouds {
         VERT[12] = WIND_EFFECT; VERT[13] = WIND_SPEED; VERT[14] = FOG_DENSITY; VERT[15] = fogEnd;
         VERT[16] = curvature(); VERT[17] = NEAR_FADE ? 1.0f : 0.0f; VERT[18] = 0.0f; VERT[19] = 0.0f;
 
+        preset = selectPreset();
         computeFragmentUniforms(world, mc, partialTicks, worldTime, tickDelta);
 
         // --- culling runs (spec 8.3) ---
@@ -232,30 +282,135 @@ public final class BetterClouds {
             return true;
         }
 
-        // --- draw ---
-        Matrix4f mv = new Matrix4f(headMV).translate((float) roX, (float) roY, (float) roZ);
-        VRenderSystem.applyModelViewMatrix(mv);
-        VRenderSystem.calculateMVP();
-        VRenderSystem.setShaderPipeline(pipeline);
-        Drawer.currentBlendState = BLEND;
-        VRenderSystem.enableDepthTest();
-        VRenderSystem.depthFunc(515); // GL_LEQUAL: not behind the stored depth
-        VRenderSystem.depthMask(OPACITY > 0.975f);
-        VRenderSystem.disableCull();
-        VulkanImage savedLight = VTextureSelector.getLightTexture();
-        VTextureSelector.bindTexture(noiseTexture);
-        VTextureSelector.setLightTexture(lightTexture);
-        try {
-            Drawer.getInstance().drawInstancedRuns(instanceBuffer, CUBE_VERTICES, runs, runCount);
-        } finally {
-            VTextureSelector.setLightTexture(savedLight);
+        // --- snapshot the draw: now (above the layer) or at the translucent layer ---
+        drawRuns = runCount;
+        VRenderSystem.getProjectionMatrix4f().get(0, PROJ);
+        DRAW_MV.set(headMV).translate((float) roX, (float) roY, (float) roZ);
+        long frame = net.vesu.vulkan.LodPackBridge.recordingId();
+        if (translucentFrame != frame) {
+            pending = true;
+            pendingFrame = frame;
+            return true;
         }
+        draw();
         return true;
     }
 
-    /** Generation radius in blocks: twice the render distance, kept within 384..768. */
+    /**
+     * Start of the translucent layer (TerrainRenderer, after the RT lighting and the pack's
+     * DEFERRED passes; RenderGlobal at the end of the layer as a fallback): the clouds kept from
+     * below the layer draw now, and later requests of this frame draw at once.
+     */
+    public static void onTranslucentLayer() {
+        translucentFrame = net.vesu.vulkan.LodPackBridge.recordingId();
+        if (!pending) return;
+        pending = false;
+        if (pendingFrame != translucentFrame || !Drawer.isActive() || Drawer.skipRendering) return;
+        try {
+            draw();
+        } catch (Throwable t) {
+            TerrainRenderer.reportOnce("better clouds", t);
+        }
+    }
+
+    /** Draws the snapshot into the current scene targets, restoring every state it touches. */
+    private static void draw() {
+        if (instanceBuffer == null || drawRuns == 0) return;
+        float[] savedProj = new float[16], savedMV = new float[16];
+        VRenderSystem.getProjectionMatrix4f().get(0, savedProj);
+        VRenderSystem.getModelViewMatrix4f().get(0, savedMV);
+        boolean depthTest = VRenderSystem.depthTest, depthMask = VRenderSystem.depthMask, cull = VRenderSystem.cull;
+        int depthFun = VRenderSystem.depthFun, colorMask = VRenderSystem.colorMask;
+        Pipeline.BlendState blend = Drawer.currentBlendState;
+        Pipeline shader = VRenderSystem.getShaderPipeline();
+        VulkanImage savedTex = VTextureSelector.getBoundTexture();
+        VulkanImage savedLight = VTextureSelector.getLightTexture();
+        VulkanImage savedOverlay = VTextureSelector.getOverlayTexture();
+        try {
+            VRenderSystem.getProjectionMatrix4f().put(0, PROJ);
+            VRenderSystem.applyModelViewMatrix(DRAW_MV);
+            VRenderSystem.calculateMVP();
+
+            // Ray tracing relights the scene in its own units: vanilla white to scene white.
+            FRAG[20] = net.vesu.vulkan.FrameTargets.rtShadesScene() ? VRenderSystem.rtVanillaScale() : 1.0f;
+
+            // A pack's distant terrain has its own depth and projection: compare against it (spec 8.5).
+            VulkanImage overlay = VTextureSelector.getWhiteTexture();
+            FRAG[21] = 0.0f;
+            long view = net.vesu.vulkan.LodPackBridge.separateDepthView();
+            if (view != 0L) {
+                if (dhDepth == null || dhDepthView != view) {
+                    dhDepth = VulkanImage.external(net.vesu.vulkan.LodPackBridge.separateDepthImage(), view);
+                    dhDepthView = view;
+                }
+                overlay = dhDepth;
+                FRAG[21] = VRenderSystem.reverseZ ? 2.0f : 1.0f;
+                Matrix4f gl = new Matrix4f().set(PROJ);
+                net.vesu.shader.FrameUniforms.withPlanes(gl, net.vesu.shader.FrameUniforms.DH_NEAR_PLANE,
+                        net.vesu.shader.FrameUniforms.dhFarPlane(), gl);
+                VRenderSystem.remapDepth(gl, gl).mul(DRAW_MV).get(VERT, 20);
+            }
+
+            VRenderSystem.setShaderPipeline(pipeline);
+            Drawer.currentBlendState = BLEND;
+            VRenderSystem.enableDepthTest();
+            VRenderSystem.depthFunc(515); // GL_LEQUAL: not behind the stored depth
+            VRenderSystem.depthMask(preset.opacity() > 0.975f);
+            VRenderSystem.disableCull();
+            VRenderSystem.colorMask(true, true, true, true);
+            VTextureSelector.bindTexture(noiseTexture);
+            VTextureSelector.setLightTexture(lightTexture);
+            VTextureSelector.setOverlayTexture(overlay);
+            Drawer.getInstance().drawInstancedRuns(instanceBuffer, CUBE_VERTICES, runs, drawRuns);
+        } finally {
+            VTextureSelector.bindTexture(savedTex);
+            VTextureSelector.setLightTexture(savedLight);
+            VTextureSelector.setOverlayTexture(savedOverlay);
+            if (shader != null) VRenderSystem.setShaderPipeline(shader);
+            Drawer.currentBlendState = blend;
+            VRenderSystem.depthTest = depthTest;
+            VRenderSystem.depthMask = depthMask;
+            VRenderSystem.depthFun = depthFun;
+            VRenderSystem.cull = cull;
+            VRenderSystem.colorMask = colorMask;
+            VRenderSystem.getProjectionMatrix4f().put(0, savedProj);
+            VRenderSystem.getModelViewMatrix4f().put(0, savedMV);
+            VRenderSystem.calculateMVP();
+        }
+    }
+
+    /** Upper bound of the cloud distance with distant terrain on (cube count and generation time). */
+    private static final int LOD_DISTANCE_MAX = 1536;
+
+    /**
+     * Generation radius in blocks (the spec's cloud range): twice the render distance within
+     * 384..768; with distant terrain drawing, its view distance up to {@link #LOD_DISTANCE_MAX}.
+     */
     private static int blockDistance(Minecraft mc) {
-        return MathHelper.clamp(mc.gameSettings.renderDistanceChunks * 32, 384, 768);
+        int d = MathHelper.clamp(mc.gameSettings.renderDistanceChunks * 32, 384, 768);
+        if (net.vesu.lod.mc.LodSystem.rendering()) {
+            d = Math.max(d, (int) Math.min(net.vesu.lod.mc.LodSystem.distanceBlocks(), LOD_DISTANCE_MAX));
+        }
+        return d;
+    }
+
+    /** The shipped shader preset for the active pack (by its id and name), else the default. */
+    private static Preset selectPreset() {
+        net.vesu.pack.ir.IrPack pack = net.vesu.shader.PackManager.active();
+        if (pack == presetFor && preset != null) return preset;
+        presetFor = pack;
+        if (pack == null) return DEFAULT;
+        String n = (pack.id + " " + pack.name).toLowerCase(java.util.Locale.ROOT);
+        if (n.contains("complementary")) {
+            return n.contains("reimagined") || n.contains("unbound") ? COMPLEMENTARY_REIMAGINED : COMPLEMENTARY_V4;
+        }
+        if (n.contains("bsl")) return BSL;
+        if (n.contains("chocapic")) return n.contains("v6") ? CHOCAPIC_V6 : CHOCAPIC_V9;
+        if (n.contains("kappa")) return KAPPA;
+        if (n.contains("rethinking")) return RETHINKING_VOXELS;
+        if (n.contains("solas")) return SOLAS;
+        if (n.contains("soft") && n.contains("voxels")) return SOFT_VOXELS_LITE;
+        return DEFAULT;
     }
 
     private static float curvature() {
@@ -383,23 +538,24 @@ public final class BetterClouds {
         // Day/night factor and the light-texture time, remapped onto the reference windows.
         float dayFactor;
         float mapped;
+        Preset ps = preset;
         if (dayTime <= 6000.0f || dayTime > 18000.0f) {
             float t = dayTime > 18000.0f ? dayTime - 24000.0f : dayTime;
-            dayFactor = smoothstep(RISE_START, RISE_END, t);
-            if (t < RISE_START) mapped = remap(t, -6000, RISE_START, -6000, REF_RISE_START);
-            else if (t < RISE_END) mapped = remap(t, RISE_START, RISE_END, REF_RISE_START, REF_RISE_END);
-            else mapped = remap(t, RISE_END, 6000, REF_RISE_END, 6000);
+            dayFactor = smoothstep(ps.riseStart(), ps.riseEnd(), t);
+            if (t < ps.riseStart()) mapped = remap(t, -6000, ps.riseStart(), -6000, REF_RISE_START);
+            else if (t < ps.riseEnd()) mapped = remap(t, ps.riseStart(), ps.riseEnd(), REF_RISE_START, REF_RISE_END);
+            else mapped = remap(t, ps.riseEnd(), 6000, REF_RISE_END, 6000);
         } else {
-            dayFactor = 1.0f - smoothstep(SET_START, SET_END, dayTime);
-            if (dayTime < SET_START) mapped = remap(dayTime, 6000, SET_START, 6000, REF_SET_START);
-            else if (dayTime < SET_END) mapped = remap(dayTime, SET_START, SET_END, REF_SET_START, REF_SET_END);
-            else mapped = remap(dayTime, SET_END, 18000, REF_SET_END, 18000);
+            dayFactor = 1.0f - smoothstep(ps.setStart(), ps.setEnd(), dayTime);
+            if (dayTime < ps.setStart()) mapped = remap(dayTime, 6000, ps.setStart(), 6000, REF_SET_START);
+            else if (dayTime < ps.setEnd()) mapped = remap(dayTime, ps.setStart(), ps.setEnd(), REF_SET_START, REF_SET_END);
+            else mapped = remap(dayTime, ps.setEnd(), 18000, REF_SET_END, 18000);
         }
-        float brightness = lerp(NIGHT_BRIGHTNESS, DAY_BRIGHTNESS, dayFactor);
+        float brightness = lerp(ps.night(), ps.day(), dayFactor);
 
         // Sun direction: (1,0,0) rotated by alpha + pi/2 about the sun-path axis (0, sin b, cos b).
         float alpha = world.getCelestialAngle(partialTicks) * (float) (Math.PI * 2.0);
-        float beta = (float) Math.toRadians(SUN_PATH_ANGLE_DEG);
+        float beta = (float) Math.toRadians(ps.sunPathAngle());
         float ay = MathHelper.sin(beta), az = MathHelper.cos(beta);
         float theta = alpha + (float) (Math.PI / 2.0);
         float ct = MathHelper.cos(theta), st = MathHelper.sin(theta);
@@ -408,7 +564,7 @@ public final class BetterClouds {
 
         // Halo size: sun until the end of sunset, then the moon by phase.
         float halo;
-        if (dayTime < SET_END) {
+        if (dayTime < ps.setEnd()) {
             halo = 2.05f - SUN_HALO_SIZE;
         } else {
             float factor = MOON_PHASE_FACTORS[Math.floorMod(world.getMoonPhase(), 8)];
@@ -417,9 +573,9 @@ public final class BetterClouds {
 
         float[] tint = effectTint(world, mc, partialTicks, alpha);
 
-        float gamma = GAMMA > 0.0f ? GAMMA : -1.0f / GAMMA;
-        FRAG[0] = OPACITY; FRAG[1] = OPACITY_FACTOR; FRAG[2] = OPACITY_EXPONENT; FRAG[3] = brightness;
-        FRAG[4] = gamma; FRAG[5] = SATURATION; FRAG[6] = halo; FRAG[7] = mapped / 24000.0f;
+        float gamma = ps.gamma() > 0.0f ? ps.gamma() : -1.0f / ps.gamma();
+        FRAG[0] = ps.opacity(); FRAG[1] = ps.opacityFactor(); FRAG[2] = ps.opacityExponent(); FRAG[3] = brightness;
+        FRAG[4] = gamma; FRAG[5] = ps.saturation(); FRAG[6] = halo; FRAG[7] = mapped / 24000.0f;
         FRAG[8] = TOP_COLOR[0] * tint[0]; FRAG[9] = TOP_COLOR[1] * tint[1]; FRAG[10] = TOP_COLOR[2] * tint[2];
         FRAG[11] = ay;
         FRAG[12] = BOTTOM_COLOR[0] * tint[0]; FRAG[13] = BOTTOM_COLOR[1] * tint[1];

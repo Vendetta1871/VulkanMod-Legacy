@@ -19,6 +19,31 @@ public final class LodPackBridge {
                 && p.lodProgram(false) != null;
     }
 
+    /** Id of the frame being recorded (bumped at every frame start). */
+    public static long recordingId() {
+        return FrameTargets.recordingId();
+    }
+
+    /**
+     * The view of the distant terrain's own depth (dhDepthTex0, cleared every frame and kept
+     * shader-readable between the LOD passes) while a pack draws distant terrain through its DH
+     * programs this frame; 0 when distant terrain shares the scene depth or there is none.
+     */
+    public static long separateDepthView() {
+        PackRuntime p = FrameTargets.packRuntime();
+        if (p == null || FrameTargets.phase() != FrameTargets.Phase.SCENE || p.lodProgram(false) == null
+                || p.lodThroughTerrain()) {
+            return 0L;
+        }
+        return p.dhDepthView();
+    }
+
+    /** The image behind {@link #separateDepthView()}. */
+    public static long separateDepthImage() {
+        PackRuntime p = FrameTargets.packRuntime();
+        return p == null ? 0L : p.dhDepthImage();
+    }
+
     /** The current pack has a program that draws distant terrain. */
     public static boolean drawsLod() {
         PackRuntime p = FrameTargets.packRuntime();

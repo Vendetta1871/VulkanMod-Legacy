@@ -95,8 +95,9 @@ public class CloudRenderer {
         if (!world.provider.isSurfaceWorld()) {
             return false;
         }
-        // The RT composite traces the clouds as lit boxes (rt_composite.comp): none rastered.
-        if (net.vesu.vulkan.FrameTargets.rtShadesScene()) {
+        // The RT composite traces vanilla's clouds as lit boxes (rt_composite.comp): none rastered.
+        // Better clouds replace them and are rastered over the relit scene instead.
+        if (net.vesu.vulkan.FrameTargets.rtShadesScene() && !BetterClouds.wanted(world)) {
             return true;
         }
         // A modded cloud renderer draws its own GL geometry; like the sky renderer it
@@ -186,10 +187,10 @@ public class CloudRenderer {
         // exactly like vanilla's per-vertex product.
         VRenderSystem.setShaderColor(r, g, b, 1.0f);
 
-        // Better: the cloud-cube field on top of Fancy, overworld only, without a shader pack
-        // (a pack shades the vanilla cloud geometry with its own clouds program).
-        if (mc.gameSettings.shouldRenderClouds() == 2 && Initializer.CONFIG.effectiveBetterClouds()
-                && world.provider.getDimension() == 0 && net.vesu.shader.PackManager.active() == null) {
+        // Better: the cloud-cube field on top of Fancy, overworld only. Under a shader pack it
+        // replaces the pack's gbuffers_clouds pass (Iris-style: own shader into the pack's targets,
+        // after its DEFERRED passes); clouds=off in the pack never gets here (RenderGlobalM).
+        if (BetterClouds.wanted(world)) {
             return BetterClouds.render(world, headMV, partialTicks, cloudTickCounter, eyeX, eyeY, eyeZ);
         }
 

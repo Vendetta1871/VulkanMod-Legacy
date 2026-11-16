@@ -80,6 +80,24 @@ public class VulkanImage {
         updateTextureSampler(blur, clamp, mipLevels > 1);
     }
 
+    /** A sampled view of an image owned elsewhere ({@link #external}). */
+    private VulkanImage(long image, long view) {
+        this.id = image;
+        this.textureImageView = view;
+        this.mipLevels = 1;
+        this.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        updateTextureSampler(false, true, false);
+    }
+
+    /**
+     * Wraps an image and view another owner keeps in {@code SHADER_READ_ONLY_OPTIMAL} whenever
+     * it is sampled (e.g. a pack's distant-terrain depth), for binding through
+     * {@link VTextureSelector}: nearest, clamped. Never uploaded to nor freed through the wrapper.
+     */
+    public static VulkanImage external(long image, long view) {
+        return new VulkanImage(image, view);
+    }
+
     public VulkanImage(int miplevel, int width, int height) {
         this(miplevel, width, height, 4, false, true);
     }

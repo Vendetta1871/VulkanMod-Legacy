@@ -365,6 +365,9 @@ public class TerrainRenderer {
             // The lighting ran on entering the layer: path-traced water and glass replace the raster ones.
             VRenderSystem.ptTranslucentRange = VRenderSystem.pathTracedRange();
             VRenderSystem.translucentScale = VRenderSystem.rtVanillaScale();
+            // Better clouds asked for below the cloud layer draw here: over the opaque and distant
+            // terrain, the RT lighting and a pack's DEFERRED output, under the translucent layer.
+            BetterClouds.onTranslucentLayer();
         }
         currentLayer = layer;
         logStats();

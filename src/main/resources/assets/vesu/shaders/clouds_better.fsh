@@ -11,19 +11,32 @@ layout(binding = 1) uniform UniformBufferObject {
     // [2] top colour (tinted).rgb, sin(sunPathAngle)
     // [3] bottom colour (tinted).rgb, cos(sunPathAngle)
     // [4] sun direction.xyz, halo enabled (0/1)
-    vec4 BcFrag[5];
+    // [5] colour scale (ray tracing: vanilla white in scene units), distant-terrain depth
+    //     compare (0 off, 1 forward depth, 2 reverse-Z), unused, unused
+    vec4 BcFrag[6];
 };
 
 // Light gradient: 32x32, bilinear; U never leaves the texel-center inset, V repeats.
 layout(binding = 3) uniform sampler2D Sampler1;
 
+// A shader pack's distant-terrain depth (dhDepthTex0, its own projection); white when unused.
+layout(binding = 4) uniform sampler2D Sampler2;
+
 layout(location = 0) in float fogFade;
 layout(location = 1) in float tintT;
 layout(location = 2) in vec3 lightDir;
+layout(location = 3) in vec4 dhPos;
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
+    // Behind distant terrain drawn into its own depth: hidden (the scene depth test covers the rest).
+    if (BcFrag[5].y > 0.5) {
+        float z = dhPos.z / dhPos.w;
+        float stored = texelFetch(Sampler2, ivec2(gl_FragCoord.xy), 0).r;
+        if (BcFrag[5].y < 1.5 ? stored < z : stored > z) discard;
+    }
+
     vec3 n = normalize(lightDir);
     vec3 sun = BcFrag[4].xyz;
     float s = dot(sun, n);
@@ -66,5 +79,5 @@ void main() {
 
     // 6. Alpha.
     float alpha = BcFrag[0].y * BcFrag[0].x * pow(fogFade, BcFrag[0].z);
-    fragColor = vec4(light * base, alpha);
+    fragColor = vec4(light * base * BcFrag[5].x, alpha);
 }

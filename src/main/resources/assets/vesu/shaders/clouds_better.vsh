@@ -15,7 +15,8 @@ layout(binding = 0) uniform UniformBufferObject {
     // [2] camera x, camera z, H (yRange + sizeY), scaleFalloffMin
     // [3] windEffectFactor, windSpeedFactor, fogDensityFactor, fog end E
     // [4] world curvature C (0 = off), near fade (0/1), unused, unused
-    vec4 BcVert[5];
+    // [5..8] columns of the distant terrain's clip matrix (a pack's DH projection), when compared
+    vec4 BcVert[9];
 };
 
 // Noise texture: only the red channel is used (bilinear, repeat).
@@ -24,6 +25,7 @@ layout(binding = 2) uniform sampler2D Sampler0;
 layout(location = 0) out float fogFade;
 layout(location = 1) out float tintT;
 layout(location = 2) out vec3 lightDir;
+layout(location = 3) out vec4 dhPos;
 
 // Two triangles per face; corner numbering 0 (-,-,-) 1 (+,-,-) 2 (+,+,-) 3 (-,+,-)
 // 4 (-,-,+) 5 (+,-,+) 6 (+,+,+) 7 (-,+,+). Culling is off, the winding is irrelevant.
@@ -87,4 +89,5 @@ void main() {
     lightDir = v;
 
     gl_Position = MVP * vec4(V, 1.0);
+    dhPos = mat4(BcVert[5], BcVert[6], BcVert[7], BcVert[8]) * vec4(V, 1.0);
 }

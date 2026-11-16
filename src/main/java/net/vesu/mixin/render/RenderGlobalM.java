@@ -70,6 +70,11 @@ public abstract class RenderGlobalM {
                 && net.vesu.vulkan.FrameTargets.handInScene() && net.vesu.render.EntityRenderer.heldTranslucent()) {
             vesu$drawHand();
         }
+        // Fallback when the translucent chunk pass did not start this frame: Better clouds kept
+        // from below the cloud layer still draw, and the ones above it draw at once.
+        if (layer == net.minecraft.util.BlockRenderLayer.TRANSLUCENT && Initializer.isVulkanActive()) {
+            net.vesu.render.BetterClouds.onTranslucentLayer();
+        }
     }
 
     @org.spongepowered.asm.mixin.Unique
