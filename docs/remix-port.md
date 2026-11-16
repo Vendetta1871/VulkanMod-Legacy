@@ -26,13 +26,22 @@ renderer (native Linux, our RR2 runtime), not run the Remix runtime under Wine.
 | Integrator (bounces, roulette, lobe probabilities) | rtx_pathtracer_integrate_* | pathtrace.rgen hitRadiance | bounce hits: SHaRC, else sun + block light NEE and a second bounce (High preset: 2 bounces); lightmap only as last resort. lobe probabilities >= 0.05 (RR preset); no roulette needed with 2 bounces |
 | NEE cache | rtx_nee_cache | none | to port |
 | Radiance cache | NRC (rtx.conf) / SHaRC | SHaRC | NRC needs tensor-core training; align SHaRC settings |
-| Materials (blocks, LabPBR, thin opaque leaves/plants) | mod texture/BlockTextureManager, LabPBRConverter | RtMaterials, surfaceOf | default roughness 180/255, LabPBR read as Remix ((1-s)^2 perceptual, F0 0.04, metal G>=230); mod baseline _s maps bundled under 1.12 names. LabPBR normal maps (_n, DirectX Y, AO into the albedo) and thin subsurface transmission (_s blue) in the path tracer. RTX Remix Materials pack: tools/remix_materials.py converts the release zip to a 1.12 resource pack (307 block textures; the rest the pack does not have). Not yet: _sss albedo maps, height (POM), entity/item textures |
+| Materials (blocks, LabPBR, thin opaque leaves/plants) | mod texture/BlockTextureManager, LabPBRConverter | RtMaterials, RtMaterialRules, surfaceOf | LabPBR read as Remix ((1-s)^2 perceptual, F0 0.04, metal G>=230, emission alpha, subsurface blue); a pack's own _s/_n win. Otherwise Vesu's own material set: assets/vesu/materials.json (rules by sprite name: smoothness, F0, metal and its texel mask, porosity, subsurface, emission mask, relief strength) with the maps derived from whatever texture is loaded, so they follow any resource pack. Normal maps (DirectX Y, AO into the albedo), parallax occlusion from a pack's height channel (primary rays, a quarter block deep), thin subsurface transmission past the surface's own block. Entities have no textures in the RT scene (one colour per face), so no entity materials |
 | Block lights (shapes, power) | mod light/BlockLightDefaults, LightManager | RtLights, lights.glsl | torch matches (radiance 1575, r 0.08 -> 31.7 per unit colour); other shapes not compared |
 | View distance fade | rtx.viewDistance.* | rt_pt_resolve sky fade | to compare |
 
-## Materials pack
+## Weather
 
-    python3 tools/remix_materials.py RTX-Remix-Materials-<version>.zip "run/client/resourcepacks/RTX Remix Materials 1.12"
+Rain and thunder as Remix's overcast dome (SkyRenderer.weatherDomeState): opacity rain (1 in
+thunder), radiance the dome's mean (0.239, 0.269, 0.311) times (30 x sun fade + 0.06 x moon
+fade) / 10, at least 0.02 in rain, 0.8 x in thunder; it covers the atmosphere and the sun and
+moon by its opacity, and the sky ambient blends towards it. The dome's opacity and the thunder
+strength travel in the atmosphere's source constant above 4096 (RtLighting.skySource, atmDecode).
+Remix's dome is a texture (overcast_thunderstorm_bc6u.dds) not in the mod's repository; Vesu's is
+uniform at its mean.
 
-then enable it in Options > Resource Packs. The pack is CC BY 4.0 (NVIDIA); the converter keeps its
-LICENSE.txt and README.txt.
+## Materials
+
+`src/main/resources/assets/vesu/materials.json`: first matching rule per sprite path (e.g.
+`blocks/stone`, `items/iron_ingot`); fields documented in RtMaterialRules. A resource pack can
+replace the file or ship its own `_s`/`_n` maps, which take precedence per texture.

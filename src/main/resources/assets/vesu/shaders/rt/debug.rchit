@@ -52,6 +52,46 @@ void main() {
         float slope = max(abs(dot(gn, gl_WorldRayDirectionEXT)), 0.3);
         lod = max(log2(payload.cone * gl_HitTEXT * 16.0 / slope), 0.0);
     }
+    // Parallax occlusion (primary rays) for a normal map with a height channel (LabPBR alpha,
+    // 255 = the surface, lower = deeper, at most a quarter block): the view ray marched through
+    // the height field in the face's tangent frame, kept inside the face's sprite.
+    if (payload.cone > 0.0 && textureLod(normalAtlas, uv, lod).a < 0.998) {
+        vec3 e1 = b.pos - a.pos, e2 = c.pos - a.pos;
+        vec2 d1 = b.uv - a.uv, d2 = c.uv - a.uv;
+        float det = d1.x * d2.y - d1.y * d2.x;
+        vec3 gn = cross(e1, e2);
+        if (abs(det) > 1e-12 && dot(gn, gn) > 1e-20) {
+            gn = normalize(gn);
+            if (dot(gn, gl_WorldRayDirectionEXT) > 0.0) gn = -gn;
+            vec3 t = (e1 * d2.y - e2 * d1.y) / det;     // world per unit u
+            vec3 bt = (e2 * d1.x - e1 * d2.x) / det;    // world per unit v
+            vec3 v = -gl_WorldRayDirectionEXT;
+            float vn = max(dot(v, gn), 0.15);
+            // World offset per unit depth along the surface, in texture units.
+            vec2 slope = vec2(dot(v, t) / dot(t, t), dot(v, bt) / dot(bt, bt)) / vn;
+            const float DEPTH = 0.25;
+            const int STEPS = 16;
+            vec2 lo = min(a.uv, min(b.uv, c.uv)), hi = max(a.uv, max(b.uv, c.uv));
+            vec2 half_ = 0.5 / vec2(textureSize(normalAtlas, 0));
+            vec2 hitUv = uv;
+            float prevDepth = 0.0, prevGap = 0.0;
+            for (int i = 0; i <= STEPS; i++) {
+                float depth = float(i) / float(STEPS);
+                vec2 q = clamp(uv - slope * (depth * DEPTH), lo + half_, hi - half_);
+                float gap = (1.0 - textureLod(normalAtlas, q, lod).a) - depth;
+                if (gap <= 0.0) {
+                    float f = i == 0 ? 0.0 : prevGap / max(prevGap - gap, 1e-6);
+                    float hitDepth = mix(prevDepth, depth, f);
+                    hitUv = clamp(uv - slope * (hitDepth * DEPTH), lo + half_, hi - half_);
+                    break;
+                }
+                prevDepth = depth;
+                prevGap = gap;
+                hitUv = q;
+            }
+            uv = hitUv;
+        }
+    }
     vec3 albedo = textureLod(blockAtlas, uv, lod).rgb * tint.rgb;
     vec4 nmap = textureLod(normalAtlas, uv, lod);
     albedo *= nmap.b;   // LabPBR ambient occlusion, into the albedo as RTX Remix for Minecraft bakes it
