@@ -59,6 +59,17 @@ Vibrant Visuals brings the Bedrock-style atmosphere.
 Vesu builds simplified terrain and draws it past the vanilla render distance - up to
 2048 chunks. Shader packs are compatible.
 
+## Weather and clouds
+
+- **Particle precipitation** (Quality -> Precipitation -> Particle): rain and snow fall as real
+  particles pushed by gusting wind; drops splash, ripple on water and run down walls, storms
+  turn heavy, and dust, sandstorms, tumbleweeds and mist after rain appear in matching biomes.
+  Behaves like the Particle Rain mod (an independent reimplementation).
+- **Better clouds** (Quality -> Clouds -> Better): soft volumetric-looking clusters of
+  translucent cubes that drift, morph and catch sunrise and sunset colours, out to the
+  distant-terrain horizon. Behaves like the Better Clouds mod (an independent reimplementation).
+  Works with distant terrain, shader packs (in place of their vanilla-style clouds) and ray tracing.
+
 ## Performance
 
 Intel UHD 620, 1600x900, render distance 12
