@@ -15,12 +15,15 @@ public abstract class Option {
 
     /** Shown under the tooltip, as in Sodium. */
     public enum Impact {
-        LOW("Low"), MEDIUM("Medium"), HIGH("High"), VARIES("Varies");
+        LOW("Low", "\u00a7a"), MEDIUM("Medium", "\u00a7e"), HIGH("High", "\u00a7c"), VARIES("Varies", "\u00a7b");
 
         public final String label;
+        /** Formatting code the level is drawn in: green, yellow, red, aqua. */
+        public final String color;
 
-        Impact(String label) {
+        Impact(String label, String color) {
             this.label = label;
+            this.color = color;
         }
     }
 

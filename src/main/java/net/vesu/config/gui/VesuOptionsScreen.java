@@ -378,7 +378,7 @@ public class VesuOptionsScreen extends GuiScreen {
                 colors.add(TEXT);
             }
         }
-        this.addNote(lines, colors, option.impact() != null ? "Performance Impact: " + option.impact().label.toUpperCase(Locale.ROOT) : null, TEXT_MUTED, textWidth);
+        this.addNote(lines, colors, option.impact() != null ? "Performance Impact: " + option.impact().color + option.impact().label.toUpperCase(Locale.ROOT) : null, TEXT_MUTED, textWidth);
         this.addNote(lines, colors, option.needsRestart() ? "Takes effect after a restart." : null, TEXT_RESTART, textWidth);
         this.addNote(lines, colors, !option.available() ? option.unavailableReason() : null, TEXT_UNAVAILABLE, textWidth);
         if (lines.isEmpty()) return;
