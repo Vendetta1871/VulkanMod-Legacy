@@ -26,7 +26,7 @@ render distance.
   <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/rt-off.jpg" width="49%" alt="Ray tracing off"/>
   <img src="https://raw.githubusercontent.com/Vendetta1871/vulkanmod-legacy/master/docs/images/rt-on.jpg" width="49%" alt="Ray tracing on"/>
 </p>
-<p align="center"><sub><b>Left:</b> ray tracing off. <b>Right:</b> ray tracing on, 32-chunk effect range.</sub></p>
+<p align="center"><sub><b>Left:</b> ray tracing off. <b>Right:</b> path tracing with Ray Reconstruction, light through stained glass.</sub></p>
 
 ## Shader packs
 
