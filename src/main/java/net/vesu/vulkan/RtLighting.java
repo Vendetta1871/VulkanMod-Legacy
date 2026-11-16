@@ -30,7 +30,7 @@ final class RtLighting {
     private static final float SUN_LUMINANCE = 30.0f, MOON_LUMINANCE = 0.06f;
     private static final float RAIN_SUN = 0.075f, THUNDER_SUN = 0.03f;
     private static final float RAIN_MOON = 0.0225f, THUNDER_MOON = 0.0375f;
-    /** Overcast sky radiance (physical) that replaces the clear sky in rain. */
+    /** Mean radiance of Remix's overcast dome texture (SkyRenderer.OVERCAST_MEAN_*), per unit intensity. */
     private static final float[] OVERCAST = {0.2393801f, 0.26890025f, 0.31064802f};
 
     /**
@@ -72,21 +72,56 @@ final class RtLighting {
 
     /**
      * The sun's source radiance times the atmosphere's scattering scale (16 by day, 70 at night,
-     * so the moonlit sky stays visible), scene units: the atmosphere.glsl source parameter.
+     * so the moonlit sky stays visible), scene units. Weather does not dim the atmosphere: as in
+     * RTX Remix for Minecraft, an overcast dome covers it ({@link #skySource}).
      */
-    static float skySource(float[] sun) {
+    private static float atmosphereSource(float[] sun) {
         float night = 1.0f - smoothstep(-0.15f, 0.05f, sun[1]);
         float scale = 16.0f * (1.0f - night) + 70.0f * night;
-        return SUN_LUMINANCE * scale * SCENE_SCALE * (1.0f - 0.85f * rainStrength());
+        return SUN_LUMINANCE * scale * SCENE_SCALE;
+    }
+
+    /**
+     * The atmosphere.glsl source parameter: {@link #atmosphereSource} below 4096, plus the weather
+     * dome's opacity and the thunder strength in 16 steps each above it (atmDecode), so every
+     * pass that draws the sky gets the overcast dome without another constant.
+     */
+    static float skySource(float[] sun) {
+        float source = Math.min(atmosphereSource(sun), 4095.0f);
+        int opacity = Math.round(weatherOpacity() * 15.0f), thunder = Math.round(thunderStrength() * 15.0f);
+        return source + 4096.0f * (opacity * 16 + thunder);
+    }
+
+    /** Opacity of the overcast dome (Remix SkyRenderer.weatherDomeState): rain, 1 in thunder. */
+    static float weatherOpacity() {
+        return lerp(rainStrength(), 1.0f, thunderStrength());
+    }
+
+    /**
+     * Radiance factor of the overcast dome (Remix weatherDomeState), physical: the sun's and
+     * moon's source luminance over their horizon fade / 10, at least 0.02 in rain, 0.8 x that in
+     * thunder. The dome's radiance is {@link #OVERCAST} times it.
+     */
+    static float weatherIntensity(float[] sun) {
+        float celestial = (SUN_LUMINANCE * celestialVisibility(sun[1]) + MOON_LUMINANCE * celestialVisibility(-sun[1])) / 10.0f;
+        float rain = rainStrength(), thunder = thunderStrength();
+        float opacity = weatherOpacity();
+        float premultiplied = lerp(rain * Math.max(celestial, 0.02f), celestial * 0.8f, thunder);
+        return opacity > 0.0f ? premultiplied / opacity : 0.0f;
+    }
+
+    /** Remix LightManager.celestialVisibility: fade of a body 0.15 below to 0.05 above the horizon. */
+    private static float celestialVisibility(float height) {
+        return smoothstep(-0.15f, 0.05f, height);
     }
 
     /**
      * Mean single-scattered radiance of the upper sky (the multiple-scattering term of
-     * atmosphere.glsl), scene units, from the same model on 32 directions; w: the rain blend.
-     * In rain the overcast radiance replaces the clear sky.
+     * atmosphere.glsl), scene units, from the same model on 32 directions, blended towards the
+     * overcast dome's mean by its opacity (Remix publishCombinedSkyAmbient); w: the opacity.
      */
     static float[] skyMean(float[] sun) {
-        float source = skySource(sun);
+        float source = atmosphereSource(sun);
         float[] sum = new float[3];
         for (int i = 0; i < 32; i++) {
             double u = ((i % 8) * 32 + 0.5) / 256.0, v = ((i / 8) * 16 + 0.5) / 128.0;
@@ -95,9 +130,9 @@ final class RtLighting {
             float[] s = Atmosphere.single(d, new double[]{sun[0], sun[1], sun[2]}, source);
             for (int c = 0; c < 3; c++) sum[c] += s[c] / 32.0f;
         }
-        float rain = rainStrength();
-        for (int c = 0; c < 3; c++) sum[c] = lerp(sum[c], OVERCAST[c] * SCENE_SCALE, rain);
-        return new float[]{sum[0], sum[1], sum[2], rain};
+        float opacity = weatherOpacity(), intensity = weatherIntensity(sun);
+        for (int c = 0; c < 3; c++) sum[c] = lerp(sum[c], OVERCAST[c] * intensity * SCENE_SCALE, opacity);
+        return new float[]{sum[0], sum[1], sum[2], opacity};
     }
 
     private static float lerp(float a, float b, float t) { return a + (b - a) * t; }

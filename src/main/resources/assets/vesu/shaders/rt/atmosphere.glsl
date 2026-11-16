@@ -89,16 +89,50 @@ vec3 atmSingle(vec3 dir, vec3 sunDir, float source, out vec3 viewT) {
     return (sun + moon) * source;
 }
 
+// Mean radiance of RTX Remix for Minecraft's overcast dome per unit intensity (SkyRenderer).
+const vec3 ATM_OVERCAST = vec3(0.2393801, 0.26890025, 0.31064802);
+
+// The source parameter carries the weather above 4096 (RtLighting.skySource): the overcast
+// dome's opacity and the thunder strength, 16 steps each. Returns the atmosphere's source.
+float atmDecode(float source, out float opacity, out float thunder) {
+    float code = floor(source / 4096.0);
+    opacity = floor(code / 16.0) / 15.0;
+    thunder = mod(code, 16.0) / 15.0;
+    return source - code * 4096.0;
+}
+
+float atmCelestial(float height) {
+    float t = clamp((height + 0.15) / 0.2, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// Radiance of the overcast dome (Remix weatherDomeState, scene units = physical x 0.1): the sun's
+// and moon's source luminance (30, 0.06) over their horizon fade / 10, at least 0.02 in rain,
+// 0.8 x that in thunder.
+vec3 atmOvercast(vec3 sunDir, float opacity, float thunder) {
+    float celestial = (30.0 * atmCelestial(sunDir.y) + 0.06 * atmCelestial(-sunDir.y)) / 10.0;
+    float rain = thunder < 1.0 ? clamp((opacity - thunder) / (1.0 - thunder), 0.0, 1.0) : 1.0;
+    float pre = mix(rain * max(celestial, 0.02), celestial * 0.8, thunder);
+    return ATM_OVERCAST * (opacity > 0.0 ? pre / opacity : 0.0) * 0.1;
+}
+
 // Sky radiance seen along dir (world axes, y up). sunDir: towards the sun (may be below the
-// horizon); source: the sun's source radiance times the scattering scale; upperMean: the mean
-// single scattering of the upper hemisphere.
+// horizon); source: the sun's source radiance times the scattering scale, with the weather
+// encoded above it (atmDecode); upperMean: the mean single scattering of the upper hemisphere.
+// In rain the overcast dome covers the atmosphere by its opacity, as Remix composites it.
 vec3 atmosphere(vec3 dir, vec3 sunDir, float source, vec3 upperMean) {
+    float opacity, thunder;
+    source = atmDecode(source, opacity, thunder);
     float below = clamp(-dir.y, 0.0, 1.0);
     vec3 d = dir;
     if (d.y < 0.0) d = normalize(vec3(dir.x, 0.0, dir.z) + vec3(1e-5, 0.0, 0.0));
-    vec3 viewT;
-    vec3 single = atmSingle(d, sunDir, source, viewT);
-    vec3 radiance = max(single + upperMean * (1.0 - viewT) * ATM_MULTIPLE, vec3(0.0));
+    vec3 radiance = vec3(0.0);
+    if (opacity < 1.0) {
+        vec3 viewT;
+        vec3 single = atmSingle(d, sunDir, source, viewT);
+        radiance = max(single + upperMean * (1.0 - viewT) * ATM_MULTIPLE, vec3(0.0));
+    }
+    if (opacity > 0.0) radiance = mix(radiance, atmOvercast(sunDir, opacity, thunder), opacity);
     if (dir.y < 0.0) radiance *= mix(0.9, 0.3, asin(below) / (0.5 * ATM_PI));
     return radiance;
 }

@@ -72,6 +72,10 @@ vec4 traceClouds(vec3 dir, float maxT) {
 
 vec3 skyRadiance(vec3 dir) {
     vec3 sky = atmosphere(dir, pc.sun.xyz, pc.sun.w, pc.skyMean.rgb);
+    // The overcast dome hides the sun and moon by its opacity (Remix renderCelestialMeshes).
+    float opacity, thunder;
+    atmDecode(pc.sun.w, opacity, thunder);
+    float clear = 1.0 - opacity;
     // Sun and moon: the vanilla sprites' bright cores as emitters (radiance 8 and 0.2 in Remix,
     // here with the atmosphere's transmittance), squares 8.5 and 5.7 degrees across.
     vec3 s = normalize(pc.sun.xyz);
@@ -80,10 +84,10 @@ vec3 skyRadiance(vec3 dir) {
     float cs = dot(dir, s);
     if (cs > 0.0) {
         vec2 q = abs(vec2(dot(dir, a), dot(dir, b))) / cs;
-        if (max(q.x, q.y) < 0.075) sky += 0.8 * atmViewTransmittance(s) * smoothstep(0.075, 0.06, max(q.x, q.y));
+        if (max(q.x, q.y) < 0.075) sky += clear * 0.8 * atmViewTransmittance(s) * smoothstep(0.075, 0.06, max(q.x, q.y));
     } else {
         vec2 q = abs(vec2(dot(dir, a), dot(dir, b))) / -cs;
-        if (max(q.x, q.y) < 0.05) sky += vec3(0.02) * smoothstep(0.05, 0.04, max(q.x, q.y));
+        if (max(q.x, q.y) < 0.05) sky += clear * vec3(0.02) * smoothstep(0.05, 0.04, max(q.x, q.y));
     }
     return sky;
 }
