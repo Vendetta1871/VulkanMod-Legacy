@@ -18,9 +18,9 @@ import java.util.Map;
 /**
  * Material atlas for the RT passes: the block atlas layout with LabPBR specular data per
  * texel (R: perceptual smoothness, G: F0 reflectance, 230..255 = metal, B: porosity/SSS,
- * A: emission 0..254, 255 = none): a resource pack's {@code <texture>_s.png}, which the mod's own
- * assets provide for some blocks (RTX Remix for Minecraft's baseline maps under 1.12 names),
- * otherwise Remix's default material. Rebuilt after every atlas stitch.
+ * A: emission 0..254, 255 = none) and LabPBR normals: a resource pack's {@code <texture>_s.png}
+ * / {@code _n.png}, otherwise derived from Vesu's material rules ({@link RtMaterialRules}),
+ * otherwise Remix's default material and a flat normal. Rebuilt after every atlas stitch.
  */
 public final class RtMaterials {
 
@@ -46,7 +46,6 @@ public final class RtMaterials {
     private static java.util.concurrent.Future<java.util.List<Rect>> pending;
     private static VulkanImage pendingFor;
 
-    /** One sprite's material texels, tightly packed RGBA8. */
     /** One sprite's material texels and its LabPBR normal texels ({@code _n}), tightly packed RGBA8. */
     private record Rect(int x, int y, int w, int h, ByteBuffer pixels, ByteBuffer normals) {}
 
@@ -114,13 +113,41 @@ public final class RtMaterials {
     private static java.util.List<Rect> gather(java.util.List<Sprite> layout) {
         Minecraft mc = Minecraft.getMinecraft();
         java.util.List<Rect> rects = new java.util.ArrayList<>();
+        java.util.List<RtMaterialRules.Rule> rules = RtMaterialRules.load(mc);
         try {
             for (Sprite s : layout) {
                 ByteBuffer px = MemoryUtil.memCalloc(s.w * s.h * 4);
                 ByteBuffer nx = MemoryUtil.memCalloc(s.w * s.h * 4);
-                if (!fromPack(mc, s.name, "_s", px, s.w, s.h)) fromDefaults(px, s.w, s.h);
-                if (!fromPack(mc, s.name, "_n", nx, s.w, s.h)) flatNormals(nx, s.w, s.h);
                 rects.add(new Rect(s.x, s.y, s.w, s.h, px, nx));
+                boolean spec = fromPack(mc, s.name, "_s", px, s.w, s.h);
+                boolean normals = fromPack(mc, s.name, "_n", nx, s.w, s.h);
+                if (spec && normals) continue;
+                // A map the resources lack: derived from Vesu's material rules and the texture.
+                RtMaterialRules.Rule rule = RtMaterialRules.find(rules, new ResourceLocation(s.name).getPath());
+                ByteBuffer albedo = rule != null ? MemoryUtil.memCalloc(s.w * s.h * 4) : null;
+                if (albedo != null && fromPack(mc, s.name, "", albedo, s.w, s.h)) {
+                    ByteBuffer stone = null;
+                    if ("ore".equals(rule.metalMask)) {
+                        stone = MemoryUtil.memCalloc(s.w * s.h * 4);
+                        if (!fromPack(mc, "minecraft:blocks/stone", "", stone, s.w, s.h)) {
+                            MemoryUtil.memFree(stone);
+                            stone = null;
+                        }
+                    }
+                    ByteBuffer dspec = MemoryUtil.memCalloc(s.w * s.h * 4);
+                    ByteBuffer dnrm = MemoryUtil.memCalloc(s.w * s.h * 4);
+                    RtMaterialRules.derive(rule, albedo, stone, s.w, s.h,
+                            (DEFAULT_SMOOTHNESS & 0xFF) / 255.0f, dspec, dnrm);
+                    if (!spec) MemoryUtil.memCopy(dspec, px);
+                    if (!normals) MemoryUtil.memCopy(dnrm, nx);
+                    MemoryUtil.memFree(dspec);
+                    MemoryUtil.memFree(dnrm);
+                    if (stone != null) MemoryUtil.memFree(stone);
+                } else {
+                    if (!spec) fromDefaults(px, s.w, s.h);
+                    if (!normals) flatNormals(nx, s.w, s.h);
+                }
+                if (albedo != null) MemoryUtil.memFree(albedo);
             }
         } catch (RuntimeException | LinkageError e) {
             freeAll(rects);
@@ -197,7 +224,6 @@ public final class RtMaterials {
         }
     }
 
-    /** Copies {@code <texture>_s.png} (nearest-scaled to the sprite, first animation frame). */
     /** Copies {@code <texture><suffix>.png} (nearest-scaled to the sprite, first animation frame). */
     private static boolean fromPack(Minecraft mc, String iconName, String suffix, ByteBuffer out, int sw, int sh) {
         ResourceLocation name = new ResourceLocation(iconName);
