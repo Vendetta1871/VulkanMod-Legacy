@@ -513,7 +513,13 @@ vec3 shadeOpaque(ivec2 p, vec3 hitPos, vec3 dir, float dist, ivec2 prevPixel, bo
             // Thin translucent surfaces (leaves): RTX Remix's thin-opaque subsurface, light passing
             // through from behind as a diffuse transmission lobe tinted by the albedo (the mod's
             // single-scattering fallback), its strength the LabPBR subsurface amount.
-            vec3 vis = traceShadow(hitPos - payload.normal * (0.02 + 0.002 * dist), l, 512.0, 0x0Fu);
+            // The ray starts where it leaves the surface's own block: a leaf block's far face
+            // would otherwise shadow every face of it (the light crosses one thin layer).
+            vec3 inside = hitPos - payload.normal * 0.01;
+            vec3 cellMin = floor(inside + pc.cam.xyz) - pc.cam.xyz;
+            vec3 tExit = max((cellMin + step(0.0, l) - inside) / (abs(l) + 1e-6) * sign(l + 1e-9), vec3(0.0));
+            float leave = min(tExit.x, min(tExit.y, tExit.z));
+            vec3 vis = traceShadow(inside + l * (leave + 0.01), l, 512.0, 0x0Fu);
             radiance += pc.ddgiFlags.yzw * vis * s.diffuse * (sss * -dot(n, l) / PI);
         }
     }
